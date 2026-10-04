@@ -217,8 +217,18 @@ static void rt_free(rt_entry *t) {
     memset(t, 0, sizeof *t);
 }
 
-/* Copy rows [y0, y1) of the target into emulated VRAM. */
+/* Readbacks by what caused them (d3d11_report): 0 relayout, 1 evict,
+ * 2 grow, 3 texture, 4 overlap, 5 sync. The caller sets g_rb_reason. */
+static uint64_t n_rb_reason[6];
+static int g_rb_reason;
+static void rt_readback_inner(rt_entry *t);
 static void rt_readback(rt_entry *t) {
+    if (t->dirty) n_rb_reason[g_rb_reason]++;
+    rt_readback_inner(t);
+}
+
+/* Copy rows [y0, y1) of the target into emulated VRAM. */
+static void rt_readback_inner(rt_entry *t) {
     if (!t->dirty) return;
     uint8_t *v = vram();
     uint32_t y0 = t->dy0, y1 = t->dy1 > t->h ? t->h : t->dy1;
@@ -293,13 +303,13 @@ static rt_entry *rt_find(uint32_t off) {
 
 static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
     rt_entry *t = rt_find(off);
-    if (t && (t->stride != stride || t->fmt != fmt)) { rt_readback(t); rt_free(t); t = NULL; }
+    if (t && (t->stride != stride || t->fmt != fmt)) { g_rb_reason = 0; rt_readback(t); rt_free(t); t = NULL; }
     if (!t) {
         for (int i = 0; i < MAX_RT && !t; i++) if (!g_rt[i].used) t = &g_rt[i];
         if (!t) {                                       /* evict the least recently used */
             t = &g_rt[0];
             for (int i = 1; i < MAX_RT; i++) if (g_rt[i].last_use < t->last_use) t = &g_rt[i];
-            rt_readback(t);
+            g_rb_reason = 1; rt_readback(t);
             rt_free(t);
         }
         t->off = off; t->stride = stride; t->fmt = fmt;
@@ -321,7 +331,7 @@ static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
         t->check_frame = frame_no();
     }
     if (rows > t->rows) {                               /* drawing further down than seeded */
-        if (t->dirty) rt_readback(t);
+        if (t->dirty) { g_rb_reason = 2; rt_readback(t); }
         t->rows = rows;
         rt_upload(t);
     }
@@ -564,7 +574,7 @@ static ID3D11ShaderResourceView *texture_view(const psp_gpu_state *st, rt_entry 
                 return g_scratch_srv;
             }
             /* Read in another shape: make VRAM current and decode normally. */
-            rt_readback(t);
+            g_rb_reason = 3; rt_readback(t);
         }
     }
     tex_entry *e = tex_get(st);
@@ -594,7 +604,7 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
         for (int i = 0; i < MAX_RT; i++) {
             rt_entry *o = &g_rt[i];
             if (!o->used || o == t || !overlaps(t0, t1, o->off, rt_end(o))) continue;
-            if (o->dirty) { rt_readback(o); flushed = 1; }
+            if (o->dirty) { g_rb_reason = 4; rt_readback(o); flushed = 1; }
             o->check_frame = (uint64_t)-1;
         }
         if (flushed && !t->dirty) t->check_frame = (uint64_t)-1;
@@ -692,7 +702,7 @@ static void d3d_sync_vram(uint32_t addr, uint32_t bytes) {
     uint32_t a0 = vram_off(addr), a1 = a0 + bytes;
     for (int i = 0; i < MAX_RT; i++)
         if (g_rt[i].used && g_rt[i].dirty && overlaps(a0, a1, g_rt[i].off, rt_end(&g_rt[i])))
-            rt_readback(&g_rt[i]);
+            { g_rb_reason = 5; rt_readback(&g_rt[i]); }
 }
 
 static void d3d_vram_written(uint32_t addr, uint32_t bytes) {
@@ -759,6 +769,9 @@ void d3d11_report(FILE *out) {
             (unsigned long long)n_draws, (unsigned long long)n_tris, (unsigned long long)n_uploads,
             (unsigned long long)n_readbacks, (unsigned long long)n_tex_decodes,
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx);
+    fprintf(out, "  d3d11 readbacks by cause: relayout %llu, evict %llu, grow %llu, texture %llu, overlap %llu, sync %llu\n",
+            (unsigned long long)n_rb_reason[0], (unsigned long long)n_rb_reason[1], (unsigned long long)n_rb_reason[2],
+            (unsigned long long)n_rb_reason[3], (unsigned long long)n_rb_reason[4], (unsigned long long)n_rb_reason[5]);
 }
 
 #endif

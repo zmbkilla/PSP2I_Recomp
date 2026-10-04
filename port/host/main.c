@@ -23,7 +23,13 @@
  *   --headless  no window
  *   --seconds   stop after N seconds of game time and print the report
  *   --capture-every / --capture-dir  dump the framebuffer as PPM every N vblanks
- *   --fps 30|60  frame rate through the game's own frame-rate API (framerate.c)
+ *   --fps 30|60  initial frame rate through the game's own frame-rate API
+ *               (framerate.c); changeable at run time in the settings menu
+ *   --menu-key F1..F9|F11  the keyboard key that opens/closes the settings
+ *               menu (default F1; the controller's Guide or R3 also do)
+ *   --show-fps / --hide-fps  the measured-FPS counter at start (default shown)
+ *   --overlay-shot VBLANK  (repeatable) save the presented image, overlay
+ *               included, as <capture-dir>/overlay_<vblank>.ppm
  *   --audio / --no-audio  sound through SDL3.dll (audio_sdl.c): on by default
  *               with a window, off headless; PSP2I_AUDIO_DUMP=file.wav records
  *   --sdl / --no-sdl  controllers through SDL3.dll (input_sdl.c): on by default
@@ -49,6 +55,7 @@
 #include "audio_sdl.h"
 #include "atrac_ffmpeg.h"
 #include "framerate.h"
+#include "menu.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -224,9 +231,32 @@ static int grab_frame(void) {
 static void ctrl_commit(void);
 static int g_dump_key;                     /* F12 pressed: capture on the next vblank */
 
+/* The settings menu and the FPS counter (menu.c), drawn over the presented
+ * image -- the same for either renderer, and never in the game's VRAM, so
+ * F12 dumps and --capture-every frames stay the game's own. */
+static menu_state g_menu;
+static fps_meter  g_fpsm;
+static uint32_t   g_host_held, g_host_latched;  /* MI_* from keys the game never sees */
+static uint32_t   g_keys_latched;          /* PSP bits of keys pressed since the last vblank */
+static char       g_menu_key_name[8] = "F1";
+
+static void draw_overlay(void) {
+    menu_image img = { g_rgba, SCREEN_W, SCREEN_H };
+    if (g_menu.show_fps) fps_draw(&g_fpsm, &img);
+    menu_draw(&g_menu, &img, framerate_game_fps(), g_menu_key_name);
+}
+
 #ifdef _WIN32
 static HWND g_wnd;
 static uint32_t g_keys;
+static WPARAM g_menu_vk = VK_F1;
+
+/* Keys for the menu only: the hotkey, and Escape/Backspace as Back. */
+static uint32_t host_key(WPARAM vk) {
+    if (vk == g_menu_vk) return MI_TOGGLE;
+    if (vk == VK_ESCAPE || vk == VK_BACK) return MI_BACK;
+    return 0;
+}
 
 static uint32_t key_bit(WPARAM vk) {
     switch (vk) {
@@ -248,10 +278,15 @@ static uint32_t key_bit(WPARAM vk) {
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_KEYDOWN:
-        if (wp == VK_F12 && !(lp & (1 << 30))) g_dump_key = 1;   /* not on auto-repeat */
+    case WM_KEYDOWN: {
+        const int first = !(lp & (1 << 30));                     /* not an auto-repeat */
+        if (wp == VK_F12 && first) g_dump_key = 1;
+        const uint32_t hk = host_key(wp);
+        if (hk) { g_host_held |= hk; if (first) g_host_latched |= hk; return 0; }
+        if (first) g_keys_latched |= key_bit(wp);
         g_keys |= key_bit(wp);  ctrl_commit(); return 0;
-    case WM_KEYUP:   g_keys &= ~key_bit(wp); ctrl_commit(); return 0;
+    }
+    case WM_KEYUP:   g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); ctrl_commit(); return 0;
     case WM_CLOSE:   psp_request_exit(); return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -302,6 +337,9 @@ static int      g_headless;
 static double   g_seconds;
 static uint32_t g_capture_every;
 static char     g_capture_dir[512] = "captures";
+#define MAX_OVERLAY_SHOT 16
+static uint64_t g_overlay_shot[MAX_OVERLAY_SHOT];   /* --overlay-shot */
+static int      g_noverlay_shot;
 
 /* Scripted input for headless runs: --press BUTTON@VBLANK[+FRAMES] holds a
  * button from that vblank for FRAMES vblanks (default 6). Repeatable. */
@@ -309,12 +347,14 @@ static char     g_capture_dir[512] = "captures";
 static struct { uint32_t bits; uint64_t at, len; } g_press[MAX_PRESS];
 static int g_npress;
 static uint32_t g_script_bits;
+#define PRESS_MENU 0x80000000u             /* --press menu@...: the settings-menu hotkey, never the game's */
 
 static int add_press(const char *spec) {
     static const struct { const char *name; uint32_t bit; } B[] = {
         { "select", 0x0001 }, { "start", 0x0008 }, { "up", 0x0010 }, { "right", 0x0020 },
         { "down", 0x0040 }, { "left", 0x0080 }, { "l", 0x0100 }, { "r", 0x0200 },
         { "triangle", 0x1000 }, { "circle", 0x2000 }, { "cross", 0x4000 }, { "square", 0x8000 },
+        { "menu", PRESS_MENU },
     };
     char name[32];
     unsigned long long at = 0, len = 6;
@@ -414,7 +454,51 @@ static void ctrl_commit(void) {
 #endif
     uint8_t ax = g_pad_ax, ay = g_pad_ay;
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
+    /* The settings menu takes all input while open (menu_filter_game). */
+    bits = menu_filter_game(&g_menu, bits & ~PRESS_MENU);
+    if (g_menu.open) ax = ay = 128;
     psp_ctrl_set(bits, ax, ay);
+}
+
+/* PSP-style buttons as menu inputs: D-pad (or the stick past half way) to
+ * move, Cross or Start to change, Circle to go back. */
+static uint32_t menu_inputs(uint32_t psp, uint8_t ax, uint8_t ay) {
+    uint32_t m = 0;
+    if ((psp & 0x0010) || ay < 64)  m |= MI_UP;
+    if ((psp & 0x0040) || ay > 192) m |= MI_DOWN;
+    if ((psp & 0x0080) || ax < 64)  m |= MI_LEFT;
+    if ((psp & 0x0020) || ax > 192) m |= MI_RIGHT;
+    if (psp & (0x4000 | 0x0008))    m |= MI_CONFIRM;
+    if (psp & 0x2000)               m |= MI_BACK;
+    if (psp & PRESS_MENU)           m |= MI_TOGGLE;
+    return m;
+}
+
+/* Once per vblank: the menu reads the raw input (the game's is filtered). */
+static void menu_step(void) {
+    uint32_t psp = g_script_bits | g_pad_bits, latched = g_host_latched;
+#ifdef _WIN32
+    psp |= g_keys;
+    latched |= menu_inputs(g_keys_latched, 128, 128);
+#endif
+    g_keys_latched = 0;
+    g_host_latched = 0;
+    uint8_t ax = g_pad_ax, ay = g_pad_ay;
+    if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
+    uint32_t held = menu_inputs(psp, ax, ay) | g_host_held;
+    if (input_sdl_host_buttons() & (INPUT_HOST_GUIDE | INPUT_HOST_RSTICK)) held |= MI_TOGGLE;
+
+    const int fx = menu_update(&g_menu, held, latched);
+    if (fx & MFX_FPS_CHANGED) {
+        framerate_set(g_menu.fps);
+        fprintf(stderr, "menu: frame rate %d fps\n", g_menu.fps);
+    }
+    if (fx & MFX_SHOW_FPS) fprintf(stderr, "menu: FPS counter %s\n", g_menu.show_fps ? "on" : "off");
+    if (fx & (MFX_OPENED | MFX_CLOSED)) {
+        fprintf(stderr, "menu: %s at vblank %llu\n", (fx & MFX_OPENED) ? "opened" : "closed",
+                (unsigned long long)psp_sched_vblank_count());
+        ctrl_commit();                     /* take or give back the game's input now */
+    }
 }
 
 static void poll_controllers(void) {
@@ -443,7 +527,8 @@ static void sample_fps(uint64_t vb) {
         double fps = (double)(flips - g_fps_last_flips) * 1e6 / (double)(now - g_fps_last_us);
         g_fps_win[g_fps_n++] = fps;
         if (g_fps_log < 0) g_fps_log = getenv("PSP2I_FPS_LOG") != NULL;
-        if (g_fps_log) fprintf(stderr, "fps: %5.1f at vblank %llu\n", fps, (unsigned long long)vb);
+        if (g_fps_log) fprintf(stderr, "fps: %5.1f at vblank %llu (counter shows %.1f)\n", fps,
+                               (unsigned long long)vb, fps_meter_value(&g_fpsm));
     }
     g_fps_last_flips = flips;
     g_fps_last_us = now;
@@ -467,6 +552,11 @@ static void report_fps(void) {
         psp_display_flip_spacing(sp);
         fprintf(stderr, "  flip spacing        1 vblank: %llu, 2: %llu, 3: %llu, 4+: %llu\n",
                 (unsigned long long)sp[0], (unsigned long long)sp[1], (unsigned long long)sp[2], (unsigned long long)sp[3]);
+        uint64_t fb[6];
+        psp_display_frame_busy(fb);
+        fprintf(stderr, "  frame busy time     <8ms %llu, <16.7 %llu, <25 %llu, <33.3 %llu, <50 %llu, 50+ %llu\n",
+                (unsigned long long)fb[0], (unsigned long long)fb[1], (unsigned long long)fb[2],
+                (unsigned long long)fb[3], (unsigned long long)fb[4], (unsigned long long)fb[5]);
     }
     /* For PSP2I_GE_DUMP_FLIP / --watch-from-flip, which count flips. */
     fprintf(stderr, "  display flips       %llu at vblank %llu\n",
@@ -523,6 +613,8 @@ static void on_vblank(void) {
     }
     apply_script(vb);
     poll_controllers();
+    menu_step();
+    fps_meter_sample(&g_fpsm, psp_sched_now_us(), psp_display_flips());
     sample_fps(vb);
     {
         /* The displayed framebuffer is about to be read (window, captures):
@@ -536,7 +628,7 @@ static void on_vblank(void) {
     }
 #ifdef _WIN32
     if (!g_headless) {
-        if (grab_frame()) InvalidateRect(g_wnd, NULL, FALSE);
+        if (grab_frame()) { draw_overlay(); InvalidateRect(g_wnd, NULL, FALSE); }
         if ((vb % 30) == 0) {
             char title[160];
             snprintf(title, sizeof title, "PSP2i (recompiled) - vblank %llu, GE cmds %llu",
@@ -546,6 +638,22 @@ static void on_vblank(void) {
         window_pump();
     }
 #endif
+    for (int i = 0; i < g_noverlay_shot; i++) {
+        if (g_overlay_shot[i] != vb || !grab_frame()) continue;
+        draw_overlay();
+        char path[700];
+        snprintf(path, sizeof path, "%s/overlay_%06llu.ppm", g_capture_dir, (unsigned long long)vb);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fprintf(f, "P6\n%d %d\n255\n", SCREEN_W, SCREEN_H);
+            for (int k = 0; k < SCREEN_W * SCREEN_H; k++) {
+                const uint8_t rgb[3] = { (uint8_t)(g_rgba[k] >> 16), (uint8_t)(g_rgba[k] >> 8), (uint8_t)g_rgba[k] };
+                fwrite(rgb, 1, 3, f);
+            }
+            fclose(f);
+            fprintf(stderr, "overlay-shot: vblank %llu -> %s\n", (unsigned long long)vb, path);
+        }
+    }
     if (g_capture_every && vb % g_capture_every == 0) {
         char path[700];
         snprintf(path, sizeof path, "%s/frame_%06llu.ppm", g_capture_dir, (unsigned long long)vb);
@@ -771,6 +879,7 @@ int main(int argc, char **argv) {
     int want_sdl = -1;                     /* -1: default (with a window) */
     int want_audio = -1;
     int fps = 30;
+    int show_fps = 1;                      /* the FPS counter: shown unless --hide-fps */
     uint32_t dump_addr = 0, args_addr = 0;
     uint64_t args_flip = 0;
     const char *dump_path = NULL;
@@ -783,6 +892,20 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sdl"))                           want_sdl = 1;
         else if (!strcmp(argv[i], "--no-sdl"))                        want_sdl = 0;
         else if (!strcmp(argv[i], "--fps") && i + 1 < argc)           fps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--show-fps"))                      show_fps = 1;
+        else if (!strcmp(argv[i], "--hide-fps"))                      show_fps = 0;
+        else if (!strcmp(argv[i], "--overlay-shot") && i + 1 < argc && g_noverlay_shot < MAX_OVERLAY_SHOT)
+            g_overlay_shot[g_noverlay_shot++] = strtoull(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--menu-key") && i + 1 < argc) {
+            const char *k = argv[++i];
+            const int n = (k[0] == 'F' || k[0] == 'f') ? atoi(k + 1) : 0;
+            /* F10 is a system key (menu bar) and F12 takes dumps. */
+            if (n < 1 || n > 11 || n == 10) { fprintf(stderr, "bad --menu-key %s (want F1..F9 or F11)\n", k); return 1; }
+            snprintf(g_menu_key_name, sizeof g_menu_key_name, "F%d", n);
+#ifdef _WIN32
+            g_menu_vk = (WPARAM)(VK_F1 + n - 1);
+#endif
+        }
         else if (!strcmp(argv[i], "--audio"))                         want_audio = 1;
         else if (!strcmp(argv[i], "--no-audio"))                      want_audio = 0;
         else if (!strcmp(argv[i], "--log-floats") && i + 3 < argc) {
@@ -845,7 +968,7 @@ int main(int argc, char **argv) {
         snprintf(eboot, sizeof eboot, "%s/EBOOT.BIN", dir);
         if (!exists(eboot)) snprintf(eboot, sizeof eboot, "%s/disc/PSP_GAME/SYSDIR/EBOOT.BIN", root);
     }
-    if (g_capture_every) host_mkdir(g_capture_dir);
+    if (g_capture_every || g_noverlay_shot) host_mkdir(g_capture_dir);
     {
         char ms[700];
         snprintf(ms, sizeof ms, "%s/ms", root);          host_mkdir(ms);
@@ -898,8 +1021,10 @@ int main(int argc, char **argv) {
 #endif
     if (want_sdl == 1 || (want_sdl < 0 && !g_headless)) g_sdl_on = input_sdl_init() == 0;
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
-    atrac_ffmpeg_init(dir);
-    framerate_init(fps);           /* ATRAC music; silent if FFmpeg is absent */
+    atrac_ffmpeg_init(dir);        /* ATRAC music; silent if FFmpeg is absent */
+    menu_init(&g_menu, fps, show_fps);
+    fps_meter_init(&g_fpsm);
+    framerate_init(fps);
     psp_sched_set_vblank_hook(on_vblank);
 
     printf("starting module_start at 0x%08X\n", mi.entry);

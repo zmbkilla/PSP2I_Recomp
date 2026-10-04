@@ -17,4 +17,10 @@ void input_sdl_shutdown(void);
  * centre) of every connected device. Returns 0 if SDL is not active. */
 int  input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay);
 
+/* Controller buttons the game does not use, which the port does (the settings
+ * menu): the state as of the last input_sdl_poll. */
+#define INPUT_HOST_GUIDE  0x1u
+#define INPUT_HOST_RSTICK 0x2u
+uint32_t input_sdl_host_buttons(void);
+
 #endif /* PSP2I_INPUT_SDL_H */

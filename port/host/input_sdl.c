@@ -18,7 +18,8 @@
  *     Back -> Select     Start -> Start     left stick -> analog stick
  *
  * The right stick, stick clicks and Guide have no PSP equivalent and are left
- * unmapped. The analog stick uses a radial dead zone (PSP2I_DEADZONE, percent,
+ * unmapped for the game; Guide and the right-stick click (R3) open the port's
+ * settings menu (input_sdl_host_buttons). The analog stick uses a radial dead zone (PSP2I_DEADZONE, percent,
  * default 20) rescaled so the edge of the zone is centre, then 0..255.
  *
  * Joysticks SDL does not recognise as gamepads get hat 0 as the D-pad, axes
@@ -292,8 +293,13 @@ void input_sdl_shutdown(void) {
     g_active = 0;
 }
 
+static uint32_t g_host_bits;
+
+uint32_t input_sdl_host_buttons(void) { return g_host_bits; }
+
 int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
     *buttons = 0; *ax = 128; *ay = 128;
+    g_host_bits = 0;
     if (!g_active) return 0;
     S.UpdateGamepads();                    /* also detects added/removed devices */
     if (g_polls++ % 30 == 0) rescan();     /* twice a second is prompt enough */
@@ -315,6 +321,8 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
             };
             for (size_t k = 0; k < sizeof MAP / sizeof MAP[0]; k++)
                 if (S.GetGamepadButton(p, MAP[k].b)) bits |= MAP[k].bit;
+            if (S.GetGamepadButton(p, GB_GUIDE))   g_host_bits |= INPUT_HOST_GUIDE;
+            if (S.GetGamepadButton(p, GB_RSTICK))  g_host_bits |= INPUT_HOST_RSTICK;
             if (S.GetGamepadAxis(p, GA_LTRIGGER) > 16384) bits |= P_L;
             if (S.GetGamepadAxis(p, GA_RTRIGGER) > 16384) bits |= P_R;
             sx = S.GetGamepadAxis(p, GA_LEFTX);
@@ -373,4 +381,5 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
 int  input_sdl_init(void) { return -1; }
 void input_sdl_shutdown(void) {}
 int  input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) { *buttons = 0; *ax = *ay = 128; return 0; }
+uint32_t input_sdl_host_buttons(void) { return 0; }
 #endif

@@ -29,6 +29,7 @@ add_executable(psp2i
     host/audio_sdl.c
     host/atrac_ffmpeg.c
     host/framerate.c
+    host/menu.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
     gen/recomp_funcs.c
     gen/recomp_imports.c
@@ -57,6 +58,14 @@ if(EXISTS ${PSP2I_SDL3_DLL})
     add_custom_command(TARGET psp2i POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_SDL3_DLL} $<TARGET_FILE_DIR:psp2i>)
 endif()
+
+# Unit tests for the settings menu, the FPS counter and run-time frame-rate
+# switching (no game data needed): ctest -C Release, or run test_menu.
+enable_testing()
+add_executable(test_menu tests/test_menu.c host/menu.c host/framerate.c)
+target_include_directories(test_menu PRIVATE host)
+target_link_libraries(test_menu PRIVATE psprecomp)
+add_test(NAME test_menu COMMAND test_menu)
 
 if(PSP2I_TRACE)
     target_compile_definitions(psp2i PRIVATE PSPRECOMP_TRACE)

@@ -3,3 +3,4 @@
 # original runs unchanged.
 
 0x08B81890   # setFrameRate(fps): stores fps and derives dt, 30/fps, the vblank interval
+0x08B85AB0   # frame pacing (called by the main loop 0x08B86320 once per frame): applies a frame-rate change at run time
