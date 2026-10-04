@@ -219,6 +219,53 @@ static void hook_table_task(void (*original)(void)) {
     original();
 }
 
+/* ---- the party: who the host's client thinks is in it ---- */
+
+static void hook_zone_player(void (*original)(void)) {
+    const uint32_t pkt = psp_cpu.r[4];
+    logf_line("[party] session 0x0201: player id %u, session %u, flags +0x28=%d +0x29=%d", psp_read16(pkt + 36),
+              psp_read32(pkt + 16), (int8_t)psp_read8(pkt + 40), (int8_t)psp_read8(pkt + 41));
+    original();
+}
+
+static void hook_is_local(void (*original)(void)) {
+    const uint32_t pl = psp_cpu.r[4];
+    original();
+    static uint32_t last_pl, last_r = 0xFFFFFFFF;
+    if (pl != last_pl || psp_cpu.r[2] != last_r) {
+        last_pl = pl; last_r = psp_cpu.r[2];
+        logf_line("[party] player 0x%08X (+0x28 = %u) local? -> %d", pl, pl ? psp_read32(pl + 40) : 0, (int32_t)psp_cpu.r[2]);
+    }
+}
+
+static void hook_may_charainfo(void (*original)(void)) {
+    const uint32_t m = psp_cpu.r[4];
+    original();
+    logf_line("[party] chara-info allowed? +0x8FC=%d +0xB68=%d -> %d", (int32_t)psp_read32(m + 0x8FC), (int32_t)psp_read32(m + 0xB68), (int32_t)psp_cpu.r[2]);
+}
+
+static void hook_charainfo_req(void (*original)(void)) {
+    const uint32_t m = psp_cpu.r[4];
+    logf_line("[party] sendRoomMessageCharaInfoReq (me member %u, owner member %u)", psp_read16(m + 2224), psp_read16(m + 2226));
+    original();
+}
+
+static void hook_member_info(void (*original)(void)) {
+    const uint32_t m = psp_cpu.r[4], member = psp_cpu.r[5] & 0xFFFF;
+    original();
+    logf_line("[party] updateGameOfRoomMemberInfo(member %u) -> %d", member, (int32_t)psp_cpu.r[2]);
+}
+
+static void hook_issue_netid(void (*original)(void)) {
+    const uint32_t m = psp_cpu.r[4];
+    original();
+    logf_line("[party] issueNetId (me member %u, owner member %u) -> net id %d", psp_read16(m + 2224), psp_read16(m + 2226), (int32_t)psp_cpu.r[2]);
+    for (int i = 0; i < 12; i++) {
+        const uint32_t e = m + 0x2A0 + 136u * (uint32_t)i;
+        if (psp_read16(e + 0x34)) logf_line("[party]   member slot %d: used 0x%04X, net id %d", i, psp_read16(e + 0x34), (int32_t)psp_read32(e));
+    }
+}
+
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
 
 void gamelog_init(const char *exe_dir) {
@@ -228,5 +275,11 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(FN_ARC_FIND, hook_arc_find);
     psp_hook_set(FN_TABLE_SLOT, hook_table_slot);
     psp_hook_set(FN_TABLE_TASK, hook_table_task);
+    psp_hook_set(0x08B330B0u, hook_zone_player);
+    psp_hook_set(0x08A3DE1Cu, hook_is_local);
+    psp_hook_set(0x08CB611Cu, hook_may_charainfo);
+    psp_hook_set(0x08CB25E0u, hook_charainfo_req);
+    psp_hook_set(0x08CB2B5Cu, hook_member_info);
+    psp_hook_set(0x08CB54E8u, hook_issue_netid);
     psp_io_set_ms_log(ms_line);
 }
