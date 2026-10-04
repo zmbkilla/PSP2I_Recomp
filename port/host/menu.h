@@ -22,7 +22,7 @@ enum {
 };
 
 /* Menu items, top to bottom. */
-enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_CLOSE, MENU_ITEMS };
+enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_CLOSE, MENU_ITEMS };
 
 /* Right-stick camera sensitivity: 1.00x .. 2.00x in 0.25 steps. */
 #define MENU_RS_STEPS 5
@@ -34,6 +34,7 @@ enum {
     MFX_FPS_CHANGED = 1 << 2,   /* fps is the new frame-rate choice */
     MFX_SHOW_FPS    = 1 << 3,   /* show_fps changed */
     MFX_RS_SPEED    = 1 << 4,   /* rs_step changed: menu_rs_speed() */
+    MFX_EDIT_SEGA   = 1 << 5,   /* Circle on SEGA SERVER: the caller opens its text editor */
 };
 
 typedef struct {
@@ -42,6 +43,7 @@ typedef struct {
     int      fps;          /* 30 or 60 */
     int      show_fps;     /* the FPS counter */
     int      rs_step;      /* right-stick sensitivity, 0..MENU_RS_STEPS-1 (1.00x + 0.25x each) */
+    char     sega[64];     /* the SEGA server redirect, shown ("" = off); set by the caller */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */
     uint32_t game_mask;    /* PSP buttons held through a close, kept from the game until released */

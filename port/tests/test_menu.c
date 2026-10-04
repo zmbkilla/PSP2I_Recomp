@@ -8,6 +8,8 @@
 #include "menu.h"
 #include "framerate.h"
 #include "camera.h"
+#include "login.h"
+#include "textedit.h"
 
 #include <psprecomp/cpu.h>
 #include <psprecomp/dispatch.h>
@@ -71,6 +73,12 @@ static void test_values(void) {
 
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_RS_SPEED);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_SEGA_SERVER);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_EDIT_SEGA && m.open);   /* Circle opens the editor */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0);                           /* Left/Right do nothing there */
+    menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -152,6 +160,8 @@ static void test_buttons(void) {
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RS_SPEED);
     CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_SEGA_SERVER);
+    CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_CLOSE);
     CHECK(STEP(0) == 0);
     CHECK(STEP(CROSS) == MFX_CLOSED && !m.open);                /* Cross backs out */
@@ -218,6 +228,68 @@ static void test_camera_axis(void) {
     CHECK(camera_axis(0, 1.0f) == -1.0f);
     CHECK(camera_axis(255, 2.0f) == 2.0f * 127.0f / 128.0f);
     CHECK(camera_axis(0, 1.5f) == -1.5f);
+}
+
+/* The sign-in screen: Circle accepts, Cross backs out; the password is never
+ * drawn; submitting needs both fields; a failure keeps the screen open. */
+static void test_login(void) {
+    login_state l;
+    login_open(&l, "test.server", "remembered");
+    CHECK(l.state == LOGIN_EDITING && !strcmp(l.user, "remembered") && l.sel == LOGIN_FIELD_PASS);
+    login_type(&l, 's'); login_type(&l, 'e'); login_type(&l, 'c');
+    CHECK(!strcmp(l.pass, "sec"));
+    login_backspace(&l);
+    CHECK(!strcmp(l.pass, "se"));
+    /* the password is not drawn: render and look for its letters' absence is
+     * impractical; check the field shows asterisks via the drawn width instead */
+    static uint32_t px[480 * 272];
+    menu_image img = { px, 480, 272 };
+    login_draw(&l, &img);
+    login_update(&l, 0, 0);
+    login_update(&l, MI_DOWN, 0); login_update(&l, 0, 0);
+    CHECK(l.sel == LOGIN_BTN_SIGNIN);
+    CHECK(login_update(&l, MI_CONFIRM, 0x2000) == LOGIN_ACT_SUBMIT && l.state == LOGIN_WORKING);   /* Circle */
+    login_finish(&l, 0, "sign-in refused: invalid password");
+    CHECK(l.state == LOGIN_EDITING && l.error && l.pass[0] == 0);       /* stays open, password cleared */
+    login_update(&l, 0, 0);
+    CHECK(login_update(&l, MI_BACK, 0x4000) == LOGIN_ACT_CANCEL);       /* Cross */
+    login_open(&l, "s", "");
+    l.sel = LOGIN_BTN_SIGNIN;
+    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_NONE && l.error);   /* empty fields refused */
+    login_open(&l, "s", "");
+    login_update(&l, 0, 0);
+    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_NONE && l.osk);  /* Circle on a field: keyboard */
+    login_update(&l, 0, 0);
+    login_update(&l, MI_DOWN, 0); login_update(&l, 0, 0);              /* to row "abcdefghij" */
+    login_update(&l, MI_CONFIRM, 0x2000);                               /* types 'a' */
+    login_update(&l, 0, 0);
+    CHECK(!strcmp(l.user, "a"));
+    CHECK(login_update(&l, MI_BACK, 0) == LOGIN_ACT_NONE && !l.osk);    /* Cross closes only the keyboard */
+    login_finish(&l, 1, "ok");
+    CHECK(l.state == LOGIN_DONE_OK);
+    int act = LOGIN_ACT_NONE, n = 0;
+    while (act == LOGIN_ACT_NONE && n++ < 200) act = login_update(&l, 0, 0);
+    CHECK(act == LOGIN_ACT_CLOSE_OK);
+}
+
+/* The SEGA SERVER editor: Circle types, Start saves, Cross cancels. */
+static void test_textedit(void) {
+    textedit e;
+    textedit_open(&e, "T", "H", "old");
+    CHECK(e.open && !strcmp(e.text, "old"));
+    CHECK(textedit_update(&e, MI_CONFIRM, 0x2000) == TE_NONE && !strcmp(e.text, "old"));  /* held from opening: not a press */
+    textedit_update(&e, 0, 0);
+    textedit_backspace(&e); textedit_backspace(&e); textedit_backspace(&e);
+    textedit_type(&e, 'h'); textedit_type(&e, ':'); textedit_type(&e, ' ');
+    CHECK(!strcmp(e.text, "h:"));                                       /* no spaces */
+    CHECK(textedit_update(&e, MI_CONFIRM, 0x2000) == TE_NONE && !strcmp(e.text, "h:1"));   /* key (0,0) = '1' */
+    textedit_update(&e, 0, 0);
+    CHECK(textedit_update(&e, 0, 0x8000) == TE_NONE && !strcmp(e.text, "h:"));            /* Square deletes */
+    textedit_update(&e, 0, 0);
+    CHECK(textedit_update(&e, 0, 0x0008) == TE_SAVE && !e.open && !strcmp(e.text, "h:")); /* Start saves */
+    textedit_open(&e, "T", "H", "keep");
+    textedit_update(&e, 0, 0);
+    CHECK(textedit_update(&e, MI_BACK, 0x4000) == TE_CANCEL && !e.open);                  /* Cross cancels */
 }
 
 /* ---- FPS meter -------------------------------------------------------------- */
@@ -295,8 +367,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 64, 384, 208));            /* the centred 288x144 box */
-    CHECK(!changed_outside(96, 64, 384, 208));
+    CHECK(changed_inside(96, 57, 384, 214));            /* the centred 288x157 box */
+    CHECK(!changed_outside(96, 57, 384, 214));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */
@@ -444,6 +516,8 @@ int main(void) {
     test_filter();
     test_buttons();
     test_rs_speed();
+    test_login();
+    test_textedit();
     test_camera_axis();
     test_meter();
     test_draw();

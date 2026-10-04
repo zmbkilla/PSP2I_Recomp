@@ -31,6 +31,11 @@ add_executable(psp2i
     host/framerate.c
     host/menu.c
     host/camera.c
+    host/tls.c
+    host/rpcn.c
+    host/online.c
+    host/login.c
+    host/textedit.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
     gen/recomp_funcs.c
     gen/recomp_imports.c
@@ -44,7 +49,7 @@ if(MSVC)
     target_compile_options(psp2i PRIVATE /bigobj /W1)
     set_source_files_properties(gen/recomp_funcs.c PROPERTIES COMPILE_OPTIONS "/O1;/Gy")
     target_link_options(psp2i PRIVATE /STACK:16777216)
-    target_link_libraries(psp2i PRIVATE user32 gdi32 dbghelp winmm d3d11 d3dcompiler dxguid)
+    target_link_libraries(psp2i PRIVATE user32 gdi32 dbghelp winmm d3d11 d3dcompiler dxguid secur32 crypt32 ws2_32 winhttp)
     # Symbols for the crash report (and a debugger). /Zi does not change the
     # generated machine code.
     target_compile_options(psp2i PRIVATE /Zi)
@@ -63,10 +68,16 @@ endif()
 # Unit tests for the settings menu, the FPS counter and run-time frame-rate
 # switching (no game data needed): ctest -C Release, or run test_menu.
 enable_testing()
-add_executable(test_menu tests/test_menu.c host/menu.c host/framerate.c host/camera.c)
+add_executable(test_menu tests/test_menu.c host/menu.c host/framerate.c host/camera.c host/login.c host/textedit.c)
 target_include_directories(test_menu PRIVATE host)
 target_link_libraries(test_menu PRIVATE psprecomp)
 add_test(NAME test_menu COMMAND test_menu)
+
+# rpcn_probe: check an RPCN server (TLS, protocol version, refusal of a bad login).
+add_executable(rpcn_probe tools/rpcn_probe.c host/rpcn.c host/tls.c)
+if(WIN32)
+    target_link_libraries(rpcn_probe PRIVATE secur32 crypt32 ws2_32)
+endif()
 
 if(PSP2I_TRACE)
     target_compile_definitions(psp2i PRIVATE PSPRECOMP_TRACE)

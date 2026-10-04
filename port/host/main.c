@@ -60,6 +60,9 @@
 #include "framerate.h"
 #include "menu.h"
 #include "camera.h"
+#include "login.h"
+#include "online.h"
+#include "textedit.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -247,10 +250,31 @@ static uint32_t   g_host_held, g_host_latched;  /* MI_* from keys the game never
 static uint32_t   g_keys_latched;          /* PSP bits of keys pressed since the last vblank */
 static char       g_menu_key_name[8] = "F1";
 
+/* The PSN sign-in screen (login.c), opened when the game asks to sign in;
+ * while open it takes all input. */
+static login_state g_login;
+static uint32_t    g_login_keys;          /* MI_* from navigation keys while a text screen is open */
+/* The settings menu's SEGA SERVER editor (textedit.c). */
+static textedit    g_sega_edit;
+static int         g_edit_enter;          /* Enter pressed in the editor: save */
+
+static int text_ui_open(void) { return g_login.state != LOGIN_CLOSED || g_sega_edit.open; }
+
 static void draw_overlay(void) {
     menu_image img = { g_rgba, SCREEN_W, SCREEN_H };
     if (g_menu.show_fps) fps_draw(&g_fpsm, &img);
+    const char *st = online_status_line();
+    if (st) {
+        char line[96];
+        snprintf(line, sizeof line, "%.78s", st);
+        const int w = menu_text_width(line);
+        for (int y = 2; y < 13; y++) for (int x = SCREEN_W - w - 7; x < SCREEN_W - 2; x++)
+            if (x >= 0) g_rgba[y * SCREEN_W + x] = 0xFF000000u | ((g_rgba[y * SCREEN_W + x] >> 2) & 0x003F3F3Fu);
+        menu_text(&img, SCREEN_W - w - 4, 4, line, 0xFFFFFF);
+    }
+    login_draw(&g_login, &img);
     menu_draw(&g_menu, &img, framerate_game_fps(), g_menu_key_name);
+    textedit_draw(&g_sega_edit, &img);
 }
 
 /* What the window shows: the latest game frame with the overlay on top. */
@@ -291,15 +315,45 @@ static uint32_t key_bit(WPARAM vk) {
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_CHAR:
+        /* Text for the sign-in screen (letters do not act as PSP buttons then). */
+        if (g_sega_edit.open) { if (wp > 32 && wp < 127) textedit_type(&g_sega_edit, (char)wp); }
+        else if (g_login.state != LOGIN_CLOSED && wp >= 32 && wp < 127) login_type(&g_login, (char)wp);
+        return 0;
     case WM_KEYDOWN: {
         const int first = !(lp & (1 << 30));                     /* not an auto-repeat */
         if (wp == VK_F12 && first) g_dump_key = 1;
+        if (text_ui_open() && wp != g_menu_vk) {
+            uint32_t k = 0;
+            switch (wp) {
+            case VK_UP: k = MI_UP; break;
+            case VK_DOWN: case VK_TAB: k = MI_DOWN; break;
+            case VK_LEFT: k = MI_LEFT; break;
+            case VK_RIGHT: k = MI_RIGHT; break;
+            case VK_RETURN: if (g_sega_edit.open) g_edit_enter = 1; else k = MI_CONFIRM; break;
+            case VK_ESCAPE: k = MI_BACK; break;
+            case VK_BACK: if (g_sega_edit.open) textedit_backspace(&g_sega_edit); else login_backspace(&g_login); break;
+            default: break;
+            }
+            g_login_keys |= k;
+            return 0;
+        }
         const uint32_t hk = host_key(wp);
         if (hk) { g_host_held |= hk; if (first) g_host_latched |= hk; return 0; }
         if (first) g_keys_latched |= key_bit(wp);
         g_keys |= key_bit(wp);  ctrl_commit(); return 0;
     }
-    case WM_KEYUP:   g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); ctrl_commit(); return 0;
+    case WM_KEYUP:
+        switch (wp) {
+        case VK_UP: g_login_keys &= ~MI_UP; break;
+        case VK_DOWN: case VK_TAB: g_login_keys &= ~MI_DOWN; break;
+        case VK_LEFT: g_login_keys &= ~MI_LEFT; break;
+        case VK_RIGHT: g_login_keys &= ~MI_RIGHT; break;
+        case VK_RETURN: g_login_keys &= ~MI_CONFIRM; break;
+        case VK_ESCAPE: g_login_keys &= ~MI_BACK; break;
+        default: break;
+        }
+        g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); ctrl_commit(); return 0;
     case WM_CLOSE:   psp_request_exit(); return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -470,6 +524,13 @@ static void ctrl_commit(void) {
     uint8_t ax = g_pad_ax, ay = g_pad_ay;
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     /* The settings menu takes all input while open (menu_filter_game). */
+    if (g_login.state != LOGIN_CLOSED) {
+        /* The sign-in screen has the input; buttons still held when it
+         * closes stay hidden from the game until released. */
+        g_menu.game_mask |= bits & ~PRESS_MENU;
+        bits = 0;
+        ax = ay = 128;
+    }
     bits = menu_filter_game(&g_menu, bits & ~PRESS_MENU);
     if (g_menu.open) ax = ay = 128;
     psp_ctrl_set(bits, ax, ay);
@@ -495,7 +556,28 @@ static void menu_step(void) {
     uint32_t held = menu_inputs(psp, ax, ay) | g_host_held;
     if (input_sdl_host_buttons() & (INPUT_HOST_GUIDE | INPUT_HOST_RSTICK)) held |= MI_TOGGLE;
 
+    snprintf(g_menu.sega, sizeof g_menu.sega, "%s", online_sega_redirect());
+    if (g_sega_edit.open) {
+        /* The SEGA SERVER editor has the input (pad buttons and navigation
+         * keys; typed characters arrive through WM_CHAR). */
+        const uint32_t pad = g_script_bits | g_pad_bits;
+        int r = textedit_update(&g_sega_edit, menu_inputs_from_psp(pad & 0xFFFF, ax, ay) | g_login_keys, pad);
+        if (g_edit_enter) { g_edit_enter = 0; g_sega_edit.open = 0; r = TE_SAVE; }
+        if (r == TE_SAVE) {
+            online_set_sega_redirect(g_sega_edit.text);
+            fprintf(stderr, "menu: SEGA server redirect %s\n", online_sega_redirect()[0] ? online_sega_redirect() : "off");
+        }
+        menu_update(&g_menu, 0, 0);       /* keep its press detection in step */
+        g_menu.prev = held;               /* no stray press when the editor closes */
+        return;
+    }
+
     const int fx = menu_update(&g_menu, held, latched);
+    if (fx & MFX_EDIT_SEGA) {
+        char hint[96];
+        snprintf(hint, sizeof hint, "%.22s -> HOST[:PORT], EMPTY = OFF", online_sega_host());
+        textedit_open(&g_sega_edit, "SEGA SERVER REDIRECT", hint, online_sega_redirect());
+    }
     if (fx & MFX_FPS_CHANGED) {
         framerate_set(g_menu.fps);
         fprintf(stderr, "menu: frame rate %d fps\n", g_menu.fps);
@@ -645,6 +727,29 @@ static void on_vblank(void) {
     poll_controllers();
     menu_step();
     update_camera_stick(vb);
+    online_poll();
+    if (g_login.state != LOGIN_CLOSED) {
+        static int was_open;
+        if (!was_open) {
+            /* Headless tests only: pre-fill the fields (never logged). */
+            const char *u = getenv("PSP2I_TEST_LOGIN_USER"), *pw = getenv("PSP2I_TEST_LOGIN_PASS");
+            if (u) snprintf(g_login.user, sizeof g_login.user, "%s", u);
+            if (pw) snprintf(g_login.pass, sizeof g_login.pass, "%s", pw);
+            if (u && pw) g_login.sel = LOGIN_BTN_SIGNIN;
+        }
+        was_open = 1;
+        uint32_t psp = g_script_bits | g_pad_bits;
+        uint8_t ax = g_pad_ax, ay = g_pad_ay;
+        if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
+        const uint32_t held = menu_inputs_from_psp(psp & 0xFFFF, ax, ay) | g_login_keys;
+        switch (login_update(&g_login, held, psp)) {
+        case LOGIN_ACT_SUBMIT:   online_login_submit(); break;
+        case LOGIN_ACT_CANCEL:   online_login_cancel(); break;
+        case LOGIN_ACT_CLOSE_OK: online_login_closed_ok(); break;
+        default: break;
+        }
+        if (g_login.state == LOGIN_CLOSED) { was_open = 0; ctrl_commit(); }
+    }
     fps_meter_sample(&g_fpsm, psp_sched_now_us(), psp_display_flips());
     sample_fps(vb);
     /* The picture for the window. With D3D11 and the display buffer ahead of
@@ -1249,6 +1354,7 @@ int main(int argc, char **argv) {
     framerate_init(fps);
     menu_set_rs_speed(&g_menu, rs_speed);
     camera_init(menu_rs_speed(&g_menu));
+    online_init(dir, &g_login);
     psp_sched_set_vblank_hook(on_vblank);
 
     printf("starting module_start at 0x%08X\n", mi.entry);
