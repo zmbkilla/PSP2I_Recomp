@@ -27,6 +27,8 @@
 #define FN_GAME_PRINTF 0x0886EA30u
 #define FN_QUEST_TABLE 0x08D25714u   /* QuestDataManager vfunc 0x1C: table object by ID, or 0 */
 #define FN_ARC_FIND    0x08D56918u   /* archive/registry: object by name */
+#define FN_TABLE_SLOT  0x0880B6C4u   /* quest table entry -> slot (flag +0x1C bit 0, slot +0x1E), else -1 */
+#define FN_TABLE_TASK  0x0888B62Cu   /* client: quest-table request task ctor (this, ?, table, slot, mode) */
 
 static FILE *g_file;
 static char g_dir[600];
@@ -169,7 +171,7 @@ static void logf_line(const char *fmt, ...) {
 static void hook_quest_table(void (*original)(void)) {
     const uint32_t id = psp_cpu.r[5];
     original();
-    logf_line("[quest data] table %u requested -> %s (0x%08X)", id, psp_cpu.r[2] ? "found" : "NOT FOUND", psp_cpu.r[2]);
+    logf_line("[quest data] table %d requested -> %s (0x%08X)", (int32_t)id, psp_cpu.r[2] ? "found" : "NOT FOUND", psp_cpu.r[2]);
 }
 
 /* Archive lookups by name, for the quest-table names only; the ID list
@@ -195,6 +197,28 @@ static void hook_arc_find(void (*original)(void)) {
     if (strcmp(lastn, name)) { snprintf(lastn, sizeof lastn, "%s", name); logf_line("[quest data] find \"%s\" -> %s", name, obj ? "found" : "NOT FOUND"); }
 }
 
+static void dump_bytes(const char *what, uint32_t a, uint32_t n) {
+    if (!a) return;
+    for (uint32_t o = 0; o < n; o += 32) {
+        char hex[3 * 32 + 1];
+        for (uint32_t i = 0; i < 32; i++) snprintf(hex + 3 * i, 4, "%02x ", psp_read8(a + o + i));
+        logf_line("[quest data]   %s +%02X: %s", what, o, hex);
+    }
+}
+
+static void hook_table_slot(void (*original)(void)) {
+    const uint32_t e = psp_cpu.r[4];
+    original();
+    logf_line("[quest data] table entry 0x%08X: flags 0x%04X, slot %d -> %d%s", e, psp_read16(e + 0x1C), (int16_t)psp_read16(e + 0x1E),
+              (int32_t)psp_cpu.r[2], (int32_t)psp_cpu.r[2] < 0 ? " (NOT USABLE)" : "");
+    dump_bytes("entry", e, 0x60);
+}
+
+static void hook_table_task(void (*original)(void)) {
+    logf_line("[quest data] client requests quest table %d (slot %d, mode %d)", (int32_t)psp_cpu.r[6], (int32_t)psp_cpu.r[7], (int32_t)psp_cpu.r[8]);
+    original();
+}
+
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
 
 void gamelog_init(const char *exe_dir) {
@@ -202,5 +226,7 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(FN_GAME_PRINTF, hook_printf);
     psp_hook_set(FN_QUEST_TABLE, hook_quest_table);
     psp_hook_set(FN_ARC_FIND, hook_arc_find);
+    psp_hook_set(FN_TABLE_SLOT, hook_table_slot);
+    psp_hook_set(FN_TABLE_TASK, hook_table_task);
     psp_io_set_ms_log(ms_line);
 }
