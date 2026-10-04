@@ -25,6 +25,8 @@ add_executable(psp2i
     host/oracle.c
     host/d3d11.c
     host/input_sdl.c
+    host/audio_sdl.c
+    host/atrac_ffmpeg.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
     gen/recomp_funcs.c
     gen/recomp_imports.c

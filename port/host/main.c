@@ -23,6 +23,8 @@
  *   --headless  no window
  *   --seconds   stop after N seconds of game time and print the report
  *   --capture-every / --capture-dir  dump the framebuffer as PPM every N vblanks
+ *   --audio / --no-audio  sound through SDL3.dll (audio_sdl.c): on by default
+ *               with a window, off headless; PSP2I_AUDIO_DUMP=file.wav records
  *   --sdl / --no-sdl  controllers through SDL3.dll (input_sdl.c): on by default
  *               with a window, off headless unless --sdl
  *   --oracle    (trace builds) diff the function at ADDR against an interpreter
@@ -43,6 +45,8 @@
 
 #include "recomp_funcs.h"
 #include "input_sdl.h"
+#include "audio_sdl.h"
+#include "atrac_ffmpeg.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -695,6 +699,7 @@ int main(int argc, char **argv) {
     const char *renderer = "d3d11";
     int oracle_all = 0;
     int want_sdl = -1;                     /* -1: default (with a window) */
+    int want_audio = -1;
     uint32_t dump_addr = 0, args_addr = 0;
     uint64_t args_flip = 0;
     const char *dump_path = NULL;
@@ -706,6 +711,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--headless"))                      g_headless = 1;
         else if (!strcmp(argv[i], "--sdl"))                           want_sdl = 1;
         else if (!strcmp(argv[i], "--no-sdl"))                        want_sdl = 0;
+        else if (!strcmp(argv[i], "--audio"))                         want_audio = 1;
+        else if (!strcmp(argv[i], "--no-audio"))                      want_audio = 0;
         else if (!strcmp(argv[i], "--find-word") && i + 2 < argc) {
             g_find_value = (uint32_t)strtoul(argv[i + 1], NULL, 0);
             g_find_vblank = strtoull(argv[i + 2], NULL, 0);
@@ -802,6 +809,8 @@ int main(int argc, char **argv) {
     if (!g_headless) window_open();
 #endif
     if (want_sdl == 1 || (want_sdl < 0 && !g_headless)) g_sdl_on = input_sdl_init() == 0;
+    audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
+    atrac_ffmpeg_init(dir);           /* ATRAC music; silent if FFmpeg is absent */
     psp_sched_set_vblank_hook(on_vblank);
 
     printf("starting module_start at 0x%08X\n", mi.entry);
@@ -810,6 +819,7 @@ int main(int argc, char **argv) {
 
     report();
     if (g_sdl_on) input_sdl_shutdown();
+    audio_shutdown();
     psp_mem_free();
     return rc;
 }

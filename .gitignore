@@ -69,3 +69,6 @@ __pycache__/
 # user test material: game screenshots and run logs
 debugscreen/
 *_log.txt
+
+# third-party runtime libraries (FFmpeg for ATRAC music), kept local
+ffmpeg-*/
