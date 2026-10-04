@@ -23,8 +23,9 @@
  *
  *   SEGA server redirect -- the game's own server (offline since 2014) pointed
  *   at a replacement:
- *   sega_server_host=game.psp2infinity.jp   the name(s) the game uses (comma-
- *                                separated); observed: game.psp2infinity.jp
+ *   sega_server_host=game.psp2infinity.jp,game.revurb.us   the name(s) the
+ *                                game uses (comma-separated): the original
+ *                                EBOOT's, and the community-patched EBOOT's
  *   sega_server_redirect=        host or host:port of the replacement; empty =
  *                                no redirect. When set, the game's lookups of
  *                                those names resolve to it, and its HTTP(S)
@@ -67,7 +68,10 @@ static char g_pin[65];
 static char g_user[64];
 static char g_http_mode[16] = "log";
 static char g_stub_dir[256] = "http_stubs";
-static char g_sega_host[256] = "game.psp2infinity.jp";
+/* The game's server names: the original EBOOT uses game.psp2infinity.jp; the
+ * community-patched EBOOT (as in FinalBuild) uses game.revurb.us. */
+#define SEGA_HOSTS_DEFAULT "game.psp2infinity.jp,game.revurb.us"
+static char g_sega_host[256] = SEGA_HOSTS_DEFAULT;
 static char g_sega_redirect[256];
 static char g_sega_scheme[16];
 static int  g_sega_ignore_cert;
@@ -116,6 +120,9 @@ static void cfg_load(void) {
         seen++;
     }
     fclose(f);
+    /* An ini written with the earlier single-name default: add the patched
+     * EBOOT's name, or a redirect would miss it. */
+    if (!strcmp(g_sega_host, "game.psp2infinity.jp")) { snprintf(g_sega_host, sizeof g_sega_host, "%s", SEGA_HOSTS_DEFAULT); seen = 0; }
     if (seen < 10) cfg_save();          /* add any keys a older file lacks */
 }
 
