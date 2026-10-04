@@ -62,6 +62,7 @@
 #include "camera.h"
 #include "login.h"
 #include "online.h"
+#include "savecrypt.h"
 #include "textedit.h"
 
 #ifdef _WIN32
@@ -1392,6 +1393,9 @@ int main(int argc, char **argv) {
     framerate_init(fps);
     menu_set_rs_speed(&g_menu, rs_speed);
     camera_init(menu_rs_speed(&g_menu));
+    /* PSP savedata encryption: saves interchangeable with a PSP / PPSSPP */
+    static const psp_savedata_crypto SAVE_CRYPTO = { savecrypt_decrypt, savecrypt_encrypt, savecrypt_sfo_hash };
+    psp_savedata_set_crypto(&SAVE_CRYPTO);
     online_init(dir, &g_login);
     psp_sched_set_vblank_hook(on_vblank);
 
