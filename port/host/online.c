@@ -172,11 +172,16 @@ const char *online_status_line(void) { return g_status_frames > 0 ? g_status : N
 
 #ifdef _WIN32
 static CRITICAL_SECTION g_lock;
+static CRITICAL_SECTION g_rpcn_lock;     /* one request at a time on the session */
 #define LOCK()   EnterCriticalSection(&g_lock)
 #define UNLOCK() LeaveCriticalSection(&g_lock)
+#define RPCN_LOCK()   EnterCriticalSection(&g_rpcn_lock)
+#define RPCN_UNLOCK() LeaveCriticalSection(&g_rpcn_lock)
 #else
 #define LOCK()
 #define UNLOCK()
+#define RPCN_LOCK()
+#define RPCN_UNLOCK()
 #endif
 
 enum { JOB_NONE, JOB_SIGNIN, JOB_TICKET };
@@ -255,7 +260,9 @@ static void run_ticket(void) {
     const int slot = g_job.slot;
     if (!g_session) { snprintf(g_job.msg, sizeof g_job.msg, "not signed in"); return; }
     online_log("requesting an auth ticket for service %s", g_job.service);
+    RPCN_LOCK();
     const int rc = rpcn_request_ticket(g_session, g_job.service, g_job.cookie, g_job.cookie_len, &t, &n, err, sizeof err);
+    RPCN_UNLOCK();
     LOCK();
     if (rc == RPCN_OK) {
         free(g_tickets[slot].data);
@@ -368,9 +375,77 @@ static void be_ticket_cancel(int slot) {
     UNLOCK();
 }
 
+/* NP matching 2: server and world lists from RPCN, on the signed-in session.
+ * Called from the game's thread and blocking for one round trip. */
+#define M2_SERVER_ERROR_SERVICE_UNAVAILABLE 0x80550D02u
+#define M2_ERROR_TIMEDOUT                   0x80550C3Cu
+
+static int be_m2_server_list(const char *com_id, uint16_t *ids, int max, uint32_t *err) {
+    char e[200] = "";
+    int n = 0, rc = RPCN_ERR_CONNECT;
+    online_log("matching: RPCN GetServerList for %s on %s", com_id, g_host);
+    RPCN_LOCK();
+    if (g_session) {
+        rc = rpcn_get_server_list(g_session, com_id, ids, max, &n, e, sizeof e);
+        /* a server may create a game's entries on first request: ask once more */
+        if (rc == RPCN_OK && n == 0) rc = rpcn_get_server_list(g_session, com_id, ids, max, &n, e, sizeof e);
+    } else snprintf(e, sizeof e, "not signed in");
+    RPCN_UNLOCK();
+    if (rc != RPCN_OK) {
+        online_log("matching: GetServerList failed: %s", e);
+        status("Matching server list failed: %s", e);
+        *err = rc == RPCN_ERR_CONNECT && g_session ? M2_ERROR_TIMEDOUT : M2_SERVER_ERROR_SERVICE_UNAVAILABLE;
+        return -1;
+    }
+    char list[128] = "";
+    for (int i = 0; i < n; i++) snprintf(list + strlen(list), sizeof list - strlen(list), "%s%u", i ? "," : "", ids[i]);
+    online_log("matching: %s has %d server(s) on %s%s%s", com_id, n, g_host, n ? ": " : "", list);
+    if (!n) status("RPCN %s has no matching servers for %s", g_host, com_id);
+    return n;
+}
+
+static int be_m2_world_list(const char *com_id, uint16_t server_id, uint32_t *ids, int max, uint32_t *err) {
+    char e[200] = "";
+    int n = 0, rc = RPCN_ERR_CONNECT;
+    online_log("matching: RPCN GetWorldList for %s, server %u", com_id, server_id);
+    RPCN_LOCK();
+    if (g_session) {
+        rc = rpcn_get_world_list(g_session, com_id, server_id, ids, max, &n, e, sizeof e);
+        if (rc == RPCN_OK && n == 0) rc = rpcn_get_world_list(g_session, com_id, server_id, ids, max, &n, e, sizeof e);
+    } else snprintf(e, sizeof e, "not signed in");
+    RPCN_UNLOCK();
+    if (rc != RPCN_OK) {
+        online_log("matching: GetWorldList failed: %s", e);
+        status("Matching world list failed: %s", e);
+        *err = rc == RPCN_ERR_CONNECT && g_session ? M2_ERROR_TIMEDOUT : M2_SERVER_ERROR_SERVICE_UNAVAILABLE;
+        return -1;
+    }
+    char list[160] = "";
+    for (int i = 0; i < n; i++) snprintf(list + strlen(list), sizeof list - strlen(list), "%s%u", i ? "," : "", ids[i]);
+    online_log("matching: server %u has %d world(s)%s%s", server_id, n, n ? ": " : "", list);
+    if (!n) status("RPCN %s has no worlds for %s server %u", g_host, com_id, server_id);
+    return n;
+}
+
+#ifdef _WIN32
+int game_stack(char *out, size_t cap, int max_frames);     /* main.c */
+#endif
+
+/* NP library log lines; a matching call also names where in the game it came from. */
+static void np_line(const char *line) {
+#ifdef _WIN32
+    if (!strncmp(line, "np: m2 ", 7) && strncmp(line, "np: m2 ->", 9) && strncmp(line, "np: m2   ", 9)) {
+        char where[512];
+        if (game_stack(where, sizeof where, 12) > 0) { online_log("%s   [game: %s]", line, where); return; }
+    }
+#endif
+    online_log("%s", line);
+}
+
 static const psp_np_backend NP_BACKEND = {
     be_signin_begin, be_signin_state, be_signin_cancel, be_online_id,
     be_ticket_begin, be_ticket_state, be_ticket_cancel,
+    be_m2_server_list, be_m2_world_list, np_line,
 };
 
 /* Once per vblank: hand finished jobs to the screen and the status line. */
@@ -447,10 +522,6 @@ static const char *resolve_redirect(const char *host) {
 }
 
 /* ---- HTTP: log, stub or live ---------------------------------------------------------------- */
-
-#ifdef _WIN32
-int game_stack(char *out, size_t cap, int max_frames);     /* main.c */
-#endif
 
 /* HTTP log lines about a request also say where in the game the call came
  * from: the chain of game functions (PSP addresses, innermost first). */
@@ -593,6 +664,7 @@ void online_init(const char *exe_dir, login_state *login) {
     snprintf(g_dir, sizeof g_dir, "%s", exe_dir);
 #ifdef _WIN32
     InitializeCriticalSection(&g_lock);
+    InitializeCriticalSection(&g_rpcn_lock);
 #endif
     cfg_load();
     g_login = login;

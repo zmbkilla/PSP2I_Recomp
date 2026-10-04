@@ -20,6 +20,9 @@ int  rpcn_login(rpcn *r, const char *user, const char *password, const char *tok
                 char *online_name, size_t name_cap, char *err, size_t cap);
 int  rpcn_request_ticket(rpcn *r, const char *service_id, const uint8_t *cookie, uint32_t cookie_len,
                          uint8_t **ticket, uint32_t *ticket_len, char *err, size_t cap);
+/* NP matching 2 on a signed-in session; com_id is "NPWRnnnnn_nn". */
+int  rpcn_get_server_list(rpcn *r, const char *com_id, uint16_t *ids, int max, int *count, char *err, size_t cap);
+int  rpcn_get_world_list(rpcn *r, const char *com_id, uint16_t server_id, uint32_t *ids, int max, int *count, char *err, size_t cap);
 void rpcn_close(rpcn *r);
 const char *rpcn_error_name(int code);
 

@@ -12,6 +12,11 @@
  *                                -> online name\0 avatar URL\0 u64 user id ...
  *   RequestTicket (command 27): service id\0 u32 cookie length, cookie bytes
  *                                -> u32 ticket length, ticket bytes
+ *   GetServerList (command 11): communication ID (12 bytes, "NPWR01446_00")
+ *                                -> u16 count, u16 server IDs
+ *   GetWorldList (command 12):  communication ID (12 bytes), u16 server ID
+ *                                -> u32 count, u32 world IDs
+ * (all integers little-endian; matching commands need a signed-in session)
  *
  * Verified against bl00d3dg3.xyz (protocol 27, self-signed certificate) --
  * see port/HANDOFF.md. Passwords are sent only to the configured server, over
@@ -26,7 +31,10 @@
 
 #define HDR 15
 enum { PT_REQUEST = 0, PT_REPLY = 1, PT_NOTIFICATION = 2, PT_SERVER_INFO = 3 };
-enum { CMD_LOGIN = 0, CMD_REQUEST_TICKET = 27 };   /* RPCN CommandType: Login 0 ... SendRoomMessage 25, RequestSignalingInfos 26, RequestTicket 27 */
+enum { CMD_LOGIN = 0, CMD_GET_SERVER_LIST = 11, CMD_GET_WORLD_LIST = 12, CMD_REQUEST_TICKET = 27 };
+/* RPCN CommandType: Login 0, Terminate, Create, SendToken, SendResetToken, ResetPassword, ResetState,
+ * AddFriend, RemoveFriend, AddBlock, RemoveBlock 10, GetServerList 11, GetWorldList 12, CreateRoom 13 ...
+ * SendRoomMessage 25, RequestSignalingInfos 26, RequestTicket 27 */
 
 struct rpcn {
     tls_conn *t;
@@ -51,6 +59,7 @@ const char *rpcn_error_name(int code) {
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }
 static void put64(uint8_t *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i)); }
+static uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t get32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t get64(const uint8_t *p) { return (uint64_t)get32(p) | (uint64_t)get32(p + 4) << 32; }
 
@@ -193,4 +202,54 @@ int rpcn_request_ticket(rpcn *r, const char *service_id, const uint8_t *cookie, 
     if (*ticket) memcpy(*ticket, p + 5, *ticket_len);
     free(p);
     return *ticket ? RPCN_OK : RPCN_ERR_CONNECT;
+}
+
+/* A matching request: communication ID padded to 12 bytes, then `extra`. */
+static int matching_request(rpcn *r, uint16_t cmd, const char *com_id, const uint8_t *extra, uint32_t extra_len,
+                            uint8_t **p, uint32_t *len, const char *what, char *err, size_t cap) {
+    uint8_t d[12 + 8];
+    memset(d, 0, sizeof d);
+    const size_t n = strlen(com_id);
+    memcpy(d, com_id, n < 12 ? n : 12);
+    if (extra_len) memcpy(d + 12, extra, extra_len);
+    uint64_t id;
+    *p = NULL; *len = 0;
+    if (send_request(r, cmd, d, 12 + extra_len, &id) != 0 || await_reply(r, id, p, len) != 0) {
+        snprintf(err, cap, "the connection was lost during %s", what);
+        return RPCN_ERR_CONNECT;
+    }
+    if (*len < 1) { free(*p); *p = NULL; snprintf(err, cap, "empty %s reply", what); return RPCN_ERR_PROTOCOL; }
+    if ((*p)[0] != 0) {
+        snprintf(err, cap, "%s refused: %s", what, rpcn_error_name((*p)[0]));
+        free(*p); *p = NULL;
+        return RPCN_ERR_REFUSED;
+    }
+    return RPCN_OK;
+}
+
+int rpcn_get_server_list(rpcn *r, const char *com_id, uint16_t *ids, int max, int *count, char *err, size_t cap) {
+    uint8_t *p; uint32_t len;
+    *count = 0;
+    int rc = matching_request(r, CMD_GET_SERVER_LIST, com_id, NULL, 0, &p, &len, "the server list request", err, cap);
+    if (rc != RPCN_OK) return rc;
+    if (len < 3 || len < 3u + 2u * get16(p + 1)) { snprintf(err, cap, "malformed server list reply (%u bytes)", len); free(p); return RPCN_ERR_PROTOCOL; }
+    const int n = get16(p + 1);
+    for (int i = 0; i < n && i < max; i++) ids[i] = get16(p + 3 + 2 * i);
+    *count = n < max ? n : max;
+    free(p);
+    return RPCN_OK;
+}
+
+int rpcn_get_world_list(rpcn *r, const char *com_id, uint16_t server_id, uint32_t *ids, int max, int *count, char *err, size_t cap) {
+    uint8_t *p, sid[2]; uint32_t len;
+    *count = 0;
+    put16(sid, server_id);
+    int rc = matching_request(r, CMD_GET_WORLD_LIST, com_id, sid, 2, &p, &len, "the world list request", err, cap);
+    if (rc != RPCN_OK) return rc;
+    if (len < 5 || get32(p + 1) > 4096 || len < 5u + 4u * get32(p + 1)) { snprintf(err, cap, "malformed world list reply (%u bytes)", len); free(p); return RPCN_ERR_PROTOCOL; }
+    const int n = (int)get32(p + 1);
+    for (int i = 0; i < n && i < max; i++) ids[i] = get32(p + 5 + 4 * i);
+    *count = n < max ? n : max;
+    free(p);
+    return RPCN_OK;
 }
