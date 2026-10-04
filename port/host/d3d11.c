@@ -1101,7 +1101,15 @@ static void d3d_sync_vram(uint32_t addr, uint32_t bytes) {
     uint32_t a0 = vram_off(addr), a1 = a0 + bytes;
     for (int i = 0; i < MAX_RT; i++)
         if (g_rt[i].used && g_rt[i].dirty && overlaps(a0, a1, g_rt[i].off, rt_end(&g_rt[i])))
-            { g_rb_reason = 5; rt_readback(&g_rt[i]); }
+            {
+                static int log = -1, logged;
+                if (log < 0) log = getenv("PSP2I_RB_LOG") != NULL;
+                if (log && logged++ < 40)
+                    fprintf(stderr, "sync readback: range 0x%06X+0x%X; target 0x%06X/%u fmt %d rows %u-%u (flip %llu)\n",
+                            a0, bytes, g_rt[i].off, g_rt[i].stride, g_rt[i].fmt, g_rt[i].dy0, g_rt[i].dy1,
+                            (unsigned long long)frame_no());
+                g_rb_reason = 5; rt_readback(&g_rt[i]);
+            }
 }
 
 static void d3d_vram_written(uint32_t addr, uint32_t bytes) {

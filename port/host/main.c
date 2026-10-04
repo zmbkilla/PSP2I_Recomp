@@ -770,6 +770,20 @@ static HANDLE g_prof_target;
 #define PROF_DEPTH 96
 typedef struct { DWORD64 ip; uint32_t n; } prof_slot;
 static prof_slot g_prof_incl[PROF_SLOTS], g_prof_wait[PROF_SLOTS];
+/* Leaf function and its caller, as (leaf ip, caller ip) pairs: who calls the
+ * hot leaves (a CRT math routine says little without its caller). */
+static struct { DWORD64 leaf, caller, caller2; uint32_t n; } g_prof_pair[PROF_SLOTS];
+
+static void prof_pair(DWORD64 leaf, DWORD64 caller, DWORD64 caller2) {
+    uint32_t h = (uint32_t)(((leaf >> 2) ^ (caller * 31) ^ (caller2 * 131)) * 2654435761u) & (PROF_SLOTS - 1);
+    for (int k = 0; k < 64; k++, h = (h + 1) & (PROF_SLOTS - 1)) {
+        if (g_prof_pair[h].leaf == leaf && g_prof_pair[h].caller == caller && g_prof_pair[h].caller2 == caller2) { g_prof_pair[h].n++; return; }
+        if (!g_prof_pair[h].leaf) {
+            g_prof_pair[h].leaf = leaf; g_prof_pair[h].caller = caller; g_prof_pair[h].caller2 = caller2;
+            g_prof_pair[h].n = 1; return;
+        }
+    }
+}
 static DWORD64 g_exe_lo, g_exe_hi;
 
 static void prof_count(DWORD64 ip, prof_slot *t) {
@@ -783,6 +797,8 @@ static void prof_count(DWORD64 ip, prof_slot *t) {
 static void prof_stack(CONTEXT *c) {
     DWORD64 seen[PROF_DEPTH];
     int nseen = 0, outside = c->Rip < g_exe_lo || c->Rip >= g_exe_hi;
+    const DWORD64 leaf = c->Rip;
+    DWORD64 caller1 = 0;
     for (int d = 0; d < PROF_DEPTH && c->Rip; d++) {
         const DWORD64 ip = c->Rip;
         if (ip >= g_exe_lo && ip < g_exe_hi) {
@@ -801,6 +817,8 @@ static void prof_stack(CONTEXT *c) {
             DWORD64 est = 0;
             RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ip, fe, c, &hd, &est, NULL);
         }
+        if (d == 0 && c->Rip != ip) caller1 = c->Rip;
+        if (d == 1 && caller1) prof_pair(leaf, caller1, c->Rip != ip ? c->Rip : 0);
         if (c->Rip == ip) break;
     }
 }
@@ -918,6 +936,32 @@ static void prof_report(void) {
         for (int i = 0; i < nfn && i < (pass ? 25 : 3 * top); i++)
             fprintf(stderr, "    %5.1f%%  %s\n", 100.0 * fn[i].n / (double)g_prof_total, fn[i].name);
     }
+
+    /* Leaf <- caller, by function names. */
+    nfn = 0;
+    for (int i = 0; i < PROF_SLOTS; i++) {
+        if (!g_prof_pair[i].leaf) continue;
+        char names[3][160] = { "?", "?", "?" };
+        for (int w = 0; w < 3; w++) {
+            char buf[sizeof(SYMBOL_INFO) + 256];
+            SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
+            si->SizeOfStruct = sizeof(SYMBOL_INFO);
+            si->MaxNameLen = 255;
+            DWORD64 d = 0;
+            const DWORD64 a = w == 0 ? g_prof_pair[i].leaf : w == 1 ? g_prof_pair[i].caller : g_prof_pair[i].caller2;
+            if (a && SymFromAddr(proc, a, &d, si)) snprintf(names[w], 160, "%s", si->Name);
+        }
+        char name[160];
+        snprintf(name, sizeof name, "%.48s <- %.48s <- %.48s", names[0], names[1], names[2]);
+        int k;
+        for (k = 0; k < nfn && strcmp(fn[k].name, name); k++) {}
+        if (k == nfn && nfn < 8192) { snprintf(fn[nfn].name, sizeof fn[nfn].name, "%s", name); fn[nfn++].n = 0; }
+        if (k < 8192) fn[k].n += g_prof_pair[i].n;
+    }
+    qsort(fn, (size_t)nfn, sizeof fn[0], prof_cmp);
+    fprintf(stderr, "  leaf <- caller:\n");
+    for (int i = 0; i < nfn && i < 40; i++)
+        fprintf(stderr, "    %5.1f%%  %s\n", 100.0 * fn[i].n / (double)g_prof_total, fn[i].name);
 }
 #endif
 
@@ -1087,6 +1131,13 @@ int main(int argc, char **argv) {
 
 #ifdef _WIN32
     SetUnhandledExceptionFilter(on_crash);
+    /* The scheduler sleeps until the next vblank or timeout with Sleep(ms - 1)
+     * and spins the rest (threadman.c host_sleep_us), which assumes the 1 ms
+     * timer resolution. At Windows' default (15.6 ms) one Sleep(1) can take a
+     * whole vblank: frames that finished in time were shown a vblank late,
+     * costing about 20 fps in the lobby at 60 fps. Only --profile set this
+     * before, which is why profiled runs looked faster. */
+    timeBeginPeriod(1);
 #endif
     printf("root:  %s\neboot: %s\n", root, eboot);
 
@@ -1141,6 +1192,9 @@ int main(int argc, char **argv) {
     int rc = psp_sched_run(mi.entry, (uint32_t)sizeof boot_path, argp, 0x20, 0x40000, mi.gp);
 
     report();
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
     if (g_sdl_on) input_sdl_shutdown();
     audio_shutdown();
     psp_mem_free();
