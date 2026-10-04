@@ -328,7 +328,65 @@ static int add_press(const char *spec) {
     return -1;
 }
 
+/* --stick X,Y@VBLANK[+FRAMES]: hold the analog stick at PSP values X,Y
+ * (0..255, 128 = centre) -- scripted analog input for headless tests. */
+#define MAX_STICK 32
+static struct { uint8_t x, y; uint64_t at, len; } g_stick[MAX_STICK];
+static int g_nstick;
+static int g_script_stick = -1;            /* index held now, -1 none */
+
+static int add_stick(const char *spec) {
+    unsigned x, y;
+    unsigned long long at = 0, len = 6;
+    if (g_nstick >= MAX_STICK || sscanf(spec, "%u,%u@%llu+%llu", &x, &y, &at, &len) < 3 || x > 255 || y > 255)
+        return -1;
+    g_stick[g_nstick].x = (uint8_t)x; g_stick[g_nstick].y = (uint8_t)y;
+    g_stick[g_nstick].at = at; g_stick[g_nstick].len = len;
+    g_nstick++;
+    return 0;
+}
+
+/* --dump-ram-at VBLANK PATH (repeatable): guest RAM as a raw file. */
+#define MAX_RAMDUMP 8
+static struct { uint64_t at; char path[512]; } g_ramdump[MAX_RAMDUMP];
+static int g_nramdump;
+
+static void dump_ram_now(uint64_t vb) {
+    for (int i = 0; i < g_nramdump; i++) {
+        if (g_ramdump[i].at != vb) continue;
+        FILE *f = fopen(g_ramdump[i].path, "wb");
+        if (f) { fwrite(psp_mem.ram, 1, PSP_RAM_SIZE, f); fclose(f); }
+        fprintf(stderr, "ram: dumped at vblank %llu -> %s\n", (unsigned long long)vb, g_ramdump[i].path);
+    }
+}
+
+/* --log-floats ADDR COUNT EVERY: print COUNT floats at guest ADDR every
+ * EVERY vblanks (e.g. a player position while testing movement). */
+static uint32_t g_logf_addr, g_logf_count, g_logf_every;
+
 static void apply_script(uint64_t vb) {
+    if (g_nramdump) dump_ram_now(vb);
+    if (g_logf_every && vb % g_logf_every == 0) {
+        fprintf(stderr, "floats: vblank %llu", (unsigned long long)vb);
+        for (uint32_t i = 0; i < g_logf_count; i++) {
+            uint32_t w = psp_read32(g_logf_addr + i * 4);
+            float v;
+            memcpy(&v, &w, 4);
+            fprintf(stderr, " %.3f", v);
+        }
+        fprintf(stderr, "\n");
+    }
+    if (g_nstick) {
+        int k = -1;
+        for (int i = 0; i < g_nstick; i++)
+            if (vb >= g_stick[i].at && vb < g_stick[i].at + g_stick[i].len) k = i;
+        if (k != g_script_stick) {
+            g_script_stick = k;
+            if (k >= 0) fprintf(stderr, "input: stick %u,%u at vblank %llu\n", g_stick[k].x, g_stick[k].y, (unsigned long long)vb);
+            else fprintf(stderr, "input: stick centred at vblank %llu\n", (unsigned long long)vb);
+            ctrl_commit();
+        }
+    }
     if (!g_npress) return;
     uint32_t bits = 0;
     for (int i = 0; i < g_npress; i++)
@@ -352,7 +410,9 @@ static void ctrl_commit(void) {
 #ifdef _WIN32
     bits |= g_keys;
 #endif
-    psp_ctrl_set(bits, g_pad_ax, g_pad_ay);
+    uint8_t ax = g_pad_ax, ay = g_pad_ay;
+    if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
+    psp_ctrl_set(bits, ax, ay);
 }
 
 static void poll_controllers(void) {
@@ -713,6 +773,22 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-sdl"))                        want_sdl = 0;
         else if (!strcmp(argv[i], "--audio"))                         want_audio = 1;
         else if (!strcmp(argv[i], "--no-audio"))                      want_audio = 0;
+        else if (!strcmp(argv[i], "--log-floats") && i + 3 < argc) {
+            g_logf_addr = (uint32_t)strtoul(argv[i + 1], NULL, 0);
+            g_logf_count = (uint32_t)strtoul(argv[i + 2], NULL, 0);
+            g_logf_every = (uint32_t)strtoul(argv[i + 3], NULL, 0);
+            if (g_logf_count > 16) g_logf_count = 16;
+            i += 3;
+        }
+        else if (!strcmp(argv[i], "--stick") && i + 1 < argc) {
+            if (add_stick(argv[++i]) != 0) { fprintf(stderr, "bad --stick %s (want e.g. 255,128@4000+60)\n", argv[i]); return 1; }
+        }
+        else if (!strcmp(argv[i], "--dump-ram-at") && i + 2 < argc && g_nramdump < MAX_RAMDUMP) {
+            g_ramdump[g_nramdump].at = strtoull(argv[i + 1], NULL, 0);
+            snprintf(g_ramdump[g_nramdump].path, sizeof g_ramdump[g_nramdump].path, "%s", argv[i + 2]);
+            g_nramdump++;
+            i += 2;
+        }
         else if (!strcmp(argv[i], "--find-word") && i + 2 < argc) {
             g_find_value = (uint32_t)strtoul(argv[i + 1], NULL, 0);
             g_find_vblank = strtoull(argv[i + 2], NULL, 0);

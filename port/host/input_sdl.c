@@ -258,13 +258,29 @@ static void rescan(void) {
     S.free(ids);
 }
 
-/* Radial dead zone, rescaled; x/y in -1..1, out in -1..1. */
+/* Radial dead zone, then the controller's gate onto the PSP's square range.
+ *
+ * The deflection r (0..1 past the dead zone, capped at 1) keeps its
+ * direction, and the larger axis is set to r: straight directions are
+ * unchanged and a full diagonal reaches both corners. PSP games read the two
+ * axes separately -- PSP2i (0x08D5BB7C) gives each axis its own dead zone
+ * (64 of 127) and full scale, then caps the combined vector -- so they expect
+ * the corners at full diagonal. Clamping the vector to the unit circle, as
+ * this did before, sent a full diagonal as about 0.74 per axis, which PSP2i
+ * turned into 58% of straight walking speed (measured: 0.876 vs 1.500 per
+ * vblank; with the corners, 1.500 in every direction). This is a mapping
+ * of shape, linear across the range, not a diagonal multiplier. */
 static void deadzone(float *x, float *y) {
-    float m = sqrtf(*x * *x + *y * *y);
+    const float m = sqrtf(*x * *x + *y * *y);
     if (m <= g_deadzone) { *x = *y = 0.0f; return; }
-    float s = (m - g_deadzone) / (1.0f - g_deadzone) / m;
-    if (m > 1.0f) s = 1.0f / m;           /* corners of square gates */
-    *x *= s; *y *= s;
+    float r = (m - g_deadzone) / (1.0f - g_deadzone);
+    if (r > 1.0f) r = 1.0f;
+    const float ux = *x / m, uy = *y / m;
+    const float big = fabsf(ux) > fabsf(uy) ? fabsf(ux) : fabsf(uy);
+    const float k = r / big;
+    *x = ux * k; *y = uy * k;
+    if (*x > 1.0f) *x = 1.0f; else if (*x < -1.0f) *x = -1.0f;
+    if (*y > 1.0f) *y = 1.0f; else if (*y < -1.0f) *y = -1.0f;
 }
 
 void input_sdl_shutdown(void) {
