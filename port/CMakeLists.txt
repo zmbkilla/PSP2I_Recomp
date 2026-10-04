@@ -34,6 +34,7 @@ add_executable(psp2i
     host/tls.c
     host/rpcn.c
     host/online.c
+    host/savecrypt.c
     host/login.c
     host/textedit.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
@@ -49,7 +50,7 @@ if(MSVC)
     target_compile_options(psp2i PRIVATE /bigobj /W1)
     set_source_files_properties(gen/recomp_funcs.c PROPERTIES COMPILE_OPTIONS "/O1;/Gy")
     target_link_options(psp2i PRIVATE /STACK:16777216)
-    target_link_libraries(psp2i PRIVATE user32 gdi32 dbghelp winmm d3d11 d3dcompiler dxguid secur32 crypt32 ws2_32 winhttp)
+    target_link_libraries(psp2i PRIVATE user32 gdi32 dbghelp winmm d3d11 d3dcompiler dxguid secur32 crypt32 ws2_32 winhttp bcrypt)
     # Symbols for the crash report (and a debugger). /Zi does not change the
     # generated machine code.
     target_compile_options(psp2i PRIVATE /Zi)
