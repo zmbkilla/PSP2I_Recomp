@@ -1,0 +1,5 @@
+# Functions whose entry goes through a run-time hook (allegrexrecomp emit --hooks).
+# The port registers the hooks in host/framerate.c; with none registered the
+# original runs unchanged.
+
+0x08B81890   # setFrameRate(fps): stores fps and derives dt, 30/fps, the vblank interval

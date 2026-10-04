@@ -1,0 +1,13 @@
+# Instruction fixes applied by allegrexrecomp emit --fixes, each a genuine bug
+# in the original game. A fix must not change control flow.
+
+# 0x08A937B4: phase accumulator step. The function advances a 16-bit phase at
+# +0x98 by trunc(step(+0xC0) * scale) every frame. The original computes
+# scale = fps / 30 (div.s $f1, $f1, $f0 with $f1 = fps, $f0 = 30.0), which is
+# the factor for converting a DURATION in 30 Hz ticks to frames; for a
+# per-frame STEP the factor is 30 / fps -- the engine's own frame-step value
+# (timing state +0x18 = 30 / fps, set in 0x08B81830). At 30 fps both are 1.0,
+# so the original behaviour is unchanged; at 60 fps the original runs the
+# phase at 4x speed (2x per frame, 2x the frames), and at the game's own
+# 20 fps mode at 0.44x. The PPSSPP 60 FPS cheat swaps the operands the same way.
+0x08A937B4 0x46010043   # div.s $f1, $f0, $f1   (30 / fps)

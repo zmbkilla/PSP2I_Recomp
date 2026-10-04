@@ -23,6 +23,7 @@
  *   --headless  no window
  *   --seconds   stop after N seconds of game time and print the report
  *   --capture-every / --capture-dir  dump the framebuffer as PPM every N vblanks
+ *   --fps 30|60  frame rate through the game's own frame-rate API (framerate.c)
  *   --audio / --no-audio  sound through SDL3.dll (audio_sdl.c): on by default
  *               with a window, off headless; PSP2I_AUDIO_DUMP=file.wav records
  *   --sdl / --no-sdl  controllers through SDL3.dll (input_sdl.c): on by default
@@ -47,6 +48,7 @@
 #include "input_sdl.h"
 #include "audio_sdl.h"
 #include "atrac_ffmpeg.h"
+#include "framerate.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -367,7 +369,7 @@ static uint32_t g_logf_addr, g_logf_count, g_logf_every;
 static void apply_script(uint64_t vb) {
     if (g_nramdump) dump_ram_now(vb);
     if (g_logf_every && vb % g_logf_every == 0) {
-        fprintf(stderr, "floats: vblank %llu", (unsigned long long)vb);
+        fprintf(stderr, "floats: vblank %llu flip %llu", (unsigned long long)vb, (unsigned long long)psp_display_flips());
         for (uint32_t i = 0; i < g_logf_count; i++) {
             uint32_t w = psp_read32(g_logf_addr + i * 4);
             float v;
@@ -460,6 +462,12 @@ static void report_fps(void) {
     double run = psp_sched_now_us() / 1e6;
     fprintf(stderr, "  frame rate          avg %.1f fps, min %.1f fps over %d 1-s windows (%d below 29)\n",
             sum / n, mn, n, below);
+    {
+        uint64_t sp[4];
+        psp_display_flip_spacing(sp);
+        fprintf(stderr, "  flip spacing        1 vblank: %llu, 2: %llu, 3: %llu, 4+: %llu\n",
+                (unsigned long long)sp[0], (unsigned long long)sp[1], (unsigned long long)sp[2], (unsigned long long)sp[3]);
+    }
     /* For PSP2I_GE_DUMP_FLIP / --watch-from-flip, which count flips. */
     fprintf(stderr, "  display flips       %llu at vblank %llu\n",
             (unsigned long long)psp_display_flips(), (unsigned long long)psp_sched_vblank_count());
@@ -688,7 +696,9 @@ static void prof_report(void) {
     qsort(fn, (size_t)nfn, sizeof fn[0], prof_cmp);
     qsort(ln, (size_t)nln, sizeof ln[0], prof_cmp);
     fprintf(stderr, "  profile: %llu samples\n  top functions:\n", (unsigned long long)g_prof_total);
-    for (int i = 0; i < nfn && i < 25; i++)
+    const char *topenv = getenv("PSP2I_PROF_TOP");              /* list length, default 25 */
+    const int top = topenv && atoi(topenv) > 0 ? atoi(topenv) : 25;
+    for (int i = 0; i < nfn && i < top; i++)
         fprintf(stderr, "    %5.1f%%  %s\n", 100.0 * fn[i].n / (double)g_prof_total, fn[i].name);
     fprintf(stderr, "  top lines:\n");
     for (int i = 0; i < nln && i < 40; i++)
@@ -760,6 +770,7 @@ int main(int argc, char **argv) {
     int oracle_all = 0;
     int want_sdl = -1;                     /* -1: default (with a window) */
     int want_audio = -1;
+    int fps = 30;
     uint32_t dump_addr = 0, args_addr = 0;
     uint64_t args_flip = 0;
     const char *dump_path = NULL;
@@ -771,6 +782,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--headless"))                      g_headless = 1;
         else if (!strcmp(argv[i], "--sdl"))                           want_sdl = 1;
         else if (!strcmp(argv[i], "--no-sdl"))                        want_sdl = 0;
+        else if (!strcmp(argv[i], "--fps") && i + 1 < argc)           fps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--audio"))                         want_audio = 1;
         else if (!strcmp(argv[i], "--no-audio"))                      want_audio = 0;
         else if (!strcmp(argv[i], "--log-floats") && i + 3 < argc) {
@@ -886,7 +898,8 @@ int main(int argc, char **argv) {
 #endif
     if (want_sdl == 1 || (want_sdl < 0 && !g_headless)) g_sdl_on = input_sdl_init() == 0;
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
-    atrac_ffmpeg_init(dir);           /* ATRAC music; silent if FFmpeg is absent */
+    atrac_ffmpeg_init(dir);
+    framerate_init(fps);           /* ATRAC music; silent if FFmpeg is absent */
     psp_sched_set_vblank_hook(on_vblank);
 
     printf("starting module_start at 0x%08X\n", mi.entry);

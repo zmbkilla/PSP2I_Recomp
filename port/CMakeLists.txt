@@ -3,7 +3,8 @@
 # Builds the psprecomp runtime from the toolkit source next to this directory,
 # the generated C in gen/, and the host in host/. Regenerate gen/ with:
 #
-#   psprecomp/build/tools/allegrexrecomp/Release/allegrexrecomp.exe emit EBOOT.BIN port/gen recomp
+#   psprecomp/build/tools/allegrexrecomp/Release/allegrexrecomp.exe emit EBOOT.BIN port/gen recomp \
+#       --hooks port/hooks.txt --fixes port/fixes.txt
 #
 # Configure and build (MSVC):
 #   cmake -S port -B port/build -G "Visual Studio 17 2022" -A x64
@@ -27,6 +28,7 @@ add_executable(psp2i
     host/input_sdl.c
     host/audio_sdl.c
     host/atrac_ffmpeg.c
+    host/framerate.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
     gen/recomp_funcs.c
     gen/recomp_imports.c
