@@ -44,6 +44,12 @@ typedef struct {
 
 void menu_init(menu_state *m, int fps, int show_fps);
 
+/* PSP buttons (and the analog stick, 0..255) as menu inputs, following the
+ * game's own conventions: Circle accepts, Cross goes back; the D-pad, or the
+ * stick past half way, moves; Start also accepts. With the default keyboard
+ * mapping that is X = accept, Z = back. */
+uint32_t menu_inputs_from_psp(uint32_t psp, uint8_t ax, uint8_t ay);
+
 /* One input sample. held: MI_* currently down. latched: MI_* pressed and
  * released since the last call (a tap shorter than one vblank), counted as
  * presses too. Returns MFX_* flags. */

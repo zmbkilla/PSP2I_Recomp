@@ -116,6 +116,58 @@ static void test_filter(void) {
     CHECK(menu_filter_game(&m, CIRCLE | UP) == (CIRCLE | UP)); /* ... and pressed again: passes */
 }
 
+/* The game's conventions: Circle accepts, Cross backs out. */
+static void test_buttons(void) {
+    const uint32_t CIRCLE = 0x2000, CROSS = 0x4000, START = 0x0008, UP = 0x0010, DOWN = 0x0040,
+                   LEFT = 0x0080, RIGHT = 0x0020, TRIANGLE = 0x1000, SQUARE = 0x8000;
+    CHECK(menu_inputs_from_psp(CIRCLE, 128, 128) == MI_CONFIRM);
+    CHECK(menu_inputs_from_psp(CROSS, 128, 128) == MI_BACK);
+    CHECK(menu_inputs_from_psp(START, 128, 128) == MI_CONFIRM);
+    CHECK(menu_inputs_from_psp(TRIANGLE | SQUARE, 128, 128) == 0);
+    CHECK(menu_inputs_from_psp(UP | LEFT, 128, 128) == (MI_UP | MI_LEFT));
+    CHECK(menu_inputs_from_psp(DOWN | RIGHT, 128, 128) == (MI_DOWN | MI_RIGHT));
+    CHECK(menu_inputs_from_psp(0, 128, 0) == MI_UP);            /* stick past half way */
+    CHECK(menu_inputs_from_psp(0, 255, 128) == MI_RIGHT);
+    CHECK(menu_inputs_from_psp(0, 150, 100) == 0);              /* small deflection: nothing */
+
+    /* A full interaction with PSP buttons, as main.c feeds it. */
+    menu_state m;
+    menu_init(&m, 30, 1);
+    /* main.c's order each vblank: input changes reach the game filter first
+     * (ctrl_commit from poll_controllers), then the menu steps. */
+#define STEP(psp) (menu_filter_game(&m, (psp)), menu_update(&m, menu_inputs_from_psp((psp), 128, 128) | toggle, 0))
+    uint32_t toggle = MI_TOGGLE;
+    CHECK(STEP(0) == MFX_OPENED);
+    toggle = 0;
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(CIRCLE) == MFX_FPS_CHANGED && m.fps == 60);      /* Circle accepts */
+    CHECK(STEP(CIRCLE) == 0 && m.fps == 60);                    /* held: no repeat */
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_FPS_COUNTER);
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(CIRCLE) == MFX_SHOW_FPS && m.show_fps == 0);
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_CLOSE);
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(CROSS) == MFX_CLOSED && !m.open);                /* Cross backs out */
+    CHECK(menu_filter_game(&m, CROSS) == 0);                    /* ... without pressing Cross in game */
+    CHECK(STEP(CROSS) == 0 && !m.open);                         /* still held: does not reopen or act */
+    CHECK(menu_filter_game(&m, 0) == 0);
+    CHECK(menu_filter_game(&m, CROSS) == CROSS);                /* a fresh press reaches the game */
+    CHECK(STEP(0) == 0);
+
+    toggle = MI_TOGGLE;
+    CHECK(STEP(0) == MFX_OPENED);
+    toggle = 0;
+    STEP(0);
+    STEP(UP); STEP(0);                                          /* to Close */
+    CHECK(m.sel == MENU_CLOSE);
+    CHECK(STEP(CIRCLE) == MFX_CLOSED);                          /* Circle on Close closes */
+    CHECK(menu_filter_game(&m, CIRCLE) == 0);
+    CHECK(STEP(CIRCLE) == 0 && !m.open);
+#undef STEP
+}
+
 /* ---- FPS meter -------------------------------------------------------------- */
 
 static void test_meter(void) {
@@ -283,6 +335,7 @@ int main(void) {
     test_values();
     test_repeat();
     test_filter();
+    test_buttons();
     test_meter();
     test_draw();
     test_framerate();

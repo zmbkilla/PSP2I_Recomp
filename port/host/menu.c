@@ -16,6 +16,19 @@ void menu_init(menu_state *m, int fps, int show_fps) {
     m->show_fps = show_fps != 0;
 }
 
+uint32_t menu_inputs_from_psp(uint32_t psp, uint8_t ax, uint8_t ay) {
+    enum { P_START = 0x0008, P_UP = 0x0010, P_RIGHT = 0x0020, P_DOWN = 0x0040, P_LEFT = 0x0080,
+           P_CIRCLE = 0x2000, P_CROSS = 0x4000 };
+    uint32_t m = 0;
+    if ((psp & P_UP) || ay < 64)     m |= MI_UP;
+    if ((psp & P_DOWN) || ay > 192)  m |= MI_DOWN;
+    if ((psp & P_LEFT) || ax < 64)   m |= MI_LEFT;
+    if ((psp & P_RIGHT) || ax > 192) m |= MI_RIGHT;
+    if (psp & (P_CIRCLE | P_START))  m |= MI_CONFIRM;
+    if (psp & P_CROSS)               m |= MI_BACK;
+    return m;
+}
+
 static int change(menu_state *m) {
     switch (m->sel) {
     case MENU_FRAME_RATE:  m->fps = m->fps == 60 ? 30 : 60; return MFX_FPS_CHANGED;
@@ -198,8 +211,10 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     menu_text(img, x0 + 10, y, line, GREY);
     y += CELL_H + 2;
     if (m->fps == 60) menu_text(img, x0 + 10, y, "60 FPS IS EXPERIMENTAL", ORANGE);
-    y += CELL_H + 6;
-    snprintf(line, sizeof line, "%s/R3: CLOSE  Z/A: CHANGE  X/B: BACK", hotkey ? hotkey : "F1");
+    y += CELL_H + 4;
+    menu_text(img, x0 + 10, y, "CIRCLE (KEY X): ACCEPT  CROSS (KEY Z): BACK", GREY);
+    y += CELL_H + 2;
+    snprintf(line, sizeof line, "%s / R3: CLOSE   D-PAD / ARROWS: MOVE", hotkey ? hotkey : "F1");
     menu_text(img, x0 + 10, y, line, GREY);
 }
 

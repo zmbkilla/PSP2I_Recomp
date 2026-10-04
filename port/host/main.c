@@ -108,6 +108,7 @@ void ring_arm(void);
 #ifdef _WIN32
 int  d3d11_init(void);
 void d3d11_report(FILE *out);
+int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
 #endif
 
 static uint8_t *read_file(const char *path, size_t *len) {
@@ -203,7 +204,9 @@ void psp_unimplemented(uint32_t addr, const char *what) {
 
 /* ---- presentation --------------------------------------------------------- */
 
-static uint32_t g_rgba[SCREEN_W * SCREEN_H];   /* 0xAARRGGBB for GDI */
+static uint32_t g_rgba[SCREEN_W * SCREEN_H];   /* 0xAARRGGBB for GDI: the frame plus the overlay */
+static uint32_t g_frame[SCREEN_W * SCREEN_H];  /* the game's frame alone (grab_frame, d3d11_present) */
+static int      g_have_frame;
 
 /* Convert the current framebuffer. Returns 0 if the game has not set one. */
 static int grab_frame(void) {
@@ -222,7 +225,7 @@ static int grab_frame(void) {
             case 2:  r = (p & 0xF) * 17; g = ((p >> 4) & 0xF) * 17; b = ((p >> 8) & 0xF) * 17; break;
             default: r = p & 0xFF; g = (p >> 8) & 0xFF; b = (p >> 16) & 0xFF; break;
             }
-            g_rgba[y * SCREEN_W + x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+            g_frame[y * SCREEN_W + x] = 0xFF000000u | (r << 16) | (g << 8) | b;
         }
     }
     return 1;
@@ -244,6 +247,12 @@ static void draw_overlay(void) {
     menu_image img = { g_rgba, SCREEN_W, SCREEN_H };
     if (g_menu.show_fps) fps_draw(&g_fpsm, &img);
     menu_draw(&g_menu, &img, framerate_game_fps(), g_menu_key_name);
+}
+
+/* What the window shows: the latest game frame with the overlay on top. */
+static void compose(void) {
+    memcpy(g_rgba, g_frame, sizeof g_rgba);
+    draw_overlay();
 }
 
 #ifdef _WIN32
@@ -460,18 +469,10 @@ static void ctrl_commit(void) {
     psp_ctrl_set(bits, ax, ay);
 }
 
-/* PSP-style buttons as menu inputs: D-pad (or the stick past half way) to
- * move, Cross or Start to change, Circle to go back. */
+/* PSP buttons as menu inputs (menu_inputs_from_psp: Circle accepts, Cross
+ * goes back, as in the game), plus the scripted hotkey. */
 static uint32_t menu_inputs(uint32_t psp, uint8_t ax, uint8_t ay) {
-    uint32_t m = 0;
-    if ((psp & 0x0010) || ay < 64)  m |= MI_UP;
-    if ((psp & 0x0040) || ay > 192) m |= MI_DOWN;
-    if ((psp & 0x0080) || ax < 64)  m |= MI_LEFT;
-    if ((psp & 0x0020) || ax > 192) m |= MI_RIGHT;
-    if (psp & (0x4000 | 0x0008))    m |= MI_CONFIRM;
-    if (psp & 0x2000)               m |= MI_BACK;
-    if (psp & PRESS_MENU)           m |= MI_TOGGLE;
-    return m;
+    return menu_inputs_from_psp(psp, ax, ay) | ((psp & PRESS_MENU) ? MI_TOGGLE : 0);
 }
 
 /* Once per vblank: the menu reads the raw input (the game's is filtered). */
@@ -602,8 +603,16 @@ static void take_dump(uint64_t vb) {
     psp_gpu_dump_next_frame(path);
 }
 
+/* --profile-from / --profile-to VBLANK: sample only inside that window.
+ * Never before the first vblank: the call-stack unwinder takes the loader's
+ * function-table lock, and suspending the game thread while it loads a DLL
+ * (D3D, SDL, FFmpeg all load before the scheduler starts) deadlocks. */
+static volatile LONG g_prof_on = 0;
+static uint64_t g_prof_from, g_prof_to;
+
 static void on_vblank(void) {
     uint64_t vb = psp_sched_vblank_count();
+    g_prof_on = vb >= g_prof_from && (!g_prof_to || vb < g_prof_to);
     if (g_dump_key) { g_dump_key = 0; take_dump(vb); }
     if (g_find_vblank && vb == g_find_vblank) find_word();
     if (g_watch_late_addr && psp_display_flips() >= g_watch_late_flip) {
@@ -616,19 +625,39 @@ static void on_vblank(void) {
     menu_step();
     fps_meter_sample(&g_fpsm, psp_sched_now_us(), psp_display_flips());
     sample_fps(vb);
+    /* The picture for the window. With D3D11 and the display buffer ahead of
+     * VRAM it comes from an asynchronous copy (d3d11_present: no stall, at
+     * most a vblank or two late); otherwise from VRAM. Done headless too, so
+     * benchmarks pay what a windowed run pays. Captures and F12 read VRAM,
+     * which psp_mem_ptr's access hook keeps exact. */
+    int have_frame = 0;
     {
-        /* The displayed framebuffer is about to be read (window, captures):
-         * bring emulated VRAM up to date with the GPU copy. A no-op unless the
-         * GPU drew to it since the last sync, so this costs one readback per
-         * new frame -- and is done headless too, so benchmarks pay it. */
-        const psp_gpu_backend *be = psp_gpu_get_backend();
         uint32_t addr, stride, fmt;
         psp_display_get(&addr, &stride, &fmt);
-        if (be && addr) be->sync_vram(addr, 272u * stride * (fmt == 3 ? 4u : 2u));
+#ifdef _WIN32
+        const int p = addr ? d3d11_present(addr, stride, (int)fmt, g_frame, SCREEN_W, SCREEN_H) : 0;
+        if (p == 1) have_frame = 1;
+        if (p == 1 && getenv("PSP2I_PRESENT_VERIFY")) {
+            /* The asynchronous picture against VRAM made current (the access
+             * hook reads the same target back): they must match exactly. */
+            static uint32_t keep[SCREEN_W * SCREEN_H];
+            static uint64_t frames, bad_frames, bad_px;
+            memcpy(keep, g_frame, sizeof keep);
+            grab_frame();
+            uint64_t bad = 0;
+            for (int i = 0; i < SCREEN_W * SCREEN_H; i++) bad += keep[i] != g_frame[i];
+            frames++; if (bad) { bad_frames++; bad_px += bad; }
+            if (frames % 600 == 0 || (bad && bad_frames <= 5))
+                fprintf(stderr, "present-verify: %llu frames, %llu differ (%llu pixels)\n",
+                        (unsigned long long)frames, (unsigned long long)bad_frames, (unsigned long long)bad_px);
+        }
+        else if (p == 0 && !g_headless) have_frame = grab_frame();
+#endif
     }
 #ifdef _WIN32
     if (!g_headless) {
-        if (grab_frame()) { draw_overlay(); InvalidateRect(g_wnd, NULL, FALSE); }
+        if (have_frame) g_have_frame = 1;
+        if (g_have_frame) { compose(); InvalidateRect(g_wnd, NULL, FALSE); }
         if ((vb % 30) == 0) {
             char title[160];
             snprintf(title, sizeof title, "PSP2i (recompiled) - vblank %llu, GE cmds %llu",
@@ -640,7 +669,7 @@ static void on_vblank(void) {
 #endif
     for (int i = 0; i < g_noverlay_shot; i++) {
         if (g_overlay_shot[i] != vb || !grab_frame()) continue;
-        draw_overlay();
+        compose();
         char path[700];
         snprintf(path, sizeof path, "%s/overlay_%06llu.ppm", g_capture_dir, (unsigned long long)vb);
         FILE *f = fopen(path, "wb");
@@ -731,15 +760,61 @@ static volatile LONG g_prof_run;
 static uint64_t g_prof_total;
 static HANDLE g_prof_target;
 
+/* Call stacks (x64 unwind data; the thread is suspended). Recompiled code
+ * calls recompiled code directly, so the host stack is the game's call stack
+ * too: "inclusive" counts every function on the stack once per sample (a
+ * game function's whole subtree), and "outside the exe" attributes samples
+ * that land in kernel waits, the D3D driver or the CRT to the nearest caller
+ * in the exe -- which is what turns "ZwWaitForSingleObject 18%" into a
+ * function of ours. */
+#define PROF_DEPTH 96
+typedef struct { DWORD64 ip; uint32_t n; } prof_slot;
+static prof_slot g_prof_incl[PROF_SLOTS], g_prof_wait[PROF_SLOTS];
+static DWORD64 g_exe_lo, g_exe_hi;
+
+static void prof_count(DWORD64 ip, prof_slot *t) {
+    uint32_t h = (uint32_t)((ip >> 2) * 2654435761u) & (PROF_SLOTS - 1);
+    for (int k = 0; k < 64; k++, h = (h + 1) & (PROF_SLOTS - 1)) {
+        if (t[h].ip == ip) { t[h].n++; return; }
+        if (!t[h].ip) { t[h].ip = ip; t[h].n = 1; return; }
+    }
+}
+
+static void prof_stack(CONTEXT *c) {
+    DWORD64 seen[PROF_DEPTH];
+    int nseen = 0, outside = c->Rip < g_exe_lo || c->Rip >= g_exe_hi;
+    for (int d = 0; d < PROF_DEPTH && c->Rip; d++) {
+        const DWORD64 ip = c->Rip;
+        if (ip >= g_exe_lo && ip < g_exe_hi) {
+            if (outside) { prof_count(ip, g_prof_wait); outside = 0; }
+            int dup = 0;
+            for (int k = 0; k < nseen && !dup; k++) dup = seen[k] == ip;
+            if (!dup) { seen[nseen++] = ip; prof_count(ip, g_prof_incl); }
+        }
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ip, &base, NULL);
+        if (!fe) {                                 /* leaf: return address on top */
+            c->Rip = *(DWORD64 *)c->Rsp;
+            c->Rsp += 8;
+        } else {
+            void *hd = NULL;
+            DWORD64 est = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ip, fe, c, &hd, &est, NULL);
+        }
+        if (c->Rip == ip) break;
+    }
+}
+
 static DWORD WINAPI prof_thread(LPVOID unused) {
     (void)unused;
     timeBeginPeriod(1);
     while (g_prof_run) {
         Sleep(1);
+        if (!g_prof_on) continue;
         if (SuspendThread(g_prof_target) == (DWORD)-1) continue;
         CONTEXT ctx;
         memset(&ctx, 0, sizeof ctx);
-        ctx.ContextFlags = CONTEXT_CONTROL;
+        ctx.ContextFlags = CONTEXT_FULL;
         if (GetThreadContext(g_prof_target, &ctx)) {
             DWORD64 ip = ctx.Rip;
             uint32_t h = (uint32_t)((ip >> 2) * 2654435761u) & (PROF_SLOTS - 1);
@@ -748,6 +823,7 @@ static DWORD WINAPI prof_thread(LPVOID unused) {
                 if (!g_prof[h].ip) { g_prof[h].ip = ip; g_prof[h].n = 1; break; }
             }
             g_prof_total++;
+            prof_stack(&ctx);
         }
         ResumeThread(g_prof_target);
     }
@@ -756,6 +832,12 @@ static DWORD WINAPI prof_thread(LPVOID unused) {
 }
 
 static void prof_start(void) {
+    {
+        const uint8_t *b = (const uint8_t *)GetModuleHandleA(NULL);
+        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(b + ((const IMAGE_DOS_HEADER *)b)->e_lfanew);
+        g_exe_lo = (DWORD64)(uintptr_t)b;
+        g_exe_hi = g_exe_lo + nt->OptionalHeader.SizeOfImage;
+    }
     DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_prof_target,
                     THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0);
     g_prof_run = 1;
@@ -811,6 +893,31 @@ static void prof_report(void) {
     fprintf(stderr, "  top lines:\n");
     for (int i = 0; i < nln && i < 40; i++)
         fprintf(stderr, "    %5.1f%%  %s\n", 100.0 * ln[i].n / (double)g_prof_total, ln[i].name);
+
+    /* The stack tables, by function. */
+    for (int pass = 0; pass < 2; pass++) {
+        const prof_slot *t = pass ? g_prof_wait : g_prof_incl;
+        nfn = 0;
+        for (int i = 0; i < PROF_SLOTS; i++) {
+            if (!t[i].ip) continue;
+            char buf[sizeof(SYMBOL_INFO) + 256];
+            SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
+            si->SizeOfStruct = sizeof(SYMBOL_INFO);
+            si->MaxNameLen = 255;
+            DWORD64 d = 0;
+            char name[160] = "?";
+            if (SymFromAddr(proc, t[i].ip, &d, si)) snprintf(name, sizeof name, "%s", si->Name);
+            int k;
+            for (k = 0; k < nfn && strcmp(fn[k].name, name); k++) {}
+            if (k == nfn && nfn < 8192) { snprintf(fn[nfn].name, sizeof fn[nfn].name, "%s", name); fn[nfn++].n = 0; }
+            if (k < 8192) fn[k].n += t[i].n;
+        }
+        qsort(fn, (size_t)nfn, sizeof fn[0], prof_cmp);
+        fprintf(stderr, pass ? "  outside the exe (waits, driver, CRT), by nearest caller in the exe:\n"
+                             : "  inclusive (function and everything it calls):\n");
+        for (int i = 0; i < nfn && i < (pass ? 25 : 3 * top); i++)
+            fprintf(stderr, "    %5.1f%%  %s\n", 100.0 * fn[i].n / (double)g_prof_total, fn[i].name);
+    }
 }
 #endif
 
@@ -941,6 +1048,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--oracle-all"))                    oracle_all = 1;
 #ifdef _WIN32
         else if (!strcmp(argv[i], "--profile"))                       prof_start();
+        else if (!strcmp(argv[i], "--profile-from") && i + 1 < argc)  g_prof_from = strtoull(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--profile-to") && i + 1 < argc)    g_prof_to = strtoull(argv[++i], NULL, 0);
 #endif
         else if (!strcmp(argv[i], "--label-ring"))                    ring_arm();
         else if (!strcmp(argv[i], "--dump-on-bad") && i + 1 < argc)   dump_on_bad_access(argv[++i]);
