@@ -277,9 +277,39 @@ static void hook_counter_info(void (*original)(void)) {
     const uint32_t out = psp_cpu.r[4], z = psp_cpu.r[5];
     original();
     logf_line("[quest data] counter info: online %d, zone +189C=%d +18A0=%d area +18A4=%d +18A8=0x%X +18AC=%d zone id +18AE=%d -> slot %d, table %d",
-              (int32_t)psp_read32(0x08EE8FE8u), (int32_t)psp_read32(z + 0x189C), (int32_t)psp_read32(z + 0x18A0), (int32_t)psp_read32(z + 0x18A4),
+              (int32_t)psp_read32(0x08ED8FE8u), (int32_t)psp_read32(z + 0x189C), (int32_t)psp_read32(z + 0x18A0), (int32_t)psp_read32(z + 0x18A4),
               psp_read32(z + 0x18A8), (int16_t)psp_read16(z + 0x18AC), (int16_t)psp_read16(z + 0x18AE), (int32_t)psp_read32(out),
               (int32_t)psp_read32(out + 16));
+}
+
+/* Member table: 12 x 136 bytes; game info at +0x250 (128 B), net id at
+ * +0x2A0 (= game info +0x50), room member id at +0x2D4. */
+static void dump_members(uint32_t m) {
+    for (int i = 0; i < 12; i++) {
+        const uint32_t e = m + 136u * (uint32_t)i;
+        if (psp_read16(e + 0x2D4))
+            logf_line("[party]   member table %d: member id %u, net id %d", i, psp_read16(e + 0x2D4), (int32_t)psp_read32(e + 0x2A0));
+    }
+}
+
+static void hook_member_netid(void (*original)(void)) {
+    const uint32_t m = psp_cpu.r[4], member = psp_cpu.r[5] & 0xFFFF;
+    original();
+    static uint32_t last_member = 0xFFFFFFFF, last_r = 0;
+    if (member == last_member && psp_cpu.r[2] == last_r) return;
+    last_member = member; last_r = psp_cpu.r[2];
+    logf_line("[party] net id of member %u -> %d  (me %u, owner %u)  [game: %08X]", member, (int32_t)psp_cpu.r[2],
+              psp_read16(m + 2224), psp_read16(m + 2226), psp_cpu.r[31] - 8);
+    dump_members(m);
+}
+
+/* Server: a client's party net id is taken from the matching member table by
+ * the client's room member id (client+0x40) into client+0x60. */
+static void hook_server_client_netid(void (*original)(void)) {
+    const uint32_t c = psp_cpu.r[4];
+    original();
+    logf_line("[party] server client 0x%08X: member id %u -> net id %d (+0x20=%d +0x28=0x%08X)", c, psp_read16(c + 0x40),
+              (int8_t)psp_read8(c + 0x60), (int32_t)psp_read32(c + 0x20), psp_read32(c + 0x28));
 }
 
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
@@ -298,5 +328,7 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08CB2B5Cu, hook_member_info);
     psp_hook_set(0x08CB54E8u, hook_issue_netid);
     psp_hook_set(0x089489FCu, hook_counter_info);
+    psp_hook_set(0x08CB1538u, hook_member_netid);
+    psp_hook_set(0x08D10ACCu, hook_server_client_netid);
     psp_io_set_ms_log(ms_line);
 }
