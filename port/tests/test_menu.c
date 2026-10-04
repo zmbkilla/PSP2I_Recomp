@@ -272,6 +272,38 @@ static void test_login(void) {
     CHECK(act == LOGIN_ACT_CLOSE_OK);
 }
 
+/* The password field shows one '*' per typed character (the font had no
+ * '*', so typed passwords looked like no input). Field: x 166.., y 98..110. */
+static int pass_field_lit(const login_state *l) {
+    static uint32_t px[480 * 272];
+    for (int i = 0; i < 480 * 272; i++) px[i] = 0xFF000000u;
+    menu_image img = { px, 480, 272 };
+    login_draw(l, &img);
+    int lit = 0;
+    for (int y = 101; y < 108; y++)
+        for (int x = 168; x < 400; x++)
+            if ((px[y * 480 + x] & 0xFFFFFF) == 0xFFFFFF) lit++;
+    return lit;
+}
+
+static void test_password_visible(void) {
+    login_state l;
+    login_open(&l, "s", "user");
+    l.sel = LOGIN_FIELD_USER;                       /* no cursor in the password field */
+    const int empty = pass_field_lit(&l);
+    for (const char *c = "ppsspp123"; *c; c++) { l.sel = LOGIN_FIELD_PASS; login_type(&l, *c); }
+    CHECK(!strcmp(l.pass, "ppsspp123"));
+    l.sel = LOGIN_FIELD_USER;
+    const int typed = pass_field_lit(&l);
+    CHECK(empty == 0);
+    CHECK(typed > 0);                               /* something is shown for the password */
+    /* exactly nine asterisks: the '*' glyph lights 11 pixels */
+    CHECK(typed == 9 * 11);
+    /* and the cursor is visible in the selected field */
+    l.sel = LOGIN_FIELD_PASS;
+    CHECK(pass_field_lit(&l) > typed);
+}
+
 /* The SEGA SERVER editor: Circle types, Start saves, Cross cancels. */
 static void test_textedit(void) {
     textedit e;
@@ -517,6 +549,7 @@ int main(void) {
     test_buttons();
     test_rs_speed();
     test_login();
+    test_password_visible();
     test_textedit();
     test_camera_axis();
     test_meter();
