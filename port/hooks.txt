@@ -11,3 +11,9 @@
 0x08D56918   # archive find-by-name (used by the quest data manager): quest-table names logged (host/gamelog.c)
 0x0880B6C4   # quest table entry -> party slot (flag +0x1C bit 0, slot +0x1E): logged (host/gamelog.c)
 0x0888B62C   # client: quest-table request task (table a2, slot a3, mode t0): logged (host/gamelog.c)
+0x08B330B0   # client: session packet 0x0201 (player enters zone): logged (host/gamelog.c)
+0x08A3DE1C   # client: player is the local player?: logged (host/gamelog.c)
+0x08CB611C   # TPspNpMatching2: may send the chara-info request? (+0x8FC == +0xB68, ...): logged
+0x08CB25E0   # TPspNpMatching2::sendRoomMessageCharaInfoReq: logged
+0x08CB2B5C   # TPspNpMatching2::updateGameOfRoomMemberInfo(member, info): logged
+0x08CB54E8   # TPspNpMatching2::issueNetId -> net id: logged
