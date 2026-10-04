@@ -17,3 +17,4 @@
 0x08CB25E0   # TPspNpMatching2::sendRoomMessageCharaInfoReq: logged
 0x08CB2B5C   # TPspNpMatching2::updateGameOfRoomMemberInfo(member, info): logged
 0x08CB54E8   # TPspNpMatching2::issueNetId -> net id: logged
+0x089489FC   # client: quest-counter info from the current zone (slot, table): logged (host/gamelog.c)

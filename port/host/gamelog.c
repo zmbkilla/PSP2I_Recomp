@@ -241,7 +241,11 @@ static void hook_is_local(void (*original)(void)) {
 static void hook_may_charainfo(void (*original)(void)) {
     const uint32_t m = psp_cpu.r[4];
     original();
-    logf_line("[party] chara-info allowed? +0x8FC=%d +0xB68=%d -> %d", (int32_t)psp_read32(m + 0x8FC), (int32_t)psp_read32(m + 0xB68), (int32_t)psp_cpu.r[2]);
+    static int32_t last[3] = {-99, -99, -99};
+    const int32_t now[3] = {(int32_t)psp_read32(m + 0x8FC), (int32_t)psp_read32(m + 0xB68), (int32_t)psp_cpu.r[2]};
+    if (now[0] == last[0] && now[1] == last[1] && now[2] == last[2]) return;
+    last[0] = now[0]; last[1] = now[1]; last[2] = now[2];
+    logf_line("[party] chara-info allowed? +0x8FC=%d +0xB68=%d -> %d", now[0], now[1], now[2]);
 }
 
 static void hook_charainfo_req(void (*original)(void)) {
@@ -266,6 +270,18 @@ static void hook_issue_netid(void (*original)(void)) {
     }
 }
 
+/* The quest counter's slot comes from the zone the player stands in
+ * (vfunc +0x110 of the mode object): online, zone id +0x18AE picks it
+ * (3001 -> by area type +0x18A4, 2004 -> 0, 4001 -> 3, 5001 -> 2), else -1. */
+static void hook_counter_info(void (*original)(void)) {
+    const uint32_t out = psp_cpu.r[4], z = psp_cpu.r[5];
+    original();
+    logf_line("[quest data] counter info: online %d, zone +189C=%d +18A0=%d area +18A4=%d +18A8=0x%X +18AC=%d zone id +18AE=%d -> slot %d, table %d",
+              (int32_t)psp_read32(0x08EE8FE8u), (int32_t)psp_read32(z + 0x189C), (int32_t)psp_read32(z + 0x18A0), (int32_t)psp_read32(z + 0x18A4),
+              psp_read32(z + 0x18A8), (int16_t)psp_read16(z + 0x18AC), (int16_t)psp_read16(z + 0x18AE), (int32_t)psp_read32(out),
+              (int32_t)psp_read32(out + 16));
+}
+
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
 
 void gamelog_init(const char *exe_dir) {
@@ -281,5 +297,6 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08CB25E0u, hook_charainfo_req);
     psp_hook_set(0x08CB2B5Cu, hook_member_info);
     psp_hook_set(0x08CB54E8u, hook_issue_netid);
+    psp_hook_set(0x089489FCu, hook_counter_info);
     psp_io_set_ms_log(ms_line);
 }
