@@ -285,9 +285,11 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
 
     uint32_t bits = 0;
     float bx = 0.0f, by = 0.0f;            /* the most deflected stick wins */
+    int16_t rx = 0, ry = 0;                /* its raw SDL values, for the trace */
     for (int i = 0; i < g_ndev; i++) {
         device *d = &g_dev[i];
         float x = 0.0f, y = 0.0f;
+        int16_t sx = 0, sy = 0;
         if (d->pad) {
             SDL_Gamepad *p = d->pad;
             static const struct { int b; uint32_t bit; } MAP[] = {
@@ -299,8 +301,10 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
                 if (S.GetGamepadButton(p, MAP[k].b)) bits |= MAP[k].bit;
             if (S.GetGamepadAxis(p, GA_LTRIGGER) > 16384) bits |= P_L;
             if (S.GetGamepadAxis(p, GA_RTRIGGER) > 16384) bits |= P_R;
-            x = (float)S.GetGamepadAxis(p, GA_LEFTX) / 32767.0f;
-            y = (float)S.GetGamepadAxis(p, GA_LEFTY) / 32767.0f;
+            sx = S.GetGamepadAxis(p, GA_LEFTX);
+            sy = S.GetGamepadAxis(p, GA_LEFTY);
+            x = (float)sx / 32767.0f;
+            y = (float)sy / 32767.0f;
         } else {
             SDL_Joystick *j = d->joy;
             const int nb = S.GetNumJoystickButtons(j);
@@ -314,8 +318,10 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
                 if (h & SDL_HAT_RIGHT) bits |= P_RIGHT;
             }
             if (S.GetNumJoystickAxes(j) >= 2) {
-                x = (float)S.GetJoystickAxis(j, 0) / 32767.0f;
-                y = (float)S.GetJoystickAxis(j, 1) / 32767.0f;
+                sx = S.GetJoystickAxis(j, 0);
+                sy = S.GetJoystickAxis(j, 1);
+                x = (float)sx / 32767.0f;
+                y = (float)sy / 32767.0f;
                 if (x < -0.5f) bits |= P_LEFT;
                 if (x > 0.5f) bits |= P_RIGHT;
                 if (y < -0.5f) bits |= P_UP;
@@ -323,7 +329,7 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
             }
         }
         deadzone(&x, &y);
-        if (x * x + y * y > bx * bx + by * by) { bx = x; by = y; }
+        if (x * x + y * y > bx * bx + by * by) { bx = x; by = y; rx = sx; ry = sy; }
     }
     /* PSP: 0 = left/up, 255 = right/down, 128 = centre (SDL's y also grows
      * downward). */
@@ -336,7 +342,11 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
         static uint32_t lb = 0xFFFFFFFFu;
         static uint8_t lx, ly;
         if (bits != lb || abs((int)*ax - lx) > 8 || abs((int)*ay - ly) > 8) {
-            fprintf(stderr, "input: pad buttons 0x%04X analog %3u,%3u\n", bits, *ax, *ay);
+            /* raw: SDL's axes as read; |raw|: their magnitude (1.0 = full
+             * deflection on a circular gate); psp: what the game reads. */
+            const float rm = sqrtf((float)rx * rx + (float)ry * ry) / 32767.0f;
+            fprintf(stderr, "input: pad buttons 0x%04X raw %6d,%6d |raw| %.3f psp %3u,%3u\n",
+                    bits, rx, ry, rm, *ax, *ay);
             lb = bits; lx = *ax; ly = *ay;
         }
     }

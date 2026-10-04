@@ -216,6 +216,7 @@ static int grab_frame(void) {
 }
 
 static void ctrl_commit(void);
+static int g_dump_key;                     /* F12 pressed: capture on the next vblank */
 
 #ifdef _WIN32
 static HWND g_wnd;
@@ -241,7 +242,9 @@ static uint32_t key_bit(WPARAM vk) {
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_KEYDOWN: g_keys |= key_bit(wp);  ctrl_commit(); return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_F12 && !(lp & (1 << 30))) g_dump_key = 1;   /* not on auto-repeat */
+        g_keys |= key_bit(wp);  ctrl_commit(); return 0;
     case WM_KEYUP:   g_keys &= ~key_bit(wp); ctrl_commit(); return 0;
     case WM_CLOSE:   psp_request_exit(); return 0;
     case WM_PAINT: {
@@ -403,9 +406,44 @@ static void report_fps(void) {
 
 static uint32_t g_watch_late_addr;
 static uint64_t g_watch_late_flip;
+/* --find-word VALUE VBLANK: list every RAM word equal to VALUE at that vblank
+ * (to find where the game keeps a pointer before watching it). */
+static uint32_t g_find_value;
+static uint64_t g_find_vblank;
+static void find_word(void) {
+    int n = 0;
+    for (uint32_t off = 0; off + 4 <= PSP_RAM_SIZE && n < 64; off += 4) {
+        uint32_t w;
+        memcpy(&w, psp_mem.ram + off, 4);
+        if (w == g_find_value) {
+            fprintf(stderr, "find-word: 0x%08X at 0x%08X\n", w, PSP_RAM_BASE + off);
+            n++;
+        }
+    }
+    fprintf(stderr, "find-word: %d match(es) for 0x%08X at vblank %llu\n", n, g_find_value,
+            (unsigned long long)psp_sched_vblank_count());
+}
+
+static void exe_dir(char *out, size_t cap);
+
+/* F12: the displayed frame as dumps/frame_<vblank>.ppm and every draw of the
+ * next frame as dumps/draws_<vblank>.txt, next to the exe. */
+static void take_dump(uint64_t vb) {
+    char dir[600], path[700];
+    exe_dir(dir, sizeof dir);
+    snprintf(path, sizeof path, "%s/dumps", dir);
+    host_mkdir(path);
+    snprintf(path, sizeof path, "%s/dumps/frame_%06llu.ppm", dir, (unsigned long long)vb);
+    psp_display_capture(path);
+    fprintf(stderr, "dump: F12 at vblank %llu -> %s\n", (unsigned long long)vb, path);
+    snprintf(path, sizeof path, "%s/dumps/draws_%06llu.txt", dir, (unsigned long long)vb);
+    psp_gpu_dump_next_frame(path);
+}
 
 static void on_vblank(void) {
     uint64_t vb = psp_sched_vblank_count();
+    if (g_dump_key) { g_dump_key = 0; take_dump(vb); }
+    if (g_find_vblank && vb == g_find_vblank) find_word();
     if (g_watch_late_addr && psp_display_flips() >= g_watch_late_flip) {
         /* --watch-from-flip: arm the write watch only once the game is there. */
         psp_mem_watch_write(g_watch_late_addr);
@@ -440,6 +478,27 @@ static void on_vblank(void) {
         char path[700];
         snprintf(path, sizeof path, "%s/frame_%06llu.ppm", g_capture_dir, (unsigned long long)vb);
         psp_display_capture(path);
+        /* PSP2I_CAPTURE_FB=ADDR: also capture a 512-wide 8888 buffer at ADDR
+         * (e.g. a game's off-screen scene target) as fb_<vblank>.ppm. */
+        static const char *fbenv = (const char *)1;
+        if (fbenv == (const char *)1) fbenv = getenv("PSP2I_CAPTURE_FB");
+        if (fbenv) {
+            const uint32_t a = (uint32_t)strtoul(fbenv, NULL, 0);
+            const psp_gpu_backend *be = psp_gpu_get_backend();
+            if (be) be->sync_vram(a, 272u * 512u * 4u);
+            snprintf(path, sizeof path, "%s/fb_%06llu.ppm", g_capture_dir, (unsigned long long)vb);
+            FILE *f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P6\n480 272\n255\n");
+                for (uint32_t y = 0; y < 272; y++)
+                    for (uint32_t x = 0; x < 480; x++) {
+                        uint32_t p = psp_read32(a + (y * 512u + x) * 4u);
+                        uint8_t rgb[3] = { (uint8_t)p, (uint8_t)(p >> 8), (uint8_t)(p >> 16) };
+                        fwrite(rgb, 1, 3, f);
+                    }
+                fclose(f);
+            }
+        }
     }
     if (g_seconds > 0 && psp_sched_now_us() >= (uint64_t)(g_seconds * 1e6)) psp_request_exit();
 }
@@ -647,6 +706,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--headless"))                      g_headless = 1;
         else if (!strcmp(argv[i], "--sdl"))                           want_sdl = 1;
         else if (!strcmp(argv[i], "--no-sdl"))                        want_sdl = 0;
+        else if (!strcmp(argv[i], "--find-word") && i + 2 < argc) {
+            g_find_value = (uint32_t)strtoul(argv[i + 1], NULL, 0);
+            g_find_vblank = strtoull(argv[i + 2], NULL, 0);
+            i += 2;
+        }
         else if (!strcmp(argv[i], "--watch-from-flip") && i + 2 < argc) {
             g_watch_late_addr = (uint32_t)strtoul(argv[i + 1], NULL, 0);
             g_watch_late_flip = strtoull(argv[i + 2], NULL, 0);

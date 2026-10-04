@@ -258,6 +258,11 @@ static void rt_readback(rt_entry *t) {
 static void rt_upload(rt_entry *t) {
     uint8_t *v = vram();
     if (!v) return;
+    static int trace = -1;
+    if (trace < 0) trace = getenv("PSP2I_RT_TRACE") != NULL;
+    if (trace) fprintf(stderr, "d3d11: upload VRAM+0x%06X stride %u fmt %d rows %u (flip %llu, %s)\n",
+                       t->off, t->stride, t->fmt, t->rows, (unsigned long long)frame_no(),
+                       t->dirty ? "DIRTY" : "clean");
     const int bpp = bpp_of(t->fmt);
     uint32_t *px = (uint32_t *)malloc((size_t)t->stride * t->rows * 4);
     if (!px) return;
