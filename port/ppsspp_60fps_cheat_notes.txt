@@ -1,0 +1,134 @@
+Phantasy Star Portable 2 Infinity (NPJH50332) -- notes on the PPSSPP "60 FPS Patch" cheat
+==========================================================================================
+
+Source: reverse-engineering done while statically recompiling the game (psprecomp port).
+Addresses below are PSP memory addresses; a CWCheat line "0x0aaaaaaa" (byte write) or
+"0x2aaaaaaa" (32-bit write) targets 0x08800000 + aaaaaaa.
+
+The cheat as circulated:
+
+  _C0 60 FPS Patch
+  _L 0x0069ABE8 0x0000003C
+  _L 0x0069ABE9 0x0000003C
+  _L 0x006D2E94 0x00000001
+  _L 0x2016E914 0x2404003C
+  _L 0x202937B4 0x46010043
+  _L 0x20324A50 0x2404003C
+  _L 0x20334B04 0x3403003C
+  _L 0x20334B08 0x3402003C
+  _L 0x20334B78 0x3404003C
+  _L 0x20382284 0x3404003C
+  _L 0x201E14CC 0x34020000
+  _L 0x201E1600 0x34020000
+
+
+1. How the game handles frame rate
+----------------------------------
+
+The engine is frame-rate aware. It has a setFrameRate(fps) function at 0x08B81890:
+
+  - 0x08B81830 fills a timing state at 0x08EDA54C:
+        +0x08 fps (float)          +0x0C fps (int)
+        +0x10 60/fps (vblanks per frame, float), +0x14 the same rounded
+        +0x18 30/fps   <- the per-frame step in "30 Hz ticks" (1.0 at 30 fps, 0.5 at 60)
+        +0x1C 1/fps    <- dt in seconds
+  - 0x08D63100(fps) stores fps in a second object;
+  - 0x08B85A20(60/fps) sets the vblank interval (byte at 0x08E9D46C) that the frame
+    function 0x08B85AB0 uses to pace frames;
+  - 0x08B81FCC switches over every fps from 15 to 60 (46-entry jump table).
+
+The game normally asks for 30, drops to 20 in heavy scenes, and has slow modes of 15.
+Systems scale their per-frame steps by the values above, so most of the game already works
+at other frame rates. The cheat simply asks for 60 everywhere the game asks for 30 or 20.
+
+
+2. Line-by-line
+---------------
+
+  0x0069ABE8 / 0x0069ABE9  (bytes at 0x08E9ABE8 / 0x08E9ABE9)
+      The frame-rate mode table [30, 20, 15, 15], read by setFrameRateMode (0x08B81F8C:
+      fps = table[mode & 3]; setFrameRate(fps)). The cheat makes modes 0 and 1 mean 60.
+      VERDICT: correct and necessary.
+
+  0x2016E914  (0x0896E914: addiu a0,zero,30 -> 60)
+  0x20324A50  (0x08B24A50: addiu a0,zero,30 -> 60)
+  0x20382284  (0x08B82284: addiu a0,zero,30 -> 60)
+      Direct setFrameRate(30) calls at scene entry/initialisation.
+      VERDICT: correct and necessary.
+
+  0x20334B04 / 0x20334B08  (0x08B34B04/08: addiu v1,zero,30 / addiu v0,zero,20 -> 60 / 60)
+      0x08B34AE8 chooses 30 or 20 depending on a scene condition (0x08ACFB3C); 20 is the
+      PSP's heavy-scene fallback. Making both 60 is fine for emulators.
+      VERDICT: correct.
+      (Note the cheat writes "ori reg,zero,60" (0x34..) instead of "addiu reg,zero,60"
+      (0x24..). For a small positive constant they are equivalent.)
+
+  0x20334B78  (0x08B34B78: addiu a0,zero,30 -> 60)
+      0x08B34B60: "if the current fps != 30, setFrameRate(30)". It reads the current fps
+      at 0x08EDA558 and compares with 30 (the compare constant at 0x08B34B70 is NOT
+      patched by the cheat). With the cheat, the current fps is 60, which is != 30, so
+      every call to 0x08B34B60 calls setFrameRate(60) again. That is harmless (idempotent),
+      but the compare at 0x08B34B70 could also be changed to 60 for tidiness:
+          _L 0x20334B70 0x2402003C      (addiu v0,zero,60)
+      VERDICT: correct; optional tidy-up above.
+
+  0x202937B4  (0x08A937B4: div.s f1,f1,f0 -> div.s f1,f0,f1)
+      This advances a 16-bit phase at object+0x98 by trunc(step(+0xC0) * scale) every
+      frame. The original scale = fps/30 is the factor for a DURATION (a count in 30 Hz
+      ticks converted to frames). For a per-frame STEP the correct factor is 30/fps (the
+      engine's own +0x18 value). At 30 fps both are 1.0. At 60 fps the original makes the
+      phase run at 4x (2x per frame, times 2x the frames); even at the game's own 20 fps
+      mode it runs at 0.44x. This is a genuine bug in the original game for fps != 30,
+      and the cheat's swap fixes it.
+      VERDICT: correct and necessary -- keep.
+
+  0x201E14CC / 0x201E1600  (0x089E14CC / 0x089E1600: lbu v0,12(v0) -> ori v0,zero,0)
+      These are inside 0x089E1494 and 0x089E15C8, two update functions in a menu/state
+      machine (called from 0x089E8090, which also polls buttons). Each returns early,
+      skipping its update, when a linked object (object+0x18) has byte +12 == 1. Forcing
+      the load to 0 means the update never skips. What byte +12 means was NOT established.
+      It does not look like a frame-rate mechanism (no fps/timing value involved), so
+      forcing it may itself cause the "minor logic bugs" reported with this cheat.
+      VERDICT: UNVERIFIED -- suggest testing the cheat WITHOUT these two lines.
+
+  0x006D2E94  (byte at 0x08ED2E94 = 1)
+      A BSS flag with no direct references in the code (most likely a struct field reached
+      through a base pointer; a related flag is at 0x08ED2E64, which gates part of the scene
+      setup at 0x0896E8F8). Its purpose was NOT established.
+      VERDICT: UNVERIFIED -- suggest testing the cheat WITHOUT this line.
+
+
+3. Suggested revised cheat (for testing)
+----------------------------------------
+
+Keeps the frame-rate requests, the table and the genuine phase-step fix. Drops the
+three unverified lines, and adds the optional compare tidy-up.
+
+  _C0 60 FPS Patch (revised, frame-rate requests + phase fix only)
+  _L 0x0069ABE8 0x0000003C
+  _L 0x0069ABE9 0x0000003C
+  _L 0x2016E914 0x2404003C
+  _L 0x202937B4 0x46010043
+  _L 0x20324A50 0x2404003C
+  _L 0x20334B04 0x3403003C
+  _L 0x20334B08 0x3402003C
+  _L 0x20334B70 0x2402003C
+  _L 0x20334B78 0x3404003C
+  _L 0x20382284 0x3404003C
+
+If something visibly breaks without the dropped lines (a menu that stops updating, or
+similar), please report what and where. That would tell us what byte +12 at
+0x089E14CC/0x089E1600 and the flag at 0x08ED2E94 actually control.
+
+
+4. Caveats
+----------
+
+  - This analysis is static, plus testing in the recompiled port; it has not been
+    play-tested in PPSSPP. Movement speed, animation rate and timers at 60 fps still
+    need confirming in a scene that actually sustains 60.
+  - The game assumes it reaches its target frame rate. Per-frame steps are fixed from the
+    target, not measured, so if the emulator cannot sustain 60 the whole game runs slower
+    than real time rather than skipping frames.
+  - The port does not use memory patches. It hooks setFrameRate (0x08B81890), mapping
+    requests for 30/20 to 60, and applies the 0x08A937B4 fix at recompile time.
