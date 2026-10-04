@@ -294,13 +294,22 @@ void input_sdl_shutdown(void) {
 }
 
 static uint32_t g_host_bits;
+static uint8_t  g_rs_x = 128, g_rs_y = 128;
 
 uint32_t input_sdl_host_buttons(void) { return g_host_bits; }
+void input_sdl_right_stick(uint8_t *x, uint8_t *y) { *x = g_rs_x; *y = g_rs_y; }
+
+static uint8_t stick_byte(int16_t v) {
+    const int i = 128 + (int)((float)v / 32767.0f * 127.5f);
+    return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i);
+}
 
 int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
     *buttons = 0; *ax = 128; *ay = 128;
     g_host_bits = 0;
+    g_rs_x = g_rs_y = 128;
     if (!g_active) return 0;
+    int rs_best = 0;
     S.UpdateGamepads();                    /* also detects added/removed devices */
     if (g_polls++ % 30 == 0) rescan();     /* twice a second is prompt enough */
     S.FlushEvents(0, 0xFFFF);              /* nothing reads SDL's queue; keep it empty */
@@ -321,6 +330,11 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
             };
             for (size_t k = 0; k < sizeof MAP / sizeof MAP[0]; k++)
                 if (S.GetGamepadButton(p, MAP[k].b)) bits |= MAP[k].bit;
+            {   /* right stick: the most deflected pad wins */
+                const int16_t rx = S.GetGamepadAxis(p, GA_RIGHTX), ry = S.GetGamepadAxis(p, GA_RIGHTY);
+                const int mag = abs((int)rx) + abs((int)ry);
+                if (mag > rs_best) { rs_best = mag; g_rs_x = stick_byte(rx); g_rs_y = stick_byte(ry); }
+            }
             if (S.GetGamepadButton(p, GB_GUIDE))   g_host_bits |= INPUT_HOST_GUIDE;
             if (S.GetGamepadButton(p, GB_RSTICK))  g_host_bits |= INPUT_HOST_RSTICK;
             if (S.GetGamepadAxis(p, GA_LTRIGGER) > 16384) bits |= P_L;
@@ -382,4 +396,5 @@ int  input_sdl_init(void) { return -1; }
 void input_sdl_shutdown(void) {}
 int  input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) { *buttons = 0; *ax = *ay = 128; return 0; }
 uint32_t input_sdl_host_buttons(void) { return 0; }
+void input_sdl_right_stick(uint8_t *x, uint8_t *y) { *x = *y = 128; }
 #endif

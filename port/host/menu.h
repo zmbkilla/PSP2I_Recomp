@@ -22,7 +22,10 @@ enum {
 };
 
 /* Menu items, top to bottom. */
-enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_CLOSE, MENU_ITEMS };
+enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_CLOSE, MENU_ITEMS };
+
+/* Right-stick camera sensitivity: 1.00x .. 2.00x in 0.25 steps. */
+#define MENU_RS_STEPS 5
 
 /* What menu_update() changed, for the caller to act on. */
 enum {
@@ -30,6 +33,7 @@ enum {
     MFX_CLOSED      = 1 << 1,
     MFX_FPS_CHANGED = 1 << 2,   /* fps is the new frame-rate choice */
     MFX_SHOW_FPS    = 1 << 3,   /* show_fps changed */
+    MFX_RS_SPEED    = 1 << 4,   /* rs_step changed: menu_rs_speed() */
 };
 
 typedef struct {
@@ -37,12 +41,18 @@ typedef struct {
     int      sel;          /* MENU_* */
     int      fps;          /* 30 or 60 */
     int      show_fps;     /* the FPS counter */
+    int      rs_step;      /* right-stick sensitivity, 0..MENU_RS_STEPS-1 (1.00x + 0.25x each) */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */
     uint32_t game_mask;    /* PSP buttons held through a close, kept from the game until released */
 } menu_state;
 
 void menu_init(menu_state *m, int fps, int show_fps);
+
+/* Right-stick sensitivity as a multiplier (1.00..2.00), and setting it from
+ * one (rounded to the nearest step, clamped). */
+float menu_rs_speed(const menu_state *m);
+void  menu_set_rs_speed(menu_state *m, float speed);
 
 /* PSP buttons (and the analog stick, 0..255) as menu inputs, following the
  * game's own conventions: Circle accepts, Cross goes back; the D-pad, or the

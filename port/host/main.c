@@ -28,6 +28,9 @@
  *   --menu-key F1..F9|F11  the keyboard key that opens/closes the settings
  *               menu (default F1; the controller's Guide or R3 also do)
  *   --show-fps / --hide-fps  the measured-FPS counter at start (default shown)
+ *   --rs-speed 1.0..2.0  right-stick camera sensitivity at start (default
+ *               1.0; the settings menu changes it in 0.25 steps)
+ *   --rstick X,Y@VBLANK[+N]  scripted right stick (PSP-style bytes), for tests
  *   --overlay-shot VBLANK  (repeatable) save the presented image, overlay
  *               included, as <capture-dir>/overlay_<vblank>.ppm
  *   --audio / --no-audio  sound through SDL3.dll (audio_sdl.c): on by default
@@ -56,6 +59,7 @@
 #include "atrac_ffmpeg.h"
 #include "framerate.h"
 #include "menu.h"
+#include "camera.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -385,6 +389,8 @@ static int add_press(const char *spec) {
 static struct { uint8_t x, y; uint64_t at, len; } g_stick[MAX_STICK];
 static int g_nstick;
 static int g_script_stick = -1;            /* index held now, -1 none */
+static struct { uint8_t x, y; uint64_t at, len; } g_rstick[MAX_STICK];   /* --rstick */
+static int g_nrstick;
 
 static int add_stick(const char *spec) {
     unsigned x, y;
@@ -495,11 +501,26 @@ static void menu_step(void) {
         fprintf(stderr, "menu: frame rate %d fps\n", g_menu.fps);
     }
     if (fx & MFX_SHOW_FPS) fprintf(stderr, "menu: FPS counter %s\n", g_menu.show_fps ? "on" : "off");
+    if (fx & MFX_RS_SPEED) {
+        camera_set_speed(menu_rs_speed(&g_menu));
+        fprintf(stderr, "menu: right-stick sensitivity %.2fx\n", (double)menu_rs_speed(&g_menu));
+    }
     if (fx & (MFX_OPENED | MFX_CLOSED)) {
         fprintf(stderr, "menu: %s at vblank %llu\n", (fx & MFX_OPENED) ? "opened" : "closed",
                 (unsigned long long)psp_sched_vblank_count());
         ctrl_commit();                     /* take or give back the game's input now */
     }
+}
+
+/* The right stick for the camera (camera.c): SDL, or --rstick in scripts;
+ * centred while the settings menu is open. */
+static void update_camera_stick(uint64_t vb) {
+    uint8_t rx = 128, ry = 128;
+    if (g_sdl_on) input_sdl_right_stick(&rx, &ry);
+    for (int i = 0; i < g_nrstick; i++)
+        if (vb >= g_rstick[i].at && vb < g_rstick[i].at + g_rstick[i].len) { rx = g_rstick[i].x; ry = g_rstick[i].y; }
+    if (g_menu.open) rx = ry = 128;
+    camera_set_stick(rx, ry);
 }
 
 static void poll_controllers(void) {
@@ -623,6 +644,7 @@ static void on_vblank(void) {
     apply_script(vb);
     poll_controllers();
     menu_step();
+    update_camera_stick(vb);
     fps_meter_sample(&g_fpsm, psp_sched_now_us(), psp_display_flips());
     sample_fps(vb);
     /* The picture for the window. With D3D11 and the display buffer ahead of
@@ -721,6 +743,7 @@ static void report(void) {
     fprintf(stderr, "\n==== psp2i report ====\n");
     fprintf(stderr, "  run time            %.2f s\n", psp_sched_now_us() / 1e6);
     report_fps();
+    camera_report(stderr);
 #ifdef _WIN32
     d3d11_report(stderr);
 #endif
@@ -965,6 +988,33 @@ static void prof_report(void) {
 }
 #endif
 
+/* --watch hits in a release build: name the recompiled functions on the host
+ * stack (the host stack is the game's call stack), innermost first. */
+#ifdef _WIN32
+static void watch_backtrace(uint32_t addr, uint32_t value) {
+    (void)addr; (void)value;
+    static int sym_ready;
+    HANDLE proc = GetCurrentProcess();
+    if (!sym_ready) { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS); SymInitialize(proc, NULL, TRUE); sym_ready = 1; }
+    void *frames[24];
+    const USHORT n = CaptureStackBackTrace(1, 24, frames, NULL);
+    fprintf(stderr, "    stack:");
+    for (USHORT i = 0; i < n; i++) {
+        char buf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
+        si->SizeOfStruct = sizeof(SYMBOL_INFO);
+        si->MaxNameLen = 255;
+        DWORD64 d = 0;
+        if (SymFromAddr(proc, (DWORD64)(uintptr_t)frames[i], &d, si)) {
+            if (!strncmp(si->Name, "psp_", 4) && strcmp(si->Name, "psp_write_f32") && strcmp(si->Name, "psp_write32"))
+                fprintf(stderr, " %s", si->Name);
+            if (!strcmp(si->Name, "thread_body")) break;
+        }
+    }
+    fprintf(stderr, "\n");
+}
+#endif
+
 /* ---- crash reporting ---------------------------------------------------------- */
 
 #ifdef _WIN32
@@ -1031,6 +1081,7 @@ int main(int argc, char **argv) {
     int want_audio = -1;
     int fps = 30;
     int show_fps = 1;                      /* the FPS counter: shown unless --hide-fps */
+    float rs_speed = 1.0f;                 /* right-stick camera sensitivity */
     uint32_t dump_addr = 0, args_addr = 0;
     uint64_t args_flip = 0;
     const char *dump_path = NULL;
@@ -1044,6 +1095,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-sdl"))                        want_sdl = 0;
         else if (!strcmp(argv[i], "--fps") && i + 1 < argc)           fps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--show-fps"))                      show_fps = 1;
+        else if (!strcmp(argv[i], "--rs-speed") && i + 1 < argc)      rs_speed = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--rstick") && i + 1 < argc && g_nrstick < MAX_STICK) {
+            unsigned x, y; unsigned long long at = 0, len = 6;
+            if (sscanf(argv[++i], "%u,%u@%llu+%llu", &x, &y, &at, &len) < 3 || x > 255 || y > 255) {
+                fprintf(stderr, "bad --rstick %s (want e.g. 255,128@4000+60)\n", argv[i]); return 1;
+            }
+            g_rstick[g_nrstick].x = (uint8_t)x; g_rstick[g_nrstick].y = (uint8_t)y;
+            g_rstick[g_nrstick].at = at; g_rstick[g_nrstick].len = len;
+            g_nrstick++;
+        }
         else if (!strcmp(argv[i], "--hide-fps"))                      show_fps = 0;
         else if (!strcmp(argv[i], "--overlay-shot") && i + 1 < argc && g_noverlay_shot < MAX_OVERLAY_SHOT)
             g_overlay_shot[g_noverlay_shot++] = strtoull(argv[++i], NULL, 0);
@@ -1138,6 +1199,7 @@ int main(int argc, char **argv) {
      * costing about 20 fps in the lobby at 60 fps. Only --profile set this
      * before, which is why profiled runs looked faster. */
     timeBeginPeriod(1);
+    psp_mem_set_watch_hook(watch_backtrace);
 #endif
     printf("root:  %s\neboot: %s\n", root, eboot);
 
@@ -1185,6 +1247,8 @@ int main(int argc, char **argv) {
     menu_init(&g_menu, fps, show_fps);
     fps_meter_init(&g_fpsm);
     framerate_init(fps);
+    menu_set_rs_speed(&g_menu, rs_speed);
+    camera_init(menu_rs_speed(&g_menu));
     psp_sched_set_vblank_hook(on_vblank);
 
     printf("starting module_start at 0x%08X\n", mi.entry);

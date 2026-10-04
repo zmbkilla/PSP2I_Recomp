@@ -23,4 +23,9 @@ int  input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay);
 #define INPUT_HOST_RSTICK 0x2u
 uint32_t input_sdl_host_buttons(void);
 
+/* The right stick as of the last input_sdl_poll, as PSP-style bytes (0..255,
+ * 128 = centre; the most deflected of the connected gamepads), with no dead
+ * zone applied: the camera applies the game cheat's own (camera.c). */
+void input_sdl_right_stick(uint8_t *x, uint8_t *y);
+
 #endif /* PSP2I_INPUT_SDL_H */

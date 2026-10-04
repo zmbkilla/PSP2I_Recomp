@@ -30,6 +30,7 @@ add_executable(psp2i
     host/atrac_ffmpeg.c
     host/framerate.c
     host/menu.c
+    host/camera.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
     gen/recomp_funcs.c
     gen/recomp_imports.c
@@ -62,7 +63,7 @@ endif()
 # Unit tests for the settings menu, the FPS counter and run-time frame-rate
 # switching (no game data needed): ctest -C Release, or run test_menu.
 enable_testing()
-add_executable(test_menu tests/test_menu.c host/menu.c host/framerate.c)
+add_executable(test_menu tests/test_menu.c host/menu.c host/framerate.c host/camera.c)
 target_include_directories(test_menu PRIVATE host)
 target_link_libraries(test_menu PRIVATE psprecomp)
 add_test(NAME test_menu COMMAND test_menu)

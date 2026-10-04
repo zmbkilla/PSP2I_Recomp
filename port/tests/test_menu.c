@@ -7,6 +7,7 @@
 
 #include "menu.h"
 #include "framerate.h"
+#include "camera.h"
 
 #include <psprecomp/cpu.h>
 #include <psprecomp/dispatch.h>
@@ -68,6 +69,8 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_SHOW_FPS && m.show_fps == 1);
     menu_update(&m, 0, 0);
 
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_RS_SPEED);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -147,6 +150,8 @@ static void test_buttons(void) {
     CHECK(STEP(0) == 0);
     CHECK(STEP(CIRCLE) == MFX_SHOW_FPS && m.show_fps == 0);
     CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_RS_SPEED);
+    CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_CLOSE);
     CHECK(STEP(0) == 0);
     CHECK(STEP(CROSS) == MFX_CLOSED && !m.open);                /* Cross backs out */
@@ -166,6 +171,53 @@ static void test_buttons(void) {
     CHECK(menu_filter_game(&m, CIRCLE) == 0);
     CHECK(STEP(CIRCLE) == 0 && !m.open);
 #undef STEP
+}
+
+/* Right-stick sensitivity in the menu: 1.00x..2.00x, Left/Right step and stop
+ * at the ends, Circle cycles; Cross still backs out from the item. */
+static void test_rs_speed(void) {
+    menu_state m;
+    menu_init(&m, 30, 1);
+    CHECK(menu_rs_speed(&m) == 1.0f);                   /* default 1.00x */
+    menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_RS_SPEED);
+    CHECK(menu_update(&m, MI_LEFT, 0) == 0 && menu_rs_speed(&m) == 1.0f);   /* already at the bottom */
+    menu_update(&m, 0, 0);
+    float want = 1.0f;
+    for (int i = 0; i < 4; i++) {
+        CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RS_SPEED);
+        menu_update(&m, 0, 0);
+        want += 0.25f;
+        CHECK(menu_rs_speed(&m) == want);
+    }
+    CHECK(menu_rs_speed(&m) == 2.0f);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0 && menu_rs_speed(&m) == 2.0f);  /* stops at 2.00x */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_RS_SPEED && menu_rs_speed(&m) == 1.0f);  /* cycles */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, menu_inputs_from_psp(0x2000, 128, 128), 0) == MFX_RS_SPEED && menu_rs_speed(&m) == 1.25f);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, menu_inputs_from_psp(0x4000, 128, 128), 0) == MFX_CLOSED);    /* Cross backs out */
+    CHECK(menu_rs_speed(&m) == 1.25f);                  /* kept */
+    menu_set_rs_speed(&m, 1.8f);  CHECK(menu_rs_speed(&m) == 1.75f);
+    menu_set_rs_speed(&m, 9.0f);  CHECK(menu_rs_speed(&m) == 2.0f);
+    menu_set_rs_speed(&m, 0.2f);  CHECK(menu_rs_speed(&m) == 1.0f);
+}
+
+/* The camera axis exactly as the cheat computes it: byte - 128, zero for
+ * -8..7, then / 128 * speed. */
+static void test_camera_axis(void) {
+    CHECK(camera_axis(128, 1.0f) == 0.0f);
+    CHECK(camera_axis(120, 1.0f) == 0.0f);              /* -8: inside the dead zone */
+    CHECK(camera_axis(135, 1.0f) == 0.0f);              /* +7 */
+    CHECK(camera_axis(136, 1.0f) == 8.0f / 128.0f);     /* +8 */
+    CHECK(camera_axis(119, 1.0f) == -9.0f / 128.0f);    /* -9 */
+    CHECK(camera_axis(255, 1.0f) == 127.0f / 128.0f);
+    CHECK(camera_axis(0, 1.0f) == -1.0f);
+    CHECK(camera_axis(255, 2.0f) == 2.0f * 127.0f / 128.0f);
+    CHECK(camera_axis(0, 1.5f) == -1.5f);
 }
 
 /* ---- FPS meter -------------------------------------------------------------- */
@@ -243,8 +295,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 72, 384, 200));            /* the centred 288x128 box */
-    CHECK(!changed_outside(96, 72, 384, 200));
+    CHECK(changed_inside(96, 64, 384, 208));            /* the centred 288x144 box */
+    CHECK(!changed_outside(96, 64, 384, 208));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */
@@ -330,15 +382,73 @@ static void test_framerate(void) {
     psp_mem_free();
 }
 
+/* The camera hooks against the hook runtime, with stand-ins for the game's
+ * camera-input function (writes yaw/pitch through a1/a2) and its
+ * "camera controlled" test. */
+#define CAM_YAW   0x08900000u
+#define CAM_PITCH 0x08900004u
+static float g_game_yaw, g_game_pitch;
+static uint32_t g_game_active;
+static void orig_cam_input(void) { psp_write_f32(psp_cpu.r[5], g_game_yaw); psp_write_f32(psp_cpu.r[6], g_game_pitch); }
+static void entry_cam_input(void) { psp_hook_fn h = psp_hook_find(0x08A16794u); if (h) h(orig_cam_input); else orig_cam_input(); }
+static void orig_cam_active(void) { psp_cpu.r[31] = 0xDEAD; psp_cpu.r[2] = g_game_active; }
+static void entry_cam_active(void) { psp_hook_fn h = psp_hook_find(0x08AFA530u); if (h) h(orig_cam_active); else orig_cam_active(); }
+static void cam_frame(void) { psp_cpu.r[5] = CAM_YAW; psp_cpu.r[6] = CAM_PITCH; entry_cam_input(); }
+static uint32_t cam_active(uint32_t ra) { psp_cpu.r[31] = ra; entry_cam_active(); return psp_cpu.r[2]; }
+
+static void test_camera_hooks(void) {
+    if (psp_mem_init() != 0) { CHECK(!"psp_mem_init"); return; }
+    camera_init(1.0f);
+    camera_set_stick(128, 128);
+    g_game_yaw = g_game_pitch = 0.0f;
+    cam_frame();
+    CHECK(psp_read_f32(CAM_YAW) == 0.0f && psp_read_f32(CAM_PITCH) == 0.0f);   /* centred: untouched */
+
+    camera_set_stick(255, 0);                           /* right and up */
+    cam_frame();
+    CHECK(psp_read_f32(CAM_YAW) == -(127.0f / 128.0f));                 /* yaw = -camX */
+    CHECK(psp_read_f32(CAM_PITCH) == -1.0f);                            /* pitch = camY */
+
+    g_game_yaw = 0.3f; g_game_pitch = -0.2f;            /* the game's own camera input wins */
+    cam_frame();
+    CHECK(psp_read_f32(CAM_YAW) == 0.3f && psp_read_f32(CAM_PITCH) == -0.2f);
+    g_game_yaw = g_game_pitch = 0.0f;
+
+    camera_set_speed(2.0f);                             /* sensitivity scales both axes */
+    cam_frame();
+    CHECK(psp_read_f32(CAM_YAW) == -2.0f * 127.0f / 128.0f && psp_read_f32(CAM_PITCH) == -2.0f);
+    camera_set_speed(5.0f);  CHECK(camera_speed() == 2.0f);             /* clamped */
+    camera_set_speed(0.5f);  CHECK(camera_speed() == 1.0f);
+
+    camera_set_stick(131, 125);                         /* inside the dead zone */
+    cam_frame();
+    CHECK(psp_read_f32(CAM_YAW) == 0.0f && psp_read_f32(CAM_PITCH) == 0.0f);
+
+    /* "Camera controlled": only the call the cheat patched (0x08AF8C48). */
+    g_game_active = 0;
+    camera_set_stick(128, 128);
+    CHECK(cam_active(0x08AF8C50u) == 0);
+    camera_set_stick(200, 128);
+    CHECK(cam_active(0x08AF8C50u) == 1);
+    CHECK(cam_active(0x08AF9000u) == 0);                /* other callers unchanged */
+    g_game_active = 1;
+    camera_set_stick(128, 128);
+    CHECK(cam_active(0x08AF8C50u) == 1 && cam_active(0x08AF9000u) == 1);
+    psp_mem_free();
+}
+
 int main(void) {
     test_open_close();
     test_values();
     test_repeat();
     test_filter();
     test_buttons();
+    test_rs_speed();
+    test_camera_axis();
     test_meter();
     test_draw();
     test_framerate();
+    test_camera_hooks();
     printf("test_menu: %d checks, %d failed\n", g_run, g_fail);
     return g_fail ? 1 : 0;
 }
