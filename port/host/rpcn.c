@@ -10,7 +10,7 @@
  *
  *   Login (command 0):          user\0 password\0 token\0
  *                                -> online name\0 avatar URL\0 u64 user id ...
- *   RequestTicket (command 25): service id\0 u32 cookie length, cookie bytes
+ *   RequestTicket (command 27): service id\0 u32 cookie length, cookie bytes
  *                                -> u32 ticket length, ticket bytes
  *
  * Verified against bl00d3dg3.xyz (protocol 27, self-signed certificate) --
@@ -26,7 +26,7 @@
 
 #define HDR 15
 enum { PT_REQUEST = 0, PT_REPLY = 1, PT_NOTIFICATION = 2, PT_SERVER_INFO = 3 };
-enum { CMD_LOGIN = 0, CMD_REQUEST_TICKET = 25 };
+enum { CMD_LOGIN = 0, CMD_REQUEST_TICKET = 27 };   /* RPCN CommandType: Login 0 ... SendRoomMessage 25, RequestSignalingInfos 26, RequestTicket 27 */
 
 struct rpcn {
     tls_conn *t;

@@ -52,6 +52,8 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
 #endif
@@ -405,6 +407,30 @@ static void redirect_target(char *host, size_t cap, uint32_t *port) {
     if (c && !strchr(c + 1, ']')) { *port = (uint32_t)atoi(c + 1); *c = '\0'; }
 }
 
+/* The redirect target's IPv4 address as text: the game resolves the server
+ * name (to this, through resolve_redirect) and then connects by address. */
+static int is_redirect_address(const char *host) {
+    static char cached_for[256], addr[64];
+    if (!g_sega_redirect[0] || !host || !host[0]) return 0;
+    char target[256];
+    uint32_t port;
+    redirect_target(target, sizeof target, &port);
+    if (!_stricmp(host, target)) return 1;
+    if (strcmp(cached_for, target)) {
+        snprintf(cached_for, sizeof cached_for, "%s", target);
+        addr[0] = '\0';
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        if (getaddrinfo(target, NULL, &hints, &res) == 0 && res) {
+            const unsigned char *b = (const unsigned char *)&((struct sockaddr_in *)res->ai_addr)->sin_addr;
+            snprintf(addr, sizeof addr, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+            freeaddrinfo(res);
+        }
+    }
+    return addr[0] && !strcmp(host, addr);
+}
+
 static const char *resolve_redirect(const char *host) {
     static char target[256];
     if (!g_sega_redirect[0] || !is_sega_host(host)) return NULL;
@@ -415,7 +441,21 @@ static const char *resolve_redirect(const char *host) {
 
 /* ---- HTTP: log, stub or live ---------------------------------------------------------------- */
 
-static void http_line(const char *line) { online_log("http: %s", line); }
+#ifdef _WIN32
+int game_stack(char *out, size_t cap, int max_frames);     /* main.c */
+#endif
+
+/* HTTP log lines about a request also say where in the game the call came
+ * from: the chain of game functions (PSP addresses, innermost first). */
+static void http_line(const char *line) {
+#ifdef _WIN32
+    if (!strncmp(line, "request ", 8) || !strncmp(line, "connection ", 11)) {
+        char where[512];
+        if (game_stack(where, sizeof where, 16) > 0) { online_log("http: %s   [game: %s]", line, where); return; }
+    }
+#endif
+    online_log("http: %s", line);
+}
 
 static void log_body(const char *what, const uint8_t *p, uint32_t n) {
     if (!n) { online_log("http:   %s: (empty)", what); return; }
@@ -497,7 +537,7 @@ static int http_send(const psp_http_request *q, psp_http_response *r) {
     online_log("http:   User-Agent: %s", q->user_agent);
     log_body("request body", q->body, q->body_len);
     int rc = -1;
-    if (g_sega_redirect[0] && is_sega_host(q->host)) {
+    if (g_sega_redirect[0] && (is_sega_host(q->host) || is_redirect_address(q->host))) {
         /* The game's own server, pointed at the replacement in the settings file. */
         char host[256];
         uint32_t port;

@@ -1093,9 +1093,47 @@ static void prof_report(void) {
 }
 #endif
 
+/* The game functions on the host stack, innermost first, as PSP addresses:
+ * recompiled functions call each other as C functions, so the host stack is
+ * the game's call stack. "08B35014 < 08A88584 < ...". For logs that say
+ * where in the game something happens (online.c's HTTP log). */
+#ifdef _WIN32
+int game_stack(char *out, size_t cap, int max_frames) {
+    static int sym_ready;
+    HANDLE proc = GetCurrentProcess();
+    if (!sym_ready) { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS); SymInitialize(proc, NULL, TRUE); sym_ready = 1; }
+    void *frames[48];
+    const USHORT n = CaptureStackBackTrace(1, 48, frames, NULL);
+    size_t used = 0;
+    int k = 0;
+    uint32_t last = 0, seen[48];
+    out[0] = '\0';
+    for (USHORT i = 0; i < n && k < max_frames; i++) {
+        char buf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
+        si->SizeOfStruct = sizeof(SYMBOL_INFO);
+        si->MaxNameLen = 255;
+        DWORD64 d = 0;
+        if (!SymFromAddr(proc, (DWORD64)(uintptr_t)frames[i], &d, si)) continue;
+        if (!strcmp(si->Name, "thread_body")) break;
+        unsigned a;
+        if ((sscanf(si->Name, "psp_body_%8X", &a) == 1 || sscanf(si->Name, "psp_func_%8X", &a) == 1) && a != last) {
+            /* each function once: a state machine re-entering itself would
+             * otherwise fill the chain and hide its callers */
+            int dup = 0;
+            for (int j = 0; j < k && !dup; j++) dup = seen[j] == a;
+            last = a;
+            if (dup) continue;
+            if (k < 48) seen[k] = a;
+            used += (size_t)snprintf(out + used, used < cap ? cap - used : 0, "%s%08X", k ? " < " : "", a);
+            k++;
+        }
+    }
+    return k;
+}
+
 /* --watch hits in a release build: name the recompiled functions on the host
  * stack (the host stack is the game's call stack), innermost first. */
-#ifdef _WIN32
 static void watch_backtrace(uint32_t addr, uint32_t value) {
     (void)addr; (void)value;
     static int sym_ready;
