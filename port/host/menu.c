@@ -43,6 +43,7 @@ static int change(menu_state *m, int dir) {
     switch (m->sel) {
     case MENU_FRAME_RATE:  m->fps = m->fps == 60 ? 30 : 60; return MFX_FPS_CHANGED;
     case MENU_FPS_COUNTER: m->show_fps = !m->show_fps;      return MFX_SHOW_FPS;
+    case MENU_SEGA_SERVER: return dir == 0 ? MFX_EDIT_SEGA : 0;
     case MENU_RS_SPEED: {
         const int old = m->rs_step;
         if (dir < 0)      { if (m->rs_step > 0) m->rs_step--; }
@@ -202,7 +203,7 @@ static void frame(menu_image *img, int x, int y, int w, int h, uint32_t rgb) {
 void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *hotkey) {
     if (!m->open) return;
     char line[96];
-    const int bw = 288, bh = 144;
+    const int bw = 288, bh = 157;
     const int x0 = (img->w - bw) / 2, y0 = (img->h - bh) / 2;
     shade(img, x0, y0, bw, bh);
     frame(img, x0, y0, bw, bh, GREY);
@@ -211,7 +212,10 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     menu_text(img, x0 + 10, y, "SETTINGS", WHITE);
     y += CELL_H + 8;
 
-    static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "CLOSE" };
+    static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "SEGA SERVER", "CLOSE" };
+    char sega[32];
+    if (m->sega[0]) snprintf(sega, sizeof sega, "%.25s", m->sega);
+    else snprintf(sega, sizeof sega, "OFF");
     char rs[24];
     snprintf(rs, sizeof rs, "< %.2fX >", (double)menu_rs_speed(m));
     for (int i = 0; i < MENU_ITEMS; i++) {
@@ -220,7 +224,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
         menu_text(img, x0 + 22, y, NAMES[i], col);
         const char *v = i == MENU_FRAME_RATE ? (m->fps == 60 ? "< 60 FPS >" : "< 30 FPS >")
                       : i == MENU_FPS_COUNTER ? (m->show_fps ? "< ON >" : "< OFF >")
-                      : i == MENU_RS_SPEED ? rs : "";
+                      : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega : "";
         menu_text(img, x0 + 130, y, v, col);
         y += CELL_H + 4;
     }
