@@ -19,11 +19,14 @@
 #include <psprecomp/hle.h>
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
 #define FN_GAME_PRINTF 0x0886EA30u
+#define FN_QUEST_TABLE 0x08D25714u   /* QuestDataManager vfunc 0x1C: table object by ID, or 0 */
+#define FN_ARC_FIND    0x08D56918u   /* archive/registry: object by name */
 
 static FILE *g_file;
 static char g_dir[600];
@@ -151,7 +154,53 @@ static void hook_printf(void (*original)(void)) {
     original();                                   /* the stub: returns */
 }
 
+static void logf_line(const char *fmt, ...) {
+    char line[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    emit(line, 1);
+    online_log("game: %s", line);
+}
+
+/* The session server asks its quest data for a table by ID (0x1710 ->
+ * 0x1711): which ID, and whether it has it. */
+static void hook_quest_table(void (*original)(void)) {
+    const uint32_t id = psp_cpu.r[5];
+    original();
+    logf_line("[quest data] table %u requested -> %s (0x%08X)", id, psp_cpu.r[2] ? "found" : "NOT FOUND", psp_cpu.r[2]);
+}
+
+/* Archive lookups by name, for the quest-table names only; the ID list
+ * (tableIdList.rel: u32 *ids at +0, count at +4) is printed when found. */
+static void hook_arc_find(void (*original)(void)) {
+    char name[64];
+    psp_str(psp_cpu.r[5], name, sizeof name);
+    original();
+    const uint32_t obj = psp_cpu.r[2];
+    if (strncmp(name, "table", 5) && strncmp(name, "filelist", 8) && !strstr(name, "Quest")) return;
+    if (!strcmp(name, "tableIdList.rel") && obj) {
+        const uint32_t arr = psp_read32(obj), n = psp_read32(obj + 4);
+        char ids[700];
+        size_t k = 0;
+        ids[0] = '\0';
+        for (uint32_t i = 0; i < n && i < 120 && k + 12 < sizeof ids; i++)
+            k += (size_t)snprintf(ids + k, sizeof ids - k, "%s%d", i ? "," : "", (int)psp_read32(arr + 4 * i));
+        static char last[700];
+        if (strcmp(last, ids)) { snprintf(last, sizeof last, "%s", ids); logf_line("[quest data] tableIdList: %u tables: %s", n, ids); }
+        return;
+    }
+    static char lastn[64];
+    if (strcmp(lastn, name)) { snprintf(lastn, sizeof lastn, "%s", name); logf_line("[quest data] find \"%s\" -> %s", name, obj ? "found" : "NOT FOUND"); }
+}
+
+static void ms_line(const char *line) { logf_line("[file] %s", line); }
+
 void gamelog_init(const char *exe_dir) {
     snprintf(g_dir, sizeof g_dir, "%s", exe_dir);
     psp_hook_set(FN_GAME_PRINTF, hook_printf);
+    psp_hook_set(FN_QUEST_TABLE, hook_quest_table);
+    psp_hook_set(FN_ARC_FIND, hook_arc_find);
+    psp_io_set_ms_log(ms_line);
 }

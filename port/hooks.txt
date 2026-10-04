@@ -7,3 +7,5 @@
 0x08A16794   # camera yaw/pitch input (writes *a1, *a2): right-stick camera (host/camera.c, from rightstick.txt)
 0x08AFA530   # "camera is being controlled" test: right stick counts, for the call at 0x08AF8C48 only
 0x0886EA30   # the game's debug printf (a stub in the release build): its messages go to game_log.txt (host/gamelog.c)
+0x08D25714   # QuestDataManager: quest table by ID (session server): logged in game_log.txt (host/gamelog.c)
+0x08D56918   # archive find-by-name (used by the quest data manager): quest-table names logged (host/gamelog.c)
