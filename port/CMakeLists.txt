@@ -34,6 +34,8 @@ add_executable(psp2i
     host/tls.c
     host/rpcn.c
     host/online.c
+    host/fbuf.c
+    host/rpcn_rooms.c
     host/savecrypt.c
     host/gamelog.c
     host/login.c

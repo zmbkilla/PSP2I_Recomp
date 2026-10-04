@@ -233,6 +233,17 @@ static int fill_plain(tls_conn *t) {
     }
 }
 
+int tls_wait_readable(tls_conn *t, int timeout_ms) {
+    if (!t || t->s == INVALID_SOCKET) return -1;
+    if (t->plain_off < t->plain_len || t->in_len) return 1;
+    fd_set r;
+    FD_ZERO(&r);
+    FD_SET(t->s, &r);
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    const int k = select(0, &r, NULL, NULL, &tv);
+    return k < 0 ? -1 : k > 0;
+}
+
 int tls_recv(tls_conn *t, void *out, size_t len) {
     uint8_t *o = (uint8_t *)out;
     size_t got = 0;
@@ -259,5 +270,6 @@ tls_conn *tls_connect(const char *host, int port, int timeout_ms, uint8_t sha[32
 }
 int  tls_send(tls_conn *t, const void *d, size_t n) { (void)t; (void)d; (void)n; return -1; }
 int  tls_recv(tls_conn *t, void *o, size_t n) { (void)t; (void)o; (void)n; return -1; }
+int  tls_wait_readable(tls_conn *t, int ms) { (void)t; (void)ms; return -1; }
 void tls_close(tls_conn *t) { (void)t; }
 #endif

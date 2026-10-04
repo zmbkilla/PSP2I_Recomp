@@ -42,6 +42,7 @@
 
 #include "online.h"
 #include "rpcn.h"
+#include "rpcn_rooms.h"
 
 #include <psprecomp/net.h>
 
@@ -200,6 +201,208 @@ static char  g_online_name[64];
 static int   g_signin_state = PSP_NP_SIGNIN_NONE;
 static struct { int state; uint8_t *data; uint32_t len; uint32_t err; } g_tickets[4];
 
+/* ---- the network thread: owns the signed-in RPCN session -------------------------------
+ *
+ * After sign-in one thread owns the connection: it sends queued requests and
+ * reads everything the server sends -- replies (matched to their request by
+ * packet id) and notifications (room events, room messages), which can
+ * arrive at any time. Synchronous callers (tickets, server and world lists)
+ * wait for their reply; room requests and notifications go to an inbox the
+ * game thread drains once per vblank (be_m2_poll), since turning them into
+ * the game's structures writes guest memory. */
+
+#define CMD_GET_SERVER_LIST  11
+#define CMD_GET_WORLD_LIST   12
+#define CMD_REQUEST_TICKET   27
+
+typedef struct njob {
+    struct njob *next;
+    uint16_t cmd;
+    uint8_t *data;
+    uint32_t len;
+    uint64_t pkt;
+    int room_kind;                       /* room request: the answer goes to the inbox */
+    uint32_t req_id;
+#ifdef _WIN32
+    HANDLE done;                         /* synchronous call */
+#endif
+    int finished, abandoned, failed;
+    uint8_t *reply;
+    uint32_t reply_len;
+} njob;
+
+typedef struct nmsg {
+    struct nmsg *next;
+    int is_reply, failed, room_kind;
+    uint32_t req_id;
+    uint16_t cmd;
+    uint8_t *data;
+    uint32_t len;
+} nmsg;
+
+#ifdef _WIN32
+static CRITICAL_SECTION g_nlock;
+#define NLOCK()   EnterCriticalSection(&g_nlock)
+#define NUNLOCK() LeaveCriticalSection(&g_nlock)
+static HANDLE g_net_thread;
+#else
+#define NLOCK()
+#define NUNLOCK()
+#endif
+static volatile int g_net_run, g_net_up;
+static njob *g_out_head, *g_out_tail, *g_wait;
+static nmsg *g_in_head, *g_in_tail;
+
+static void inbox_push(nmsg *m) {
+    NLOCK();
+    m->next = NULL;
+    if (g_in_tail) g_in_tail->next = m; else g_in_head = m;
+    g_in_tail = m;
+    NUNLOCK();
+}
+
+/* A job is answered (payload owned by the receiver), or failed. */
+static void job_finish(njob *j, uint8_t *payload, uint32_t len, int failed) {
+    if (j->room_kind) {
+        nmsg *m = (nmsg *)calloc(1, sizeof *m);
+        if (m) { m->is_reply = 1; m->failed = failed; m->room_kind = j->room_kind; m->req_id = j->req_id; m->data = payload; m->len = len; inbox_push(m); }
+        else free(payload);
+        free(j->data);
+        free(j);
+        return;
+    }
+    NLOCK();
+    if (j->abandoned) {                  /* the caller gave up waiting */
+        NUNLOCK();
+        free(payload); free(j->data);
+#ifdef _WIN32
+        CloseHandle(j->done);
+#endif
+        free(j);
+        return;
+    }
+    j->reply = payload; j->reply_len = len; j->failed = failed; j->finished = 1;
+#ifdef _WIN32
+    SetEvent(j->done);
+#endif
+    NUNLOCK();
+}
+
+static void net_enqueue(njob *j) {
+    NLOCK();
+    j->next = NULL;
+    if (g_out_tail) g_out_tail->next = j; else g_out_head = j;
+    g_out_tail = j;
+    NUNLOCK();
+}
+
+#ifdef _WIN32
+static DWORD WINAPI net_main(LPVOID arg) {
+    rpcn *s = (rpcn *)arg;
+    online_log("rpcn: session thread running (requests and notifications)");
+    while (g_net_run) {
+        NLOCK();
+        njob *q = g_out_head;
+        g_out_head = g_out_tail = NULL;
+        NUNLOCK();
+        int lost = 0;
+        while (q) {
+            njob *n = q->next;
+            if (!lost && rpcn_send(s, q->cmd, q->data, q->len, &q->pkt) == 0) {
+                NLOCK(); q->next = g_wait; g_wait = q; NUNLOCK();
+            } else { lost = 1; job_finish(q, NULL, 0, 1); }
+            q = n;
+        }
+        if (lost) break;
+        const int w = rpcn_wait_readable(s, 15);
+        if (w < 0) break;
+        if (w == 0) continue;
+        uint8_t type; uint16_t cmd; uint64_t id; uint8_t *pl = NULL; uint32_t len = 0;
+        if (rpcn_read(s, &type, &cmd, &id, &pl, &len) != 0) break;
+        if (type == RPCN_PT_REPLY) {
+            njob *j = NULL;
+            NLOCK();
+            for (njob **pp = &g_wait; *pp; pp = &(*pp)->next)
+                if ((*pp)->pkt == id) { j = *pp; *pp = j->next; break; }
+            NUNLOCK();
+            if (j) job_finish(j, pl, len, 0);
+            else { online_log("rpcn: reply to unknown packet %llu (command %u)", (unsigned long long)id, cmd); free(pl); }
+        } else if (type == RPCN_PT_NOTIFICATION) {
+            nmsg *m = (nmsg *)calloc(1, sizeof *m);
+            if (m) { m->cmd = cmd; m->data = pl; m->len = len; inbox_push(m); } else free(pl);
+        } else free(pl);
+    }
+    g_net_up = 0;
+    /* fail everything still queued or waiting */
+    NLOCK();
+    njob *a = g_out_head, *b = g_wait;
+    g_out_head = g_out_tail = NULL; g_wait = NULL;
+    NUNLOCK();
+    while (a) { njob *n = a->next; job_finish(a, NULL, 0, 1); a = n; }
+    while (b) { njob *n = b->next; job_finish(b, NULL, 0, 1); b = n; }
+    if (g_net_run) {
+        online_log("rpcn: the connection to the server was lost");
+        status("Lost the connection to %s", g_host);
+    }
+    return 0;
+}
+#endif
+
+static void net_start(rpcn *s) {
+#ifdef _WIN32
+    g_net_run = 1;
+    g_net_up = 1;
+    g_net_thread = CreateThread(NULL, 0, net_main, s, 0, NULL);
+    if (!g_net_thread) { g_net_run = 0; g_net_up = 0; }
+#else
+    (void)s;
+#endif
+}
+
+static void net_stop(void) {
+#ifdef _WIN32
+    if (!g_net_thread) return;
+    g_net_run = 0;
+    WaitForSingleObject(g_net_thread, 5000);
+    CloseHandle(g_net_thread);
+    g_net_thread = NULL;
+#endif
+}
+
+/* A request answered synchronously: the reply payload (RPCN error byte
+ * first), malloc'd; -1 if it could not be sent or no reply came. */
+static int net_call(uint16_t cmd, const uint8_t *data, uint32_t len, uint8_t **reply, uint32_t *rlen, int timeout_ms) {
+    *reply = NULL; *rlen = 0;
+#ifdef _WIN32
+    if (!g_net_up) return -1;
+    njob *j = (njob *)calloc(1, sizeof *j);
+    if (!j) return -1;
+    j->cmd = cmd;
+    j->data = (uint8_t *)malloc(len ? len : 1);
+    j->done = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!j->data || !j->done) { free(j->data); if (j->done) CloseHandle(j->done); free(j); return -1; }
+    memcpy(j->data, data, len);
+    j->len = len;
+    net_enqueue(j);
+    WaitForSingleObject(j->done, (DWORD)timeout_ms);
+    NLOCK();
+    if (!j->finished) { j->abandoned = 1; NUNLOCK(); return -1; }   /* freed by the thread when it answers */
+    NUNLOCK();
+    const int failed = j->failed;
+    *reply = j->reply; *rlen = j->reply_len;
+    CloseHandle(j->done);
+    free(j->data);
+    free(j);
+    if (failed) { free(*reply); *reply = NULL; *rlen = 0; return -1; }
+    return 0;
+#else
+    (void)cmd; (void)data; (void)len; (void)timeout_ms;
+    return -1;
+#endif
+}
+
+static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
 static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
 
 static int pin_matches(const uint8_t fp[32]) {
@@ -241,6 +444,7 @@ static void run_signin(void) {
         online_log("sign-in failed: %s", err);
         return;
     }
+    net_stop();
     LOCK();
     if (g_session) rpcn_close(g_session);
     g_session = r;
@@ -248,6 +452,8 @@ static void run_signin(void) {
     snprintf(g_user, sizeof g_user, "%s", g_job.user);
     UNLOCK();
     cfg_save();
+    rooms_set_self(g_job.user);
+    net_start(r);
     g_job.ok = 1;
     snprintf(g_job.msg, sizeof g_job.msg, "Signed in to %s as %s (RPCN test account, not PSN).", g_host, g_online_name);
     online_log("signed in as %s", g_online_name);
@@ -260,9 +466,23 @@ static void run_ticket(void) {
     const int slot = g_job.slot;
     if (!g_session) { snprintf(g_job.msg, sizeof g_job.msg, "not signed in"); return; }
     online_log("requesting an auth ticket for service %s", g_job.service);
-    RPCN_LOCK();
-    const int rc = rpcn_request_ticket(g_session, g_job.service, g_job.cookie, g_job.cookie_len, &t, &n, err, sizeof err);
-    RPCN_UNLOCK();
+    /* service\0, u32 cookie length, cookie -> error byte, u32 length, ticket */
+    int rc = RPCN_ERR_CONNECT;
+    {
+        const size_t sl = strlen(g_job.service) + 1;
+        uint8_t req[64 + 4 + sizeof g_job.cookie], *rep = NULL;
+        uint32_t rl = 0;
+        memcpy(req, g_job.service, sl);
+        for (int i = 0; i < 4; i++) req[sl + i] = (uint8_t)(g_job.cookie_len >> (8 * i));
+        memcpy(req + sl + 4, g_job.cookie, g_job.cookie_len);
+        if (net_call(CMD_REQUEST_TICKET, req, (uint32_t)(sl + 4 + g_job.cookie_len), &rep, &rl, 15000) != 0)
+            snprintf(err, sizeof err, "the connection was lost while requesting a ticket");
+        else if (rl < 1) { rc = RPCN_ERR_PROTOCOL; snprintf(err, sizeof err, "empty ticket reply"); }
+        else if (rep[0]) { rc = RPCN_ERR_REFUSED; snprintf(err, sizeof err, "ticket refused: %s", rpcn_error_name(rep[0])); }
+        else if (rl < 5 || le32(rep + 1) != rl - 5) { rc = RPCN_ERR_PROTOCOL; snprintf(err, sizeof err, "malformed ticket reply (%u bytes)", rl); }
+        else if ((t = (uint8_t *)malloc(rl - 5)) != NULL) { memcpy(t, rep + 5, rl - 5); n = rl - 5; rc = RPCN_OK; }
+        free(rep);
+    }
     LOCK();
     if (rc == RPCN_OK) {
         free(g_tickets[slot].data);
@@ -384,13 +604,25 @@ static int be_m2_server_list(const char *com_id, uint16_t *ids, int max, uint32_
     char e[200] = "";
     int n = 0, rc = RPCN_ERR_CONNECT;
     online_log("matching: RPCN GetServerList for %s on %s", com_id, g_host);
-    RPCN_LOCK();
-    if (g_session) {
-        rc = rpcn_get_server_list(g_session, com_id, ids, max, &n, e, sizeof e);
-        /* a server may create a game's entries on first request: ask once more */
-        if (rc == RPCN_OK && n == 0) rc = rpcn_get_server_list(g_session, com_id, ids, max, &n, e, sizeof e);
-    } else snprintf(e, sizeof e, "not signed in");
-    RPCN_UNLOCK();
+    /* communication ID (12 bytes) -> error byte, u16 count, u16 ids; asked
+     * twice if empty (a server may create a game's entries on first request) */
+    for (int attempt = 0; attempt < 2 && (rc != RPCN_OK || n == 0); attempt++) {
+        uint8_t req[12] = { 0 }, *rep = NULL;
+        uint32_t rl = 0;
+        memcpy(req, com_id, strlen(com_id) < 12 ? strlen(com_id) : 12);
+        if (net_call(CMD_GET_SERVER_LIST, req, 12, &rep, &rl, 15000) != 0) { rc = RPCN_ERR_CONNECT; snprintf(e, sizeof e, g_net_up ? "no reply" : "not connected"); break; }
+        if (rl < 1) { rc = RPCN_ERR_PROTOCOL; snprintf(e, sizeof e, "empty reply"); }
+        else if (rep[0]) { rc = RPCN_ERR_REFUSED; snprintf(e, sizeof e, "refused: %s", rpcn_error_name(rep[0])); }
+        else if (rl < 3 || rl < 3u + 2u * (uint32_t)(rep[1] | rep[2] << 8)) { rc = RPCN_ERR_PROTOCOL; snprintf(e, sizeof e, "malformed reply (%u bytes)", rl); }
+        else {
+            const int cnt = rep[1] | rep[2] << 8;
+            n = cnt < max ? cnt : max;
+            for (int i = 0; i < n; i++) ids[i] = (uint16_t)(rep[3 + 2 * i] | rep[4 + 2 * i] << 8);
+            rc = RPCN_OK;
+        }
+        free(rep);
+        if (rc != RPCN_OK) break;
+    }
     if (rc != RPCN_OK) {
         online_log("matching: GetServerList failed: %s", e);
         status("Matching server list failed: %s", e);
@@ -408,12 +640,25 @@ static int be_m2_world_list(const char *com_id, uint16_t server_id, uint32_t *id
     char e[200] = "";
     int n = 0, rc = RPCN_ERR_CONNECT;
     online_log("matching: RPCN GetWorldList for %s, server %u", com_id, server_id);
-    RPCN_LOCK();
-    if (g_session) {
-        rc = rpcn_get_world_list(g_session, com_id, server_id, ids, max, &n, e, sizeof e);
-        if (rc == RPCN_OK && n == 0) rc = rpcn_get_world_list(g_session, com_id, server_id, ids, max, &n, e, sizeof e);
-    } else snprintf(e, sizeof e, "not signed in");
-    RPCN_UNLOCK();
+    /* communication ID (12 bytes), u16 server -> error byte, u32 count, u32 ids */
+    for (int attempt = 0; attempt < 2 && (rc != RPCN_OK || n == 0); attempt++) {
+        uint8_t req[14] = { 0 }, *rep = NULL;
+        uint32_t rl = 0;
+        memcpy(req, com_id, strlen(com_id) < 12 ? strlen(com_id) : 12);
+        req[12] = (uint8_t)server_id; req[13] = (uint8_t)(server_id >> 8);
+        if (net_call(CMD_GET_WORLD_LIST, req, 14, &rep, &rl, 15000) != 0) { rc = RPCN_ERR_CONNECT; snprintf(e, sizeof e, g_net_up ? "no reply" : "not connected"); break; }
+        if (rl < 1) { rc = RPCN_ERR_PROTOCOL; snprintf(e, sizeof e, "empty reply"); }
+        else if (rep[0]) { rc = RPCN_ERR_REFUSED; snprintf(e, sizeof e, "refused: %s", rpcn_error_name(rep[0])); }
+        else if (rl < 5 || le32(rep + 1) > 4096 || rl < 5u + 4u * le32(rep + 1)) { rc = RPCN_ERR_PROTOCOL; snprintf(e, sizeof e, "malformed reply (%u bytes)", rl); }
+        else {
+            const int cnt = (int)le32(rep + 1);
+            n = cnt < max ? cnt : max;
+            for (int i = 0; i < n; i++) ids[i] = le32(rep + 5 + 4 * i);
+            rc = RPCN_OK;
+        }
+        free(rep);
+        if (rc != RPCN_OK) break;
+    }
     if (rc != RPCN_OK) {
         online_log("matching: GetWorldList failed: %s", e);
         status("Matching world list failed: %s", e);
@@ -425,6 +670,40 @@ static int be_m2_world_list(const char *com_id, uint16_t server_id, uint32_t *id
     online_log("matching: server %u has %d world(s)%s%s", server_id, n, n ? ": " : "", list);
     if (!n) status("RPCN %s has no worlds for %s server %u", g_host, com_id, server_id);
     return n;
+}
+
+/* A room request: built here (it reads the game's request in guest memory),
+ * sent by the session thread, answered through the inbox. */
+static int be_m2_room_request(int kind, const char *com_id, uint32_t req_id, uint32_t param) {
+    if (!g_net_up) { online_log("matching: room request while not connected"); return (int)M2_SERVER_ERROR_SERVICE_UNAVAILABLE; }
+    uint16_t cmd = 0;
+    uint8_t *payload = NULL;
+    uint32_t len = 0;
+    const int rc = rooms_build(kind, com_id, param, &cmd, &payload, &len);
+    if (rc) return rc;
+    njob *j = (njob *)calloc(1, sizeof *j);
+    if (!j) { free(payload); return (int)M2_SERVER_ERROR_SERVICE_UNAVAILABLE; }
+    j->cmd = cmd; j->data = payload; j->len = len; j->room_kind = kind; j->req_id = req_id;
+    net_enqueue(j);
+    return 0;
+}
+
+/* Once per vblank on the game thread: replies and notifications to the game. */
+static void be_m2_poll(void) {
+    NLOCK();
+    nmsg *m = g_in_head;
+    g_in_head = g_in_tail = NULL;
+    NUNLOCK();
+    while (m) {
+        nmsg *n = m->next;
+        if (m->is_reply) {
+            if (m->failed) rooms_failed(m->room_kind, m->req_id);
+            else rooms_reply(m->room_kind, m->req_id, m->data, m->len);
+        } else rooms_notification(m->cmd, m->data, m->len);
+        free(m->data);
+        free(m);
+        m = n;
+    }
 }
 
 #ifdef _WIN32
@@ -445,7 +724,7 @@ static void np_line(const char *line) {
 static const psp_np_backend NP_BACKEND = {
     be_signin_begin, be_signin_state, be_signin_cancel, be_online_id,
     be_ticket_begin, be_ticket_state, be_ticket_cancel,
-    be_m2_server_list, be_m2_world_list, np_line,
+    be_m2_server_list, be_m2_world_list, be_m2_room_request, be_m2_poll, np_line,
 };
 
 /* Once per vblank: hand finished jobs to the screen and the status line. */
@@ -665,6 +944,7 @@ void online_init(const char *exe_dir, login_state *login) {
 #ifdef _WIN32
     InitializeCriticalSection(&g_lock);
     InitializeCriticalSection(&g_rpcn_lock);
+    InitializeCriticalSection(&g_nlock);
 #endif
     cfg_load();
     g_login = login;

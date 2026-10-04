@@ -79,6 +79,8 @@ static int read_packet(rpcn *r, uint8_t *type, uint16_t *cmd, uint64_t *id, uint
     return 0;
 }
 
+int rpcn_wait_readable(rpcn *r, int timeout_ms) { return r ? tls_wait_readable(r->t, timeout_ms) : -1; }
+
 static int send_request(rpcn *r, uint16_t cmd, const uint8_t *data, uint32_t len, uint64_t *id) {
     uint8_t *p = (uint8_t *)malloc(HDR + len);
     if (!p) return -1;
@@ -91,6 +93,11 @@ static int send_request(rpcn *r, uint16_t cmd, const uint8_t *data, uint32_t len
     const int rc = tls_send(r->t, p, HDR + len);
     free(p);
     return rc;
+}
+
+int rpcn_send(rpcn *r, uint16_t cmd, const uint8_t *data, uint32_t len, uint64_t *id) { return send_request(r, cmd, data, len, id); }
+int rpcn_read(rpcn *r, uint8_t *type, uint16_t *cmd, uint64_t *id, uint8_t **payload, uint32_t *len) {
+    return read_packet(r, type, cmd, id, payload, len);
 }
 
 /* The reply to request `id` (notifications in between are skipped). */

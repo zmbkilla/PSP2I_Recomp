@@ -16,6 +16,9 @@ typedef struct tls_conn tls_conn;
 tls_conn *tls_connect(const char *host, int port, int timeout_ms, uint8_t cert_sha256[32], char *err, size_t errcap);
 int       tls_send(tls_conn *t, const void *data, size_t len);     /* 0 / -1 */
 int       tls_recv(tls_conn *t, void *out, size_t len);            /* exactly len bytes: 0 / -1 */
+/* Is there something to read (buffered, or on the socket) within timeout_ms?
+ * 1 yes, 0 no, -1 the connection is gone. */
+int       tls_wait_readable(tls_conn *t, int timeout_ms);
 void      tls_close(tls_conn *t);
 
 #endif /* PSP2I_TLS_H */
