@@ -63,6 +63,7 @@
 #include "login.h"
 #include "online.h"
 #include "savecrypt.h"
+#include "gamelog.h"
 #include "textedit.h"
 
 #ifdef _WIN32
@@ -1397,6 +1398,7 @@ int main(int argc, char **argv) {
     static const psp_savedata_crypto SAVE_CRYPTO = { savecrypt_decrypt, savecrypt_encrypt, savecrypt_sfo_hash };
     psp_savedata_set_crypto(&SAVE_CRYPTO);
     online_init(dir, &g_login);
+    gamelog_init(dir);
     psp_sched_set_vblank_hook(on_vblank);
 
     printf("starting module_start at 0x%08X\n", mi.entry);
