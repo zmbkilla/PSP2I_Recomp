@@ -35,6 +35,7 @@ add_executable(psp2i
     host/rpcn.c
     host/online.c
     host/savecrypt.c
+    host/gamelog.c
     host/login.c
     host/textedit.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
