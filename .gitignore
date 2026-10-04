@@ -1,0 +1,67 @@
+# PSP2i recompilation project -- local repository.
+#
+# Nothing proprietary is committed: no game image, no extracted disc content,
+# no PSP firmware files, and nothing generated from them. The game needs these
+# locally to run; they stay on disk, ignored. See port/HANDOFF.md ("Git").
+
+# ---- the game and everything extracted or derived from it -------------------
+game.iso
+EBOOT.BIN
+# extracted UMD (textures, models, audio, video), firmware fonts, memory stick
+GameData/
+# C generated from the game's code (derived from the EBOOT)
+Output/
+port/gen/
+# disassembly of game code
+port/*.dis
+# screenshots and captures of the game
+port/captures/
+*.ppm
+# lists of the game's firmware imports (derived from the EBOOT; kept local)
+port/imports.txt
+port/import_names.txt
+port/import_status.txt
+port/implemented.txt
+# defensive: disc images, PSP containers, firmware fonts, media formats
+*.iso
+*.cso
+*.chd
+*.pbp
+*.PBP
+*.prx
+*.PRX
+*.pgf
+*.PGF
+*.at3
+*.AT3
+*.pmf
+*.PMF
+*.SFO
+*.sfo
+
+# ---- builds and third-party binaries -----------------------------------------
+FinalBuild/
+port/build/
+port/build-*/
+build/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.lib
+
+# ---- logs, temporary files, caches ---------------------------------------------
+*.log
+*.tmp
+*.bak
+__pycache__/
+*.pyc
+
+# ---- IDE files ---------------------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
