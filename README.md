@@ -22,7 +22,7 @@ This project is based on the output of the PSP recompilation toolchain and ongoi
 
 ## Capabilities
 
-Current and planned capabilities include:
+Current capabilities include:
 
 * Native PC executable
 * Direct3D 11 rendering
