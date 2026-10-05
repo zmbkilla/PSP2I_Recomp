@@ -51,6 +51,7 @@
 #include <psprecomp/hle.h>
 #include <psprecomp/dispatch.h>
 #include <psprecomp/vfpu.h>
+#include <time.h>
 #include <psprecomp/render.h>
 
 #include "recomp_funcs.h"
@@ -1169,9 +1170,19 @@ static void watch_backtrace(uint32_t addr, uint32_t value) {
 /* A host-side fault (access violation, stack overflow) is a bug in the
  * runtime or the generated code. Report where -- host function, PSP state,
  * thread table -- before the process dies, so it can be found. */
+static char g_crash_path[700];          /* crash_log.txt next to the exe */
 static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
     static int once;
     if (once++) return EXCEPTION_CONTINUE_SEARCH;
+    /* The report also goes to crash_log.txt: run.bat shows stderr only in the
+     * console, which closes with the game. */
+    if (g_crash_path[0]) {
+        fprintf(stderr, "\n==== host exception: report written to %s ====\n", g_crash_path);
+        if (freopen(g_crash_path, "a", stderr)) {
+            time_t now = time(NULL);
+            fprintf(stderr, "\n==== crash %s", ctime(&now));
+        }
+    }
     const EXCEPTION_RECORD *er = ep->ExceptionRecord;
     fprintf(stderr, "\n==== host exception 0x%08lX at %p ====\n",
             (unsigned long)er->ExceptionCode, er->ExceptionAddress);
@@ -1232,6 +1243,9 @@ int main(int argc, char **argv) {
     uint64_t args_flip = 0;
     const char *dump_path = NULL;
     exe_dir(dir, sizeof dir);
+#ifdef _WIN32
+    snprintf(g_crash_path, sizeof g_crash_path, "%s\\crash_log.txt", dir);
+#endif
 #ifdef PSP2I_PROD
     argc = 1;                              /* community build: no command line, see prod.c */
 #endif
@@ -1378,6 +1392,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "psp2i: falling back to the software renderer\n");
 #endif
     psp_io_set_root(root);
+    {
+        const char *e = getenv("PSP2I_VFPU_NOINLINE");     /* A/B: runtime VFPU calls only */
+        if (e && *e == '1') { psp_vfpu_force_runtime(1); printf("vfpu: inline operations disabled (PSP2I_VFPU_NOINLINE=1)\n"); }
+    }
     if (ms_dir[0]) { psp_io_set_ms_root(ms_dir); printf("ms:    %s\n", ms_dir); }
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();

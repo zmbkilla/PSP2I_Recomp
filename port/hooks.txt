@@ -27,3 +27,9 @@
 0x08A67960   # client: dispatch one received session packet to the handler tables: logged around session start
 0x08A6D41C   # client: creates the session info object *(0x08ED5A28) (subsystem table 0x08E42868): kept packets replayed
 0x08A6D490   # client: destroys the session info object *(0x08ED5A28): kept packets cleared
+0x08D3F3B4   # game: report(fmt, ...) -- formatted error/warning report, returns: logged (host/gamelog.c)
+0x08D3F418   # game: fatal(fmt, ...) -- formatted report, then hangs at 0x08D3F470: logged
+0x08D4C5C0   # game: pattern key (index, a1, f12); index > 10000 -> "Large PatternIndex Error." + hang: logged
+0x08D3F470   # game: hang loop (j self) after fatal(): logged, thread parked like a PSP (was a stack overflow)
+0x08D4C604   # game: hang loop (j self) after "Large PatternIndex Error.": logged, thread parked
+0x08B8D840   # game: break + hang loop after a failed check: logged, thread parked

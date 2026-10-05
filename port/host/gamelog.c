@@ -467,6 +467,87 @@ static void hook_items_owner_del(void (*original)(void)) {
     logf_line("[party] item owner object destroyed: 0x%08X -> 0x%08X  [game: %08X]", before, psp_read32(ITEM_OWNER), psp_cpu.r[31] - 8);
 }
 
+/* ---- the game's own error reports and hang loops ----------------------------
+ * 0x08D3F3B4 report(fmt, ...) and 0x08D3F418 fatal(fmt, ...) format a message
+ * (vsnprintf 0x08DF8B94) for an error-report object; fatal() then spins in
+ * `j self` at 0x08D3F470. 0x08D4C5C0 (pattern key: index*?+...) reports "Large
+ * PatternIndex Error." for an index above 10000 and spins at 0x08D4C604.
+ * 0x08B8D840 is `break` + `j self` after a failed check. On a PSP these loops
+ * freeze the game; recompiled, `j self` is a self call, so they overflowed
+ * the host stack (exception 0xC00000FD). Now: log, then park the thread. */
+
+/* The format string with its integer/string arguments filled in (a1..a3,
+ * t0..t3); floats print as <float>. */
+static void format_guest(char *out, size_t cap, uint32_t fmt_addr, int first_arg_reg) {
+    char fmt[256];
+    psp_str(fmt_addr, fmt, sizeof fmt);
+    int reg = first_arg_reg;
+    size_t n = 0;
+    for (const char *p = fmt; *p && n + 1 < cap; p++) {
+        if (*p != '%') { out[n++] = *p; continue; }
+        const char *spec = p++;
+        while (*p && strchr("-+ #0123456789.lhz", *p)) p++;
+        if (!*p) break;
+        char one[160] = "";
+        const uint32_t arg = reg <= 11 ? psp_cpu.r[reg] : 0;
+        switch (*p) {
+        case '%': snprintf(one, sizeof one, "%%"); break;
+        case 's': { char s[120]; psp_str(arg, s, sizeof s); snprintf(one, sizeof one, "%s", s); reg++; break; }
+        case 'd': case 'i': snprintf(one, sizeof one, "%d", (int32_t)arg); reg++; break;
+        case 'u': snprintf(one, sizeof one, "%u", arg); reg++; break;
+        case 'x': case 'X': case 'p': snprintf(one, sizeof one, "0x%X", arg); reg++; break;
+        case 'c': snprintf(one, sizeof one, "%c", (char)arg); reg++; break;
+        case 'f': case 'g': case 'e': snprintf(one, sizeof one, "<float>"); reg += 2; break;
+        default: snprintf(one, sizeof one, "%.*s", (int)(p - spec + 1), spec); break;
+        }
+        for (const char *q = one; *q && n + 1 < cap; q++) out[n++] = *q;
+    }
+    out[n] = 0;
+}
+
+static void hook_game_report(void (*original)(void)) {
+    char msg[600], where[400] = "";
+    format_guest(msg, sizeof msg, psp_cpu.r[4], 5);
+    game_stack(where, sizeof where, 16);
+    logf_line("[game error] report: %s  [game: %s]", msg, where);
+    original();
+}
+
+static void hook_game_fatal(void (*original)(void)) {
+    char msg[600], where[400] = "";
+    format_guest(msg, sizeof msg, psp_cpu.r[4], 5);
+    game_stack(where, sizeof where, 16);
+    logf_line("[game error] FATAL: %s  [game: %s]", msg, where);
+    original();
+}
+
+static void hook_pattern_key(void (*original)(void)) {
+    const int32_t index = (int32_t)psp_cpu.r[4];
+    if (index > 10000 || index < 0) {
+        char where[400] = "";
+        game_stack(where, sizeof where, 16);
+        logf_line("[game error] pattern key: index %d (limit 10000), a1 %d, f12 %f, a2 0x%08X a3 0x%08X  [game: %s]",
+                  index, (int32_t)psp_cpu.r[5], (double)psp_cpu.f[12], psp_cpu.r[6], psp_cpu.r[7], where);
+    }
+    original();
+}
+
+/* A hang loop: log it once with the stack, then wait for vblanks forever --
+ * the thread stops as it would on a PSP, the window and the log stay alive. */
+static void park_hang(uint32_t at) {
+    char where[400] = "";
+    game_stack(where, sizeof where, 16);
+    logf_line("[game error] HANG: the game stopped itself at 0x%08X (a deliberate infinite loop) at vblank %llu; "
+              "a0 0x%08X a1 0x%08X a2 0x%08X a3 0x%08X ra 0x%08X  [game: %s]", at,
+              (unsigned long long)psp_sched_vblank_count(), psp_cpu.r[4], psp_cpu.r[5], psp_cpu.r[6], psp_cpu.r[7],
+              psp_cpu.r[31], where);
+    logf_line("[game error] this thread is parked; the rest keeps running. Please send game_log.txt.");
+    for (;;) psp_sched_wait_vblank(0);
+}
+static void hook_hang_fatal(void (*original)(void))   { (void)original; park_hang(0x08D3F470u); }
+static void hook_hang_pattern(void (*original)(void)) { (void)original; park_hang(0x08D4C604u); }
+static void hook_hang_break(void (*original)(void))   { (void)original; park_hang(0x08B8D840u); }
+
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
 
 void gamelog_init(const char *exe_dir) {
@@ -484,6 +565,12 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08ABB3A4u, hook_items_owner_new);
     psp_hook_set(0x08ABBD6Cu, hook_items_owner_del);
     psp_hook_set(0x08A67960u, hook_dispatch_packet);
+    psp_hook_set(0x08D3F3B4u, hook_game_report);
+    psp_hook_set(0x08D3F418u, hook_game_fatal);
+    psp_hook_set(0x08D4C5C0u, hook_pattern_key);
+    psp_hook_set(0x08D3F470u, hook_hang_fatal);
+    psp_hook_set(0x08D4C604u, hook_hang_pattern);
+    psp_hook_set(0x08B8D840u, hook_hang_break);
     psp_hook_set(0x08A6D41Cu, hook_session_info_new);
     psp_hook_set(0x08A6D490u, hook_session_info_del);
     psp_hook_set(0x08CB25E0u, hook_charainfo_req);
