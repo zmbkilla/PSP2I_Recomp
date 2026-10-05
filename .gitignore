@@ -79,3 +79,13 @@ prod/*
 
 # my test artifacts (captures, logs, save copies)
 port/testwork/
+
+# ---- notes and write-ups for other people, cheat codes: not source code
+party_*.txt
+rightstick.txt
+# runtime output wherever it lands
+crash_log.txt
+game_log.txt
+online_log.txt
+*.zip
+*.zip.[0-9][0-9][0-9]
