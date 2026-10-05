@@ -21,3 +21,6 @@
 0x08CB1538   # TPspNpMatching2: net id (party slot) of a room member id (used by the session server): logged
 0x08D10ACC   # session server: client object -> party net id (client+0x40 member id -> +0x60): logged
 0x08CB3E40   # TPspNpMatching2: SetRoomDataInternal callback (room state +0x8 <- +0x14 ? 2 : 1): logged
+0x08ABB4A8   # client: session packet 0x0A08 (character items) -> *(0x08ED8CEC)+0x58, dropped if no owner: logged
+0x08ABB3A4   # client: creates the item owner object *(0x08ED8CEC): logged
+0x08ABBD6C   # client: destroys the item owner object *(0x08ED8CEC): logged
