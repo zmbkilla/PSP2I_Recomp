@@ -388,6 +388,21 @@ static void hook_items_owner_new(void (*original)(void)) {
         g_items_held_len = 0;
     }
 }
+/* Every session packet the client dispatches, from the items packet until
+ * ~10 s after the field scene (item owner) exists: which ones arrive before
+ * the scene can take them. */
+static uint64_t g_pkt_log_until;
+static void hook_dispatch_packet(void (*original)(void)) {
+    const uint32_t pkt = psp_cpu.r[4];
+    const uint64_t vb = psp_sched_vblank_count();
+    const uint8_t cmd = psp_read8(pkt + 4), sub = psp_read8(pkt + 5);
+    if (cmd == 0x0A && sub == 0x08) g_pkt_log_until = vb + 600;
+    if (vb <= g_pkt_log_until)
+        logf_line("[party] dispatch %02X%02X (%u bytes) at vblank %llu, scene %s", cmd, sub, psp_read32(pkt),
+                  (unsigned long long)vb, psp_read32(ITEM_OWNER) ? "ready" : "NOT READY");
+    original();
+}
+
 static void hook_items_owner_del(void (*original)(void)) {
     const uint32_t before = psp_read32(ITEM_OWNER);
     free(g_items_held);                 /* a session ended: nothing kept carries over */
@@ -413,6 +428,7 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08ABB4A8u, hook_items_packet);
     psp_hook_set(0x08ABB3A4u, hook_items_owner_new);
     psp_hook_set(0x08ABBD6Cu, hook_items_owner_del);
+    psp_hook_set(0x08A67960u, hook_dispatch_packet);
     psp_hook_set(0x08CB25E0u, hook_charainfo_req);
     psp_hook_set(0x08CB2B5Cu, hook_member_info);
     psp_hook_set(0x08CB54E8u, hook_issue_netid);
