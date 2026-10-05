@@ -20,3 +20,4 @@
 0x089489FC   # client: quest-counter info from the current zone (slot, table): logged (host/gamelog.c)
 0x08CB1538   # TPspNpMatching2: net id (party slot) of a room member id (used by the session server): logged
 0x08D10ACC   # session server: client object -> party net id (client+0x40 member id -> +0x60): logged
+0x08CB3E40   # TPspNpMatching2: SetRoomDataInternal callback (room state +0x8 <- +0x14 ? 2 : 1): logged

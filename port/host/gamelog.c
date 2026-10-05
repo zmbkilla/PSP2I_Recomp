@@ -20,6 +20,7 @@
 
 #include <ctype.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -238,9 +239,19 @@ static void hook_is_local(void (*original)(void)) {
     }
 }
 
+/* EXPERIMENT (opt-in, PSP2I_PARTY_GATE_EXPERIMENT=1): in a session the room
+ * size +0x8FC (4) never equals +0xB68 (12), so 0x08CB611C fails and the host
+ * skips its P2P sockets (doInfraMatch 0x08CA6F90), the room's zone and the
+ * chara-info exchange. On real hardware something makes it pass (client packet
+ * 0x1026 sets +0x8FC); this pretends it did, to confirm the root cause. */
+static int g_gate_experiment;
+
 static void hook_may_charainfo(void (*original)(void)) {
     const uint32_t m = psp_cpu.r[4];
     original();
+    if (g_gate_experiment && psp_cpu.r[2] == 0 && (int32_t)psp_read32(m + 0x8FC) > 0 &&
+        psp_read32(m + 0x8FC) != psp_read32(m + 0xB68))
+        psp_cpu.r[2] = 1;
     static int32_t last[3] = {-99, -99, -99};
     const int32_t now[3] = {(int32_t)psp_read32(m + 0x8FC), (int32_t)psp_read32(m + 0xB68), (int32_t)psp_cpu.r[2]};
     if (now[0] == last[0] && now[1] == last[1] && now[2] == last[2]) return;
@@ -312,6 +323,17 @@ static void hook_server_client_netid(void (*original)(void)) {
               (int8_t)psp_read8(c + 0x60), (int32_t)psp_read32(c + 0x20), psp_read32(c + 0x28));
 }
 
+/* SetRoomDataInternal callback: room state +0x8 becomes 2 if +0x14 (set by
+ * setRoomDataInternal's publish flag) is non-zero, else 1. */
+static void hook_setdata_cb(void (*original)(void)) {
+    const uint32_t m = psp_cpu.r[9];
+    const int32_t err = (int32_t)psp_cpu.r[7];
+    const uint32_t s4 = psp_read32(m + 4), s8 = psp_read32(m + 8), f14 = psp_read8(m + 0x14);
+    original();
+    logf_line("[party] SetRoomDataInternal callback (error 0x%08X): +0x14=%u, state +0x4 %u->%u, room state +0x8 %u->%u",
+              (uint32_t)err, f14, s4, psp_read32(m + 4), s8, psp_read32(m + 8));
+}
+
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
 
 void gamelog_init(const char *exe_dir) {
@@ -324,6 +346,12 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08B330B0u, hook_zone_player);
     psp_hook_set(0x08A3DE1Cu, hook_is_local);
     psp_hook_set(0x08CB611Cu, hook_may_charainfo);
+    psp_hook_set(0x08CB3E40u, hook_setdata_cb);
+    {
+        const char *e = getenv("PSP2I_PARTY_GATE_EXPERIMENT");
+        g_gate_experiment = e && *e == '1';
+        if (g_gate_experiment) logf_line("[party] EXPERIMENT ON: session lobby gate 0x08CB611C forced to pass");
+    }
     psp_hook_set(0x08CB25E0u, hook_charainfo_req);
     psp_hook_set(0x08CB2B5Cu, hook_member_info);
     psp_hook_set(0x08CB54E8u, hook_issue_netid);
