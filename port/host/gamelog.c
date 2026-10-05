@@ -331,16 +331,22 @@ static void hook_setdata_cb(void (*original)(void)) {
  * them in *(0x08ED8CEC)+0x58 -- and drops the packet if that object is
  * missing at the time (0x08ABB4D8). */
 #define ITEM_OWNER 0x08ED8CECu
+int game_stack(char *out, size_t cap, int max_frames);     /* main.c */
 static void hook_items_packet(void (*original)(void)) {
     const uint32_t pkt = psp_cpu.r[4], o = psp_read32(ITEM_OWNER);
-    logf_line("[party] items packet 0x0A08 (%u items): owner object 0x%08X%s, stored list 0x%08X  [game: %08X]",
-              psp_read8(pkt + 28), o, o ? "" : " -- MISSING, packet dropped", o ? psp_read32(o + 0x58) : 0, psp_cpu.r[31] - 8);
+    char where[400] = "";
+    game_stack(where, sizeof where, 16);
+    logf_line("[party] items packet 0x0A08 (%u items) at vblank %llu: owner object 0x%08X%s  [game: %s]",
+              psp_read8(pkt + 28), (unsigned long long)psp_sched_vblank_count(), o, o ? "" : " -- MISSING, packet dropped", where);
     original();
 }
 static void hook_items_owner_new(void (*original)(void)) {
     const uint32_t before = psp_read32(ITEM_OWNER);
+    char where[400] = "";
+    game_stack(where, sizeof where, 16);
     original();
-    logf_line("[party] item owner object: 0x%08X -> 0x%08X  [game: %08X]", before, psp_read32(ITEM_OWNER), psp_cpu.r[31] - 8);
+    logf_line("[party] item owner object at vblank %llu: 0x%08X -> 0x%08X  [game: %s]",
+              (unsigned long long)psp_sched_vblank_count(), before, psp_read32(ITEM_OWNER), where);
 }
 static void hook_items_owner_del(void (*original)(void)) {
     const uint32_t before = psp_read32(ITEM_OWNER);
