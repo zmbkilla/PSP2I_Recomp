@@ -239,19 +239,12 @@ static void hook_is_local(void (*original)(void)) {
     }
 }
 
-/* EXPERIMENT (opt-in, PSP2I_PARTY_GATE_EXPERIMENT=1): in a session the room
- * size +0x8FC (4) never equals +0xB68 (12), so 0x08CB611C fails and the host
- * skips its P2P sockets (doInfraMatch 0x08CA6F90), the room's zone and the
- * chara-info exchange. On real hardware something makes it pass (client packet
- * 0x1026 sets +0x8FC); this pretends it did, to confirm the root cause. */
-static int g_gate_experiment;
-
+/* 0x08CB611C = "this room is an infra lobby" (room size == lobby size, or the
+ * lobby controller exists). Forcing it in a session turns the session into a
+ * lobby (tested 2026-10-05), so it is correctly false there. */
 static void hook_may_charainfo(void (*original)(void)) {
     const uint32_t m = psp_cpu.r[4];
     original();
-    if (g_gate_experiment && psp_cpu.r[2] == 0 && (int32_t)psp_read32(m + 0x8FC) > 0 &&
-        psp_read32(m + 0x8FC) != psp_read32(m + 0xB68))
-        psp_cpu.r[2] = 1;
     static int32_t last[3] = {-99, -99, -99};
     const int32_t now[3] = {(int32_t)psp_read32(m + 0x8FC), (int32_t)psp_read32(m + 0xB68), (int32_t)psp_cpu.r[2]};
     if (now[0] == last[0] && now[1] == last[1] && now[2] == last[2]) return;
@@ -347,11 +340,6 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08A3DE1Cu, hook_is_local);
     psp_hook_set(0x08CB611Cu, hook_may_charainfo);
     psp_hook_set(0x08CB3E40u, hook_setdata_cb);
-    {
-        const char *e = getenv("PSP2I_PARTY_GATE_EXPERIMENT");
-        g_gate_experiment = e && *e == '1';
-        if (g_gate_experiment) logf_line("[party] EXPERIMENT ON: session lobby gate 0x08CB611C forced to pass");
-    }
     psp_hook_set(0x08CB25E0u, hook_charainfo_req);
     psp_hook_set(0x08CB2B5Cu, hook_member_info);
     psp_hook_set(0x08CB54E8u, hook_issue_netid);
