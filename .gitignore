@@ -89,3 +89,6 @@ game_log.txt
 online_log.txt
 *.zip
 *.zip.[0-9][0-9][0-9]
+
+# ---- tools: not tracked (kept on disk only)
+port/tools/
