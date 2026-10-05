@@ -94,6 +94,14 @@ endif()
 
 if(PSP2I_PROD)
     target_compile_definitions(psp2i PRIVATE PSP2I_PROD)
+    # The exe's icon: <project>/asset/icon.ico, through a generated resource script.
+    set(PSP2I_ICON ${CMAKE_CURRENT_SOURCE_DIR}/../asset/icon.ico CACHE FILEPATH "Icon for the community build")
+    if(WIN32 AND EXISTS ${PSP2I_ICON})
+        file(TO_CMAKE_PATH ${PSP2I_ICON} PSP2I_ICON_PATH)
+        file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/psp2i_icon.rc "1 ICON \"${PSP2I_ICON_PATH}\"
+")
+        target_sources(psp2i PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/psp2i_icon.rc)
+    endif()
     set(PSP2I_PROD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../prod CACHE PATH "Where the community build is copied")
     set(PSP2I_FFMPEG_BIN ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg-9.0.1-full_build-shared/bin CACHE PATH "FFmpeg DLLs for the community build")
     file(GLOB PSP2I_FFMPEG_DLLS ${PSP2I_FFMPEG_BIN}/avcodec-*.dll ${PSP2I_FFMPEG_BIN}/avutil-*.dll ${PSP2I_FFMPEG_BIN}/swresample-*.dll)
