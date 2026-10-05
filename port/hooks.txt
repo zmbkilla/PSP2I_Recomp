@@ -25,3 +25,5 @@
 0x08ABB3A4   # client: creates the item owner object *(0x08ED8CEC): logged
 0x08ABBD6C   # client: destroys the item owner object *(0x08ED8CEC): logged
 0x08A67960   # client: dispatch one received session packet to the handler tables: logged around session start
+0x08A6D41C   # client: creates the session info object *(0x08ED5A28) (subsystem table 0x08E42868): kept packets replayed
+0x08A6D490   # client: destroys the session info object *(0x08ED5A28): kept packets cleared

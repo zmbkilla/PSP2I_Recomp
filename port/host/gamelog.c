@@ -342,6 +342,7 @@ static void hook_setdata_cb(void (*original)(void)) {
 #define FN_ITEMS_PKT 0x08ABB4A8u
 static uint8_t *g_items_held;           /* a 0x0A08 that arrived before its owner */
 static uint32_t g_items_held_len;
+static void deliver_packet(uint32_t fn, const uint8_t *data, uint32_t len);
 int game_stack(char *out, size_t cap, int max_frames);     /* main.c */
 static void hook_items_packet(void (*original)(void)) {
     const uint32_t pkt = psp_cpu.r[4], o = psp_read32(ITEM_OWNER);
@@ -373,21 +374,72 @@ static void hook_items_owner_new(void (*original)(void)) {
     if (g_items_held && psp_read32(ITEM_OWNER)) {
         /* Deliver the kept items packet: a copy below the stack, then the
          * game's handler, with the caller's registers preserved. */
-        psp_cpu_state saved = psp_cpu;
-        const uint32_t sp = (psp_cpu.r[PSP_REG_SP] - 256u - ((g_items_held_len + 15u) & ~15u)) & ~15u;
-        const uint32_t buf = sp + 128u;
-        for (uint32_t i = 0; i < g_items_held_len; i++) psp_write8(buf + i, g_items_held[i]);
-        psp_cpu.r[PSP_REG_A0] = buf;
-        psp_cpu.r[PSP_REG_RA] = 0;
-        psp_cpu.r[PSP_REG_SP] = sp;
         logf_line("[party] delivering the kept items packet 0x0A08 (%u bytes) to the new owner", g_items_held_len);
-        psp_dispatch(FN_ITEMS_PKT);
-        psp_cpu = saved;
+        deliver_packet(FN_ITEMS_PKT, g_items_held, g_items_held_len);
         free(g_items_held);
         g_items_held = NULL;
         g_items_held_len = 0;
     }
 }
+/* Same race for session packets 0x1005 (session/zone info), 0x1006 and 0x1023:
+ * their handlers (0x08A64764 / 0x08A647FC / 0x08A64CE0) store into the session
+ * info object *(0x08ED5A28) and drop the packet while it does not exist yet. It
+ * is created with the field scene's subsystems (0x08A6D41C, from the table at
+ * 0x08E42868). Kept in order, they go back through the game's dispatcher
+ * (0x08A67960) once it exists. */
+#define SESSION_OBJ     0x08ED59E8u
+#define SESSION_INFO    0x08ED5A28u
+#define FN_DISPATCH_PKT 0x08A67960u
+enum { MAX_HELD = 16 };
+static uint8_t *g_held[MAX_HELD];
+static uint32_t g_held_len[MAX_HELD];
+static int g_held_n;
+
+static int needs_session_info(uint8_t cmd, uint8_t sub) {
+    return cmd == 0x10 && (sub == 0x05 || sub == 0x06 || sub == 0x23);
+}
+static void held_clear(void) {
+    for (int i = 0; i < g_held_n; i++) free(g_held[i]);
+    g_held_n = 0;
+}
+static void held_keep(uint32_t pkt) {
+    const uint32_t len = psp_read32(pkt);
+    if (g_held_n >= MAX_HELD || len < 28 || len > 0x4000) return;
+    uint8_t *copy = (uint8_t *)malloc(len);
+    if (!copy) return;
+    for (uint32_t i = 0; i < len; i++) copy[i] = psp_read8(pkt + i);
+    g_held[g_held_n] = copy;
+    g_held_len[g_held_n++] = len;
+}
+/* Run one game function on a packet copied below the stack, registers kept. */
+static void deliver_packet(uint32_t fn, const uint8_t *data, uint32_t len) {
+    psp_cpu_state saved = psp_cpu;
+    const uint32_t sp = (psp_cpu.r[PSP_REG_SP] - 256u - ((len + 15u) & ~15u)) & ~15u;
+    const uint32_t buf = sp + 128u;
+    for (uint32_t i = 0; i < len; i++) psp_write8(buf + i, data[i]);
+    psp_cpu.r[PSP_REG_A0] = buf;
+    psp_cpu.r[PSP_REG_RA] = 0;
+    psp_cpu.r[PSP_REG_SP] = sp;
+    psp_dispatch(fn);
+    psp_cpu = saved;
+}
+static void hook_session_info_new(void (*original)(void)) {
+    original();
+    if (!psp_read32(SESSION_INFO) || !g_held_n) return;
+    logf_line("[party] session info object 0x%08X created at vblank %llu: delivering %d kept packet(s)", psp_read32(SESSION_INFO),
+              (unsigned long long)psp_sched_vblank_count(), g_held_n);
+    const int n = g_held_n;
+    g_held_n = 0;                       /* the replay must not keep them again */
+    for (int i = 0; i < n; i++) {
+        deliver_packet(FN_DISPATCH_PKT, g_held[i], g_held_len[i]);
+        free(g_held[i]);
+    }
+}
+static void hook_session_info_del(void (*original)(void)) {
+    held_clear();
+    original();
+}
+
 /* Every session packet the client dispatches, from the items packet until
  * ~10 s after the field scene (item owner) exists: which ones arrive before
  * the scene can take them. */
@@ -397,9 +449,12 @@ static void hook_dispatch_packet(void (*original)(void)) {
     const uint64_t vb = psp_sched_vblank_count();
     const uint8_t cmd = psp_read8(pkt + 4), sub = psp_read8(pkt + 5);
     if (cmd == 0x0A && sub == 0x08) g_pkt_log_until = vb + 600;
-    if (vb <= g_pkt_log_until)
-        logf_line("[party] dispatch %02X%02X (%u bytes) at vblank %llu, scene %s", cmd, sub, psp_read32(pkt),
-                  (unsigned long long)vb, psp_read32(ITEM_OWNER) ? "ready" : "NOT READY");
+    const int keep = needs_session_info(cmd, sub) && psp_read32(SESSION_OBJ) && !psp_read32(SESSION_INFO);
+    if (vb <= g_pkt_log_until || keep)
+        logf_line("[party] dispatch %02X%02X (%u bytes) at vblank %llu, scene %s, session info %s%s", cmd, sub, psp_read32(pkt),
+                  (unsigned long long)vb, psp_read32(ITEM_OWNER) ? "ready" : "NOT READY",
+                  psp_read32(SESSION_INFO) ? "ready" : "NOT READY", keep ? " -- kept for later" : "");
+    if (keep) held_keep(pkt);
     original();
 }
 
@@ -429,6 +484,8 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08ABB3A4u, hook_items_owner_new);
     psp_hook_set(0x08ABBD6Cu, hook_items_owner_del);
     psp_hook_set(0x08A67960u, hook_dispatch_packet);
+    psp_hook_set(0x08A6D41Cu, hook_session_info_new);
+    psp_hook_set(0x08A6D490u, hook_session_info_del);
     psp_hook_set(0x08CB25E0u, hook_charainfo_req);
     psp_hook_set(0x08CB2B5Cu, hook_member_info);
     psp_hook_set(0x08CB54E8u, hook_issue_netid);
