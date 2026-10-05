@@ -15,6 +15,7 @@
 #include "gamelog.h"
 #include "online.h"
 
+#include <psprecomp/cpu.h>
 #include <psprecomp/dispatch.h>
 #include <psprecomp/hle.h>
 
@@ -329,15 +330,37 @@ static void hook_setdata_cb(void (*original)(void)) {
 
 /* The character's items arrive in session packet 0x0A08; the client keeps
  * them in *(0x08ED8CEC)+0x58 -- and drops the packet if that object is
- * missing at the time (0x08ABB4D8). */
-#define ITEM_OWNER 0x08ED8CECu
+ * missing at the time (0x08ABB4D8). The owner is made by the field scene
+ * (0x08B2E834 -> ... -> 0x08ABB3A4), ~16 frames after the session server sends
+ * the items. On a PSP the host's client reaches its own server through the
+ * firmware's P2P stream sockets (tunnelled through NP signaling), slow enough
+ * that the items arrive after the scene exists; here (as on PPSSPP and the
+ * Vita) they arrive at once and are lost -- the host's inventory is empty.
+ * So: a 0x0A08 that finds no owner is kept, and handed to the game's own
+ * handler as soon as the owner is created. */
+#define ITEM_OWNER  0x08ED8CECu
+#define FN_ITEMS_PKT 0x08ABB4A8u
+static uint8_t *g_items_held;           /* a 0x0A08 that arrived before its owner */
+static uint32_t g_items_held_len;
 int game_stack(char *out, size_t cap, int max_frames);     /* main.c */
 static void hook_items_packet(void (*original)(void)) {
     const uint32_t pkt = psp_cpu.r[4], o = psp_read32(ITEM_OWNER);
     char where[400] = "";
     game_stack(where, sizeof where, 16);
     logf_line("[party] items packet 0x0A08 (%u items) at vblank %llu: owner object 0x%08X%s  [game: %s]",
-              psp_read8(pkt + 28), (unsigned long long)psp_sched_vblank_count(), o, o ? "" : " -- MISSING, packet dropped", where);
+              psp_read8(pkt + 28), (unsigned long long)psp_sched_vblank_count(), o, o ? "" : " -- no owner yet, kept for later", where);
+    if (!o) {
+        const uint32_t len = psp_read32(pkt);
+        if (len >= 28 && len <= 0x4000) {
+            uint8_t *copy = (uint8_t *)malloc(len);
+            if (copy) {
+                for (uint32_t i = 0; i < len; i++) copy[i] = psp_read8(pkt + i);
+                free(g_items_held);
+                g_items_held = copy;
+                g_items_held_len = len;
+            }
+        }
+    }
     original();
 }
 static void hook_items_owner_new(void (*original)(void)) {
@@ -347,9 +370,29 @@ static void hook_items_owner_new(void (*original)(void)) {
     original();
     logf_line("[party] item owner object at vblank %llu: 0x%08X -> 0x%08X  [game: %s]",
               (unsigned long long)psp_sched_vblank_count(), before, psp_read32(ITEM_OWNER), where);
+    if (g_items_held && psp_read32(ITEM_OWNER)) {
+        /* Deliver the kept items packet: a copy below the stack, then the
+         * game's handler, with the caller's registers preserved. */
+        psp_cpu_state saved = psp_cpu;
+        const uint32_t sp = (psp_cpu.r[PSP_REG_SP] - 256u - ((g_items_held_len + 15u) & ~15u)) & ~15u;
+        const uint32_t buf = sp + 128u;
+        for (uint32_t i = 0; i < g_items_held_len; i++) psp_write8(buf + i, g_items_held[i]);
+        psp_cpu.r[PSP_REG_A0] = buf;
+        psp_cpu.r[PSP_REG_RA] = 0;
+        psp_cpu.r[PSP_REG_SP] = sp;
+        logf_line("[party] delivering the kept items packet 0x0A08 (%u bytes) to the new owner", g_items_held_len);
+        psp_dispatch(FN_ITEMS_PKT);
+        psp_cpu = saved;
+        free(g_items_held);
+        g_items_held = NULL;
+        g_items_held_len = 0;
+    }
 }
 static void hook_items_owner_del(void (*original)(void)) {
     const uint32_t before = psp_read32(ITEM_OWNER);
+    free(g_items_held);                 /* a session ended: nothing kept carries over */
+    g_items_held = NULL;
+    g_items_held_len = 0;
     original();
     logf_line("[party] item owner object destroyed: 0x%08X -> 0x%08X  [game: %08X]", before, psp_read32(ITEM_OWNER), psp_cpu.r[31] - 8);
 }
