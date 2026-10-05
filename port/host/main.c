@@ -1219,7 +1219,7 @@ static int exists(const char *p) {
 }
 
 int main(int argc, char **argv) {
-    char dir[512], root[600] = "", eboot[700] = "";
+    char dir[512], root[600] = "", eboot[700] = "", ms_dir[600] = "";   /* --ms: memory stick elsewhere (tests) */
     uint32_t oracle_addr = 0;
     const char *renderer = "d3d11";
     int oracle_all = 0;
@@ -1239,6 +1239,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--root") && i + 1 < argc)          snprintf(root, sizeof root, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--eboot") && i + 1 < argc)         snprintf(eboot, sizeof eboot, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--ms") && i + 1 < argc)            snprintf(ms_dir, sizeof ms_dir, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--headless"))                      g_headless = 1;
         else if (!strcmp(argv[i], "--sdl"))                           want_sdl = 1;
         else if (!strcmp(argv[i], "--no-sdl"))                        want_sdl = 0;
@@ -1337,9 +1338,15 @@ int main(int argc, char **argv) {
     if (g_capture_every || g_noverlay_shot) host_mkdir(g_capture_dir);
     {
         char ms[700];
-        snprintf(ms, sizeof ms, "%s/ms", root);          host_mkdir(ms);
-        snprintf(ms, sizeof ms, "%s/ms/PSP", root);      host_mkdir(ms);
-        snprintf(ms, sizeof ms, "%s/ms/PSP/SAVEDATA", root); host_mkdir(ms);
+        if (ms_dir[0]) {
+            host_mkdir(ms_dir);
+            snprintf(ms, sizeof ms, "%s/PSP", ms_dir);          host_mkdir(ms);
+            snprintf(ms, sizeof ms, "%s/PSP/SAVEDATA", ms_dir); host_mkdir(ms);
+        } else {
+            snprintf(ms, sizeof ms, "%s/ms", root);          host_mkdir(ms);
+            snprintf(ms, sizeof ms, "%s/ms/PSP", root);      host_mkdir(ms);
+            snprintf(ms, sizeof ms, "%s/ms/PSP/SAVEDATA", root); host_mkdir(ms);
+        }
     }
 
 #ifdef _WIN32
@@ -1371,6 +1378,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "psp2i: falling back to the software renderer\n");
 #endif
     psp_io_set_root(root);
+    if (ms_dir[0]) { psp_io_set_ms_root(ms_dir); printf("ms:    %s\n", ms_dir); }
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
     if (dump_addr) dump_arm(dump_addr, dump_path);
