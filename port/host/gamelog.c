@@ -327,6 +327,27 @@ static void hook_setdata_cb(void (*original)(void)) {
               (uint32_t)err, f14, s4, psp_read32(m + 4), s8, psp_read32(m + 8));
 }
 
+/* The character's items arrive in session packet 0x0A08; the client keeps
+ * them in *(0x08ED8CEC)+0x58 -- and drops the packet if that object is
+ * missing at the time (0x08ABB4D8). */
+#define ITEM_OWNER 0x08ED8CECu
+static void hook_items_packet(void (*original)(void)) {
+    const uint32_t pkt = psp_cpu.r[4], o = psp_read32(ITEM_OWNER);
+    logf_line("[party] items packet 0x0A08 (%u items): owner object 0x%08X%s, stored list 0x%08X  [game: %08X]",
+              psp_read8(pkt + 28), o, o ? "" : " -- MISSING, packet dropped", o ? psp_read32(o + 0x58) : 0, psp_cpu.r[31] - 8);
+    original();
+}
+static void hook_items_owner_new(void (*original)(void)) {
+    const uint32_t before = psp_read32(ITEM_OWNER);
+    original();
+    logf_line("[party] item owner object: 0x%08X -> 0x%08X  [game: %08X]", before, psp_read32(ITEM_OWNER), psp_cpu.r[31] - 8);
+}
+static void hook_items_owner_del(void (*original)(void)) {
+    const uint32_t before = psp_read32(ITEM_OWNER);
+    original();
+    logf_line("[party] item owner object destroyed: 0x%08X -> 0x%08X  [game: %08X]", before, psp_read32(ITEM_OWNER), psp_cpu.r[31] - 8);
+}
+
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
 
 void gamelog_init(const char *exe_dir) {
@@ -340,6 +361,9 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08A3DE1Cu, hook_is_local);
     psp_hook_set(0x08CB611Cu, hook_may_charainfo);
     psp_hook_set(0x08CB3E40u, hook_setdata_cb);
+    psp_hook_set(0x08ABB4A8u, hook_items_packet);
+    psp_hook_set(0x08ABB3A4u, hook_items_owner_new);
+    psp_hook_set(0x08ABBD6Cu, hook_items_owner_del);
     psp_hook_set(0x08CB25E0u, hook_charainfo_req);
     psp_hook_set(0x08CB2B5Cu, hook_member_info);
     psp_hook_set(0x08CB54E8u, hook_issue_netid);
