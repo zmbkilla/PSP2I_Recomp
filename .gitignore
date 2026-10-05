@@ -72,3 +72,7 @@ debugscreen/
 
 # third-party runtime libraries (FFmpeg for ATRAC music), kept local
 ffmpeg-*/
+
+# ---- community build output (prod/): binaries and the user's game data stay local
+prod/*
+!prod/README.txt

@@ -64,6 +64,7 @@
 #include "online.h"
 #include "savecrypt.h"
 #include "gamelog.h"
+#include "prod.h"
 #include "textedit.h"
 
 #ifdef _WIN32
@@ -1231,6 +1232,9 @@ int main(int argc, char **argv) {
     uint64_t args_flip = 0;
     const char *dump_path = NULL;
     exe_dir(dir, sizeof dir);
+#ifdef PSP2I_PROD
+    argc = 1;                              /* community build: no command line, see prod.c */
+#endif
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--root") && i + 1 < argc)          snprintf(root, sizeof root, "%s", argv[++i]);
@@ -1317,6 +1321,9 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "usage: %s [--root DIR] [--eboot FILE] [--headless] [--seconds N] "
                                "[--capture-every N] [--capture-dir DIR]\n", argv[0]); return 2; }
     }
+#ifdef PSP2I_PROD
+    if (prod_check(dir, root, sizeof root, eboot, sizeof eboot) != 0) return 1;
+#endif
     if (!root[0]) {
         snprintf(root, sizeof root, "%s/GameData", dir);
         char probe[700];

@@ -20,6 +20,10 @@ set(PSPRECOMP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../psprecomp CACHE PATH "psprecomp
 add_subdirectory(${PSPRECOMP_DIR} psprecomp EXCLUDE_FROM_ALL)
 
 option(PSP2I_TRACE "Build the generated code with function-entry tracing" OFF)
+# Community build: no command line, data found from the exe's folder, a start-up
+# check of everything needed (host/prod.c); the exe and its DLLs are copied to
+# <project>/prod. Build it in its own tree: cmake -S port -B port/build-prod -DPSP2I_PROD=ON
+option(PSP2I_PROD "Community build: no arguments, checks for its data, copies to ../prod" OFF)
 
 add_executable(psp2i
     host/main.c
@@ -38,6 +42,7 @@ add_executable(psp2i
     host/rpcn_rooms.c
     host/savecrypt.c
     host/gamelog.c
+    host/prod.c
     host/login.c
     host/textedit.c
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
@@ -85,4 +90,20 @@ endif()
 
 if(PSP2I_TRACE)
     target_compile_definitions(psp2i PRIVATE PSPRECOMP_TRACE)
+endif()
+
+if(PSP2I_PROD)
+    target_compile_definitions(psp2i PRIVATE PSP2I_PROD)
+    set(PSP2I_PROD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../prod CACHE PATH "Where the community build is copied")
+    set(PSP2I_FFMPEG_BIN ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg-9.0.1-full_build-shared/bin CACHE PATH "FFmpeg DLLs for the community build")
+    file(GLOB PSP2I_FFMPEG_DLLS ${PSP2I_FFMPEG_BIN}/avcodec-*.dll ${PSP2I_FFMPEG_BIN}/avutil-*.dll ${PSP2I_FFMPEG_BIN}/swresample-*.dll)
+    add_custom_command(TARGET psp2i POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${PSP2I_PROD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:psp2i> ${PSP2I_PROD_DIR}
+        COMMENT "Copying the community build to ${PSP2I_PROD_DIR}")
+    foreach(dll ${PSP2I_SDL3_DLL} ${PSP2I_FFMPEG_DLLS})
+        if(EXISTS ${dll})
+            add_custom_command(TARGET psp2i POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${dll} ${PSP2I_PROD_DIR})
+        endif()
+    endforeach()
 endif()
