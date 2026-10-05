@@ -24,3 +24,4 @@
 0x08ABB4A8   # client: session packet 0x0A08 (character items) -> *(0x08ED8CEC)+0x58, dropped if no owner: logged
 0x08ABB3A4   # client: creates the item owner object *(0x08ED8CEC): logged
 0x08ABBD6C   # client: destroys the item owner object *(0x08ED8CEC): logged
+0x08A67960   # client: dispatch one received session packet to the handler tables: logged around session start
