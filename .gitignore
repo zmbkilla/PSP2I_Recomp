@@ -76,3 +76,6 @@ ffmpeg-*/
 # ---- community build output (prod/): binaries and the user's game data stay local
 prod/*
 !prod/README.txt
+
+# my test artifacts (captures, logs, save copies)
+port/testwork/
