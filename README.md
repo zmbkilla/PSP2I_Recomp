@@ -36,6 +36,16 @@ Current capabilities include:
 
 > This project is actively being developed. Capabilities and compatibility may change as development progresses.
 
+
+## Issues
+
+Current issues include:
+
+- Unhandled logic when loading into some bosses causes softlock
+- 60 fps is not properly implemented
+- Adhoc not supported
+- Infrastructure online is host only
+
 ## Building
 
 ### Requirements
