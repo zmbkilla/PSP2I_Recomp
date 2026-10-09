@@ -784,6 +784,14 @@ static int  g_last_windowed = RES_DEFAULT;  /* where Alt+Enter returns from full
 
 static int g_res_saved = RES_DEFAULT;       /* what psp2i_display.ini holds */
 static int g_ren_saved = REN_D3D11;
+static int g_vol_saved[VOL_N] = { VOL_STEPS, VOL_STEPS, VOL_STEPS };
+static int g_att_saved = ATT_DEFAULT;
+
+/* "80" -> 8 tenths (0..100, rounded to 10%). */
+static int vol_parse(const char *s) {
+    const int v = atoi(s);
+    return v < 0 ? 0 : v > 100 ? VOL_STEPS : (v + 5) / 10;
+}
 
 static int display_load(void) {
     FILE *f = g_display_ini[0] ? fopen(g_display_ini, "r") : NULL;
@@ -793,6 +801,10 @@ static int display_load(void) {
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "resolution=", 11)) res = menu_res_parse(line + 11);
         else if (!strncmp(line, "renderer=", 9)) { const int r = menu_ren_parse(line + 9); if (r >= 0) g_ren_saved = r; }
+        else if (!strncmp(line, "master_volume=", 14)) g_vol_saved[VOL_MASTER] = vol_parse(line + 14);
+        else if (!strncmp(line, "music_volume=", 13))  g_vol_saved[VOL_MUSIC] = vol_parse(line + 13);
+        else if (!strncmp(line, "sfx_volume=", 11))    g_vol_saved[VOL_SFX] = vol_parse(line + 11);
+        else if (!strncmp(line, "attenuation=", 12))   g_att_saved = !strncmp(line + 12, "off", 3) ? ATT_OFF : menu_att_parse(atoi(line + 12));
     }
     fclose(f);
     if (res >= 0) g_res_saved = res;
@@ -807,6 +819,11 @@ static void display_save(int res) {
     fprintf(f, "resolution=%s\n", menu_res_name(res));
     fprintf(f, "; renderer: d3d11 or opengl (used from the next start)\n");
     fprintf(f, "renderer=%s\n", menu_ren_key(g_ren_saved));
+    fprintf(f, "; volumes 0..100 (%%); attenuation while other programs play sound: off, -6db, -12db, -20db\n");
+    fprintf(f, "master_volume=%d\nmusic_volume=%d\nsfx_volume=%d\n",
+            g_vol_saved[VOL_MASTER] * 10, g_vol_saved[VOL_MUSIC] * 10, g_vol_saved[VOL_SFX] * 10);
+    if (g_att_saved == ATT_OFF) fprintf(f, "attenuation=off\n");
+    else fprintf(f, "attenuation=%ddb\n", menu_att_db(g_att_saved));
     fclose(f);
 }
 
@@ -818,6 +835,15 @@ static void display_set(int res) {
 #endif
     display_save(res);
     fprintf(stderr, "menu: resolution %s (saved)\n", menu_res_name(res));
+}
+
+/* Volumes and attenuation to where they act: the device output (master and
+ * attenuation, audio_sdl.c), the music decoder and the sound-effect mixer. */
+static void audio_apply(void) {
+    audio_set_master((float)g_vol_saved[VOL_MASTER] / VOL_STEPS);
+    atrac_at3_set_gain((float)g_vol_saved[VOL_MUSIC] / VOL_STEPS);
+    psp_sas_set_gain((float)g_vol_saved[VOL_SFX] / VOL_STEPS);
+    audio_set_attenuation_db(menu_att_db(g_att_saved));
 }
 
 /* Once per vblank: the menu reads the raw input (the game's is filtered). */
@@ -883,6 +909,14 @@ static void menu_step(void) {
         fprintf(stderr, "menu: frame rate %d fps\n", g_menu.fps);
     }
     if (fx & MFX_RES_CHANGED) display_set(g_menu.res);
+    if (fx & MFX_AUDIO) {
+        for (int k = 0; k < VOL_N; k++) g_vol_saved[k] = g_menu.vol[k];
+        g_att_saved = g_menu.att;
+        audio_apply();
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: volume master %d%%, music %d%%, effects %d%%; attenuation %d dB\n",
+                g_vol_saved[VOL_MASTER] * 10, g_vol_saved[VOL_MUSIC] * 10, g_vol_saved[VOL_SFX] * 10, menu_att_db(g_att_saved));
+    }
     if (fx & MFX_RENDERER) {
         g_ren_saved = g_menu.renderer;
         if (!g_headless) display_save(g_res_saved);
@@ -1883,6 +1917,9 @@ int main(int argc, char **argv) {
     g_menu.res = res;
     g_menu.renderer = g_ren_saved;
     g_menu.renderer_now = g_renderer;
+    for (int k = 0; k < VOL_N; k++) g_menu.vol[k] = g_vol_saved[k];
+    g_menu.att = g_att_saved;
+    audio_apply();
     fps_meter_init(&g_fpsm);
     framerate_init(fps);
     menu_set_rs_speed(&g_menu, rs_speed);

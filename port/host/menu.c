@@ -3,6 +3,7 @@
 #include "menu.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- the menu --------------------------------------------------------------- */
@@ -15,6 +16,8 @@ void menu_init(menu_state *m, int fps, int show_fps) {
     m->fps = fps == 60 ? 60 : 30;
     m->show_fps = show_fps != 0;
     m->res = RES_DEFAULT;
+    for (int k = 0; k < VOL_N; k++) m->vol[k] = VOL_STEPS;   /* 100% */
+    m->att = ATT_DEFAULT;
 }
 
 static const struct { const char *name; int w, h; } RES[RES_MODES] = {
@@ -37,6 +40,16 @@ int menu_res_parse(const char *s) {
         if (!*a && (!*b || *b == '\r' || *b == '\n' || *b == ' ')) return i;
     }
     return -1;
+}
+
+int menu_att_db(int mode) { static const int DB[ATT_MODES] = { 0, -6, -12, -20 }; return mode >= 0 && mode < ATT_MODES ? DB[mode] : 0; }
+
+int menu_att_parse(int db) {
+    if (db >= 0) return ATT_OFF;
+    int best = ATT_6DB;
+    for (int i = ATT_6DB; i < ATT_MODES; i++)
+        if (abs(menu_att_db(i) - db) < abs(menu_att_db(best) - db)) best = i;
+    return best;
 }
 
 const char *menu_ren_key(int r) { return r == REN_GL ? "opengl" : r == REN_SOFTWARE ? "software" : "d3d11"; }
@@ -83,6 +96,17 @@ static int change(menu_state *m, int dir) {
     case MENU_ADHOC_SERVER: return dir == 0 ? MFX_EDIT_ADHOC : 0;
     case MENU_ADHOC_MODE:  m->adhoc_mode = (m->adhoc_mode + (dir < 0 ? 2 : 1)) % 3; return MFX_ADHOC_MODE;
     case MENU_RENDERER:    m->renderer = (m->renderer + 1) % REN_MENU_CHOICES; return MFX_RENDERER;
+    case MENU_MASTER_VOL: case MENU_MUSIC_VOL: case MENU_SFX_VOL: {
+        int *v = &m->vol[m->sel - MENU_MASTER_VOL];
+        const int old = *v;
+        if (dir < 0)      { if (*v > 0) (*v)--; }
+        else if (dir > 0) { if (*v < VOL_STEPS) (*v)++; }
+        else              *v = (*v + 1) % (VOL_STEPS + 1);
+        return *v != old ? MFX_AUDIO : 0;
+    }
+    case MENU_ATTENUATION:
+        m->att = (m->att + (dir < 0 ? ATT_MODES - 1 : 1)) % ATT_MODES;
+        return MFX_AUDIO;
     case MENU_RESOLUTION:
         m->res = (m->res + (dir < 0 ? RES_MODES - 1 : 1)) % RES_MODES;
         return MFX_RES_CHANGED;
@@ -250,7 +274,7 @@ static void frame(menu_image *img, int x, int y, int w, int h, uint32_t rgb) {
 void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *hotkey) {
     if (!m->open) return;
     char line[96];
-    const int bw = 288, bh = 209;
+    const int bw = 288, bh = 261;
     const int x0 = (img->w - bw) / 2, y0 = (img->h - bh) / 2;
     shade(img, x0, y0, bw, bh);
     frame(img, x0, y0, bw, bh, GREY);
@@ -260,10 +284,15 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     y += CELL_H + 8;
 
     static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "SEGA SERVER", "ADHOC SERVER",
-                                                   "ADHOC MODE", "RESOLUTION", "RENDERER", "CLOSE" };
+                                                   "ADHOC MODE", "RESOLUTION", "RENDERER", "MASTER VOLUME",
+                                                   "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "CLOSE" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
+    char vol[VOL_N][16], att[24];
+    for (int k = 0; k < VOL_N; k++) snprintf(vol[k], sizeof vol[k], "< %d%% >", m->vol[k] * 10);
+    if (m->att == ATT_OFF) snprintf(att, sizeof att, "< OFF >");
+    else snprintf(att, sizeof att, "< %d DB >", menu_att_db(m->att));
     char ren[32];                                       /* the change applies at the next start */
     snprintf(ren, sizeof ren, "< %s >%s", m->renderer == REN_GL ? "OPENGL" : "D3D11", m->renderer != m->renderer_now ? " RESTART" : "");
     char res[24];
@@ -281,7 +310,9 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_FPS_COUNTER ? (m->show_fps ? "< ON >" : "< OFF >")
                       : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega : i == MENU_ADHOC_SERVER ? adhoc
                       : i == MENU_ADHOC_MODE ? ADHOC_MODES[m->adhoc_mode % 3]
-                      : i == MENU_RESOLUTION ? res : i == MENU_RENDERER ? ren : "";
+                      : i == MENU_RESOLUTION ? res : i == MENU_RENDERER ? ren
+                      : i >= MENU_MASTER_VOL && i <= MENU_SFX_VOL ? vol[i - MENU_MASTER_VOL]
+                      : i == MENU_ATTENUATION ? att : "";
         menu_text(img, x0 + 130, y, v, col);
         y += CELL_H + 4;
     }

@@ -16,12 +16,22 @@
  * SDL_AudioSpec { SDL_AudioFormat format; int channels; int freq; }.
  *
  * PSP2I_AUDIO_DUMP=file.wav also records the mixed output (headless too),
- * which is how decoding can be checked without listening. */
+ * which is how decoding can be checked without listening.
+ *
+ * Volume: what reaches the device is scaled by the master volume (menu MASTER
+ * VOLUME) times the attenuation (menu ATTENUATION): while another program is
+ * playing sound (duck_win.c) the game drops by that many dB, and comes back
+ * HOLD_MS after it stops. The gain moves smoothly, sample by sample (down in
+ * about 0.15 s, up in about 0.5 s), so changes never click. The WAV recording
+ * keeps the game's own level. Music and sound-effect volumes are applied where
+ * those are produced (atrac_at3.c, the runtime's psp_sas_set_gain). */
 
 #include "audio_sdl.h"
+#include "duck.h"
 
 #include <psprecomp/hle.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +42,37 @@
 
 static FILE    *g_wav;
 static uint32_t g_wav_bytes;
+
+/* ---- volume and attenuation ---------------------------------------------------- */
+
+#define HOLD_MS 500
+static float g_master = 1.0f;          /* menu MASTER VOLUME */
+static float g_duck = 1.0f;            /* gain while other audio plays (1 = attenuation off) */
+static float g_gain = 1.0f;            /* the gain applied now, moving toward the target */
+
+void audio_set_master(float v) { g_master = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+
+void audio_set_attenuation_db(int db) {
+    g_duck = db >= 0 ? 1.0f : powf(10.0f, (float)db / 20.0f);
+    if (db < 0) duck_start(); else duck_stop();
+}
+
+/* Scale `frames` stereo frames into `out`, moving the gain toward the target
+ * by at most the attack/release step per sample. */
+static void apply_gain(const int16_t *in, int16_t *out, uint32_t frames) {
+    const float target = g_master * (g_duck < 1.0f && duck_others_heard_within(HOLD_MS) ? g_duck : 1.0f);
+    const float down = 1.0f / (0.15f * AUDIO_RATE), up = 1.0f / (0.5f * AUDIO_RATE);
+    float g = g_gain;
+    for (uint32_t i = 0; i < frames; i++) {
+        if (g > target) { g -= down; if (g < target) g = target; }
+        else if (g < target) { g += up; if (g > target) g = target; }
+        for (int c = 0; c < 2; c++) {
+            const float v = (float)in[i * 2 + c] * g;
+            out[i * 2 + c] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : (int)v);
+        }
+    }
+    g_gain = g;
+}
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -96,7 +137,17 @@ static void sdl_put(int ch, const int16_t *pcm, uint32_t frames) {
         A.ResumeAudioStreamDevice(g_stream[ch]);
     }
     if (A.GetAudioStreamQueued(g_stream[ch]) > AUDIO_MAX_QUEUE) A.ClearAudioStream(g_stream[ch]);
-    A.PutAudioStreamData(g_stream[ch], pcm, (int)(frames * 4));
+    if (g_gain == 1.0f && g_master == 1.0f && !(g_duck < 1.0f && duck_others_heard_within(HOLD_MS))) {
+        A.PutAudioStreamData(g_stream[ch], pcm, (int)(frames * 4));   /* full level: as the game made it */
+        return;
+    }
+    int16_t tmp[2048 * 2];
+    for (uint32_t done = 0; done < frames; ) {
+        const uint32_t n = frames - done < 2048 ? frames - done : 2048;
+        apply_gain(pcm + done * 2, tmp, n);
+        A.PutAudioStreamData(g_stream[ch], tmp, (int)(n * 4));
+        done += n;
+    }
 }
 #else
 static void sdl_put(int ch, const int16_t *pcm, uint32_t frames) { (void)ch; (void)pcm; (void)frames; }
