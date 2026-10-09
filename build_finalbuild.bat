@@ -26,6 +26,13 @@ copy /y "%ROOT%port\build\Release\psp2i.exe" "%ROOT%FinalBuild\" >nul
 if errorlevel 1 goto locked
 copy /y "%ROOT%port\build\Release\psp2i.pdb" "%ROOT%FinalBuild\" >nul
 if errorlevel 1 goto locked
+rem ATRAC music decoder (LGPL, its own DLL) with its licence files, and SDL3 (fetched by CMake).
+if exist "%ROOT%port\build\Release\psp2i_atrac.dll" (
+    copy /y "%ROOT%port\build\Release\psp2i_atrac.dll" "%ROOT%FinalBuild\" >nul
+    if errorlevel 1 goto locked
+    xcopy /y /q /i "%ROOT%port\build\Release\licenses" "%ROOT%FinalBuild\licenses" >nul
+)
+if exist "%ROOT%port\build\Release\SDL3.dll" copy /y "%ROOT%port\build\Release\SDL3.dll" "%ROOT%FinalBuild\" >nul
 
 if defined SERVER (
     echo == Publishing the SEGA server ==

@@ -66,7 +66,7 @@
 #include "recomp_funcs.h"
 #include "input_sdl.h"
 #include "audio_sdl.h"
-#include "atrac_ffmpeg.h"
+#include "atrac_at3.h"
 #include "framerate.h"
 #include "menu.h"
 #include "camera.h"
@@ -1869,7 +1869,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "renderer: %s\n", g_renderer == REN_GL ? "OpenGL" : g_renderer == REN_D3D11 ? "Direct3D 11" : "software");
     if (want_sdl == 1 || (want_sdl < 0 && !g_headless)) g_sdl_on = input_sdl_init() == 0;
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
-    atrac_ffmpeg_init(dir);        /* ATRAC music; silent if FFmpeg is absent */
+    atrac_at3_init(dir);           /* ATRAC music (psp2i_atrac.dll); silent without it */
     if (replay_path) {                         /* a recorded route: its fps unless --fps */
         const int rf = replay_load(replay_path);
         if (rf < 0) return 1;
