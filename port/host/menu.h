@@ -23,7 +23,7 @@ enum {
 
 /* Menu items, top to bottom. */
 enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
-       MENU_RESOLUTION, MENU_CLOSE, MENU_ITEMS };
+       MENU_RESOLUTION, MENU_RENDERER, MENU_CLOSE, MENU_ITEMS };
 
 /* Output resolution: the window's client size (the 480x272 picture is scaled
  * to fit it, aspect kept), or borderless fullscreen on the current monitor. */
@@ -32,6 +32,12 @@ enum { RES_960x544, RES_1280x720, RES_1920x1080, RES_2560x1440, RES_3840x2160, R
 const char *menu_res_name(int mode);                 /* "1920X1080", "FULLSCREEN" */
 int  menu_res_size(int mode, int *w, int *h);        /* client size; 0 for fullscreen */
 int  menu_res_parse(const char *s);                  /* "1920x1080" / "fullscreen" -> mode, -1 if unknown */
+
+/* Renderer for the GE (used from the next start): Direct3D 11, OpenGL 3.3, or
+ * the software reference (command line only, not in the menu). */
+enum { REN_D3D11, REN_GL, REN_SOFTWARE, REN_MENU_CHOICES = 2 };
+const char *menu_ren_key(int r);                     /* "d3d11", "opengl", "software" */
+int  menu_ren_parse(const char *s);                  /* "d3d11" / "opengl" / "gl" -> REN_*, -1 if unknown */
 
 /* Right-stick camera sensitivity: 1.00x .. 2.00x in 0.25 steps. */
 #define MENU_RS_STEPS 5
@@ -47,6 +53,7 @@ enum {
     MFX_RES_CHANGED = 1 << 6,   /* res changed: resize the window / go fullscreen */
     MFX_EDIT_ADHOC  = 1 << 7,   /* Circle on ADHOC SERVER: the caller opens its text editor */
     MFX_ADHOC_MODE  = 1 << 8,   /* adhoc_mode changed */
+    MFX_RENDERER    = 1 << 9,   /* renderer changed: save it (used from the next start) */
 };
 
 typedef struct {
@@ -59,6 +66,8 @@ typedef struct {
     char     sega[64];     /* the SEGA server redirect, shown ("" = off); set by the caller */
     char     adhoc[64];    /* the ad hoc server host[:port], shown; set by the caller */
     int      adhoc_mode;   /* PSP_ADHOC_MODE_*: 0 PPSSPP direct, 1 PPSSPP relay, 2 modern; set by the caller */
+    int      renderer;     /* REN_D3D11 / REN_GL: the saved choice */
+    int      renderer_now; /* REN_*: the renderer running now (set by the caller) */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */
     uint32_t game_mask;    /* PSP buttons held through a close, kept from the game until released */

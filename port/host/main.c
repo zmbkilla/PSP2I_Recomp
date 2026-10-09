@@ -128,6 +128,22 @@ int  d3d11_init(void);
 void d3d11_report(FILE *out);
 int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
 #endif
+#include "gl_ge.h"
+
+/* The renderer (menu RENDERER, psp2i_display.ini renderer=, --renderer):
+ * REN_D3D11 / REN_GL draw the GE on the GPU, REN_SOFTWARE is the reference. */
+static int g_renderer = REN_D3D11;        /* what runs now */
+static int g_gl_window;                   /* OpenGL presents into the window */
+
+/* The displayed frame from the GPU renderer's asynchronous copy (1), keep the
+ * last picture (2), or read VRAM (0). */
+static int gpu_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
+    if (g_renderer == REN_GL) return gl_ge_present(addr, stride, fmt, out, w, h);
+#ifdef _WIN32
+    if (g_renderer == REN_D3D11) return d3d11_present(addr, stride, fmt, out, w, h);
+#endif
+    return 0;
+}
 
 static uint8_t *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -382,7 +398,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
-        if (present_active()) { EndPaint(h, &ps); return 0; }     /* the swap chain shows it */
+        if (present_active() || g_gl_window) { EndPaint(h, &ps); return 0; }   /* the GPU shows it */
         RECT rc;
         GetClientRect(h, &rc);
         /* Aspect kept, black bars (GDI fallback; present.c does this on the GPU). */
@@ -459,6 +475,7 @@ static void window_open(int res) {
     wc.lpszClassName = "psp2i";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.style = CS_OWNDC;                                     /* OpenGL keeps the window's DC */
     RegisterClassA(&wc);
     g_wnd = CreateWindowA("psp2i", "PSP2i (recompiled)", WS_OVERLAPPEDWINDOW,
                           CW_USEDEFAULT, CW_USEDEFAULT, SCREEN_W * 2, SCREEN_H * 2,
@@ -466,7 +483,22 @@ static void window_open(int res) {
     window_apply_res(res);
     const char *e = getenv("PSP2I_PRESENT");
     if (e && !strcmp(e, "gdi")) fprintf(stderr, "present: PSP2I_PRESENT=gdi, scaling with GDI\n");
-    else present_init(g_wnd);
+    else if (g_renderer != REN_GL) present_init(g_wnd);      /* OpenGL presents itself (window_show) */
+}
+
+/* The composed frame into the window on the GPU: 0, or nonzero for GDI. */
+static int window_show(void) {
+    if (g_gl_window) {
+        RECT rc;
+        GetClientRect(g_wnd, &rc);
+        if (rc.right <= 0 || rc.bottom <= 0) return 0;      /* minimised */
+        int x, y, w, h;
+        present_fit(rc.right, rc.bottom, SCREEN_W, SCREEN_H, &x, &y, &w, &h);
+        if (gl_blit_frame(g_rgba, SCREEN_W, SCREEN_H, x, y, w, h, rc.right, rc.bottom) != 0) return -1;
+        gl_platform_swap();
+        return 0;
+    }
+    return present_active() ? present_frame(g_rgba, SCREEN_W, SCREEN_H) : -1;
 }
 
 static void window_pump(void) {
@@ -624,22 +656,31 @@ static uint32_t menu_inputs(uint32_t psp, uint8_t ax, uint8_t ay) {
 static char g_display_ini[600];
 static int  g_last_windowed = RES_DEFAULT;  /* where Alt+Enter returns from fullscreen */
 
+static int g_res_saved = RES_DEFAULT;       /* what psp2i_display.ini holds */
+static int g_ren_saved = REN_D3D11;
+
 static int display_load(void) {
     FILE *f = g_display_ini[0] ? fopen(g_display_ini, "r") : NULL;
     if (!f) return -1;
     char line[128];
     int res = -1;
-    while (fgets(line, sizeof line, f))
+    while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "resolution=", 11)) res = menu_res_parse(line + 11);
+        else if (!strncmp(line, "renderer=", 9)) { const int r = menu_ren_parse(line + 9); if (r >= 0) g_ren_saved = r; }
+    }
     fclose(f);
+    if (res >= 0) g_res_saved = res;
     return res;
 }
 
 static void display_save(int res) {
+    g_res_saved = res;
     FILE *f = g_display_ini[0] ? fopen(g_display_ini, "w") : NULL;
     if (!f) { fprintf(stderr, "display: cannot write %s\n", g_display_ini); return; }
     fprintf(f, "; psp2i display settings (the settings menu changes this)\n");
     fprintf(f, "resolution=%s\n", menu_res_name(res));
+    fprintf(f, "; renderer: d3d11 or opengl (used from the next start)\n");
+    fprintf(f, "renderer=%s\n", menu_ren_key(g_ren_saved));
     fclose(f);
 }
 
@@ -715,6 +756,11 @@ static void menu_step(void) {
         fprintf(stderr, "menu: frame rate %d fps\n", g_menu.fps);
     }
     if (fx & MFX_RES_CHANGED) display_set(g_menu.res);
+    if (fx & MFX_RENDERER) {
+        g_ren_saved = g_menu.renderer;
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: renderer %s (saved; used from the next start)\n", menu_ren_key(g_menu.renderer));
+    }
     if (fx & MFX_SHOW_FPS) fprintf(stderr, "menu: FPS counter %s\n", g_menu.show_fps ? "on" : "off");
     if (fx & MFX_RS_SPEED) {
         camera_set_speed(menu_rs_speed(&g_menu));
@@ -895,7 +941,7 @@ static void on_vblank(void) {
         uint32_t addr, stride, fmt;
         psp_display_get(&addr, &stride, &fmt);
 #ifdef _WIN32
-        const int p = addr ? d3d11_present(addr, stride, (int)fmt, g_frame, SCREEN_W, SCREEN_H) : 0;
+        const int p = addr ? gpu_present(addr, stride, (int)fmt, g_frame, SCREEN_W, SCREEN_H) : 0;
         if (p == 1) have_frame = 1;
         if (p == 1 && getenv("PSP2I_PRESENT_VERIFY")) {
             /* The asynchronous picture against VRAM made current (the access
@@ -919,7 +965,7 @@ static void on_vblank(void) {
         if (have_frame) g_have_frame = 1;
         if (g_have_frame) {
             compose();
-            if (!present_active() || present_frame(g_rgba, SCREEN_W, SCREEN_H) != 0) InvalidateRect(g_wnd, NULL, FALSE);
+            if (window_show() != 0) InvalidateRect(g_wnd, NULL, FALSE);
         }
         if ((vb % 30) == 0) {
             char title[160];
@@ -988,6 +1034,7 @@ static void report(void) {
 #ifdef _WIN32
     d3d11_report(stderr);
 #endif
+    gl_ge_report(stderr);
 #ifdef _WIN32
     prof_report();
 #endif
@@ -1415,7 +1462,7 @@ static int exists(const char *p) {
 int main(int argc, char **argv) {
     char dir[512], root[600] = "", eboot[700] = "", ms_dir[600] = "";   /* --ms: memory stick elsewhere (tests) */
     uint32_t oracle_addr = 0;
-    const char *renderer = "d3d11";
+    const char *renderer = NULL;            /* --renderer; else psp2i_display.ini */
     int res_arg = -1;                       /* --resolution; else psp2i_display.ini */
     int oracle_all = 0;
     int want_sdl = -1;                     /* -1: default (with a window) */
@@ -1573,12 +1620,6 @@ int main(int argc, char **argv) {
            mi.name, mi.entry, mi.gp, mi.load_lo, mi.load_hi);
 
     psp_hle_init();
-#ifdef _WIN32
-    /* GPU rendering by default; the software rasterizer is the fallback
-     * and the reference (--renderer software). */
-    if (strcmp(renderer, "software") != 0 && d3d11_init() != 0)
-        fprintf(stderr, "psp2i: falling back to the software renderer\n");
-#endif
     psp_io_set_root(root);
     {
         const char *e = getenv("PSP2I_VFPU_NOINLINE");     /* A/B: runtime VFPU calls only */
@@ -1605,17 +1646,39 @@ int main(int argc, char **argv) {
     psp_mem_write_block(argp, boot_path, (uint32_t)sizeof boot_path);
 
     snprintf(g_display_ini, sizeof g_display_ini, "%s/psp2i_display.ini", dir);
-    int res = res_arg >= 0 ? res_arg : display_load();
+    int res = display_load();
+    if (res_arg >= 0) res = res_arg;
     if (res < 0) res = RES_DEFAULT;
     if (res != RES_FULLSCREEN) g_last_windowed = res;
+    /* The renderer: --renderer for this run, else the saved choice. GPU
+     * rendering by default; the software rasterizer is the fallback and the
+     * reference (--renderer software). */
+    g_renderer = renderer ? menu_ren_parse(renderer) : g_ren_saved;
+    if (renderer && !strcmp(renderer, "software")) g_renderer = REN_SOFTWARE;
+    if (g_renderer < 0) { fprintf(stderr, "psp2i: unknown renderer '%s'; using d3d11\n", renderer); g_renderer = REN_D3D11; }
+    if (g_renderer == REN_GL && (gl_platform_init() != 0 || gl_ge_init() != 0)) {
+        fprintf(stderr, "psp2i: OpenGL unavailable; falling back to Direct3D 11\n");
+        g_renderer = REN_D3D11;
+    }
 #ifdef _WIN32
     if (!g_headless) window_open(res);
+    if (g_renderer == REN_GL && g_wnd) {
+        g_gl_window = gl_platform_attach(g_wnd) == 0;
+        if (!g_gl_window) present_init(g_wnd);
+    }
+    if (g_renderer == REN_D3D11 && d3d11_init() != 0) {
+        fprintf(stderr, "psp2i: falling back to the software renderer\n");
+        g_renderer = REN_SOFTWARE;
+    }
 #endif
+    fprintf(stderr, "renderer: %s\n", g_renderer == REN_GL ? "OpenGL" : g_renderer == REN_D3D11 ? "Direct3D 11" : "software");
     if (want_sdl == 1 || (want_sdl < 0 && !g_headless)) g_sdl_on = input_sdl_init() == 0;
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
     atrac_ffmpeg_init(dir);        /* ATRAC music; silent if FFmpeg is absent */
     menu_init(&g_menu, fps, show_fps);
     g_menu.res = res;
+    g_menu.renderer = g_ren_saved;
+    g_menu.renderer_now = g_renderer;
     fps_meter_init(&g_fpsm);
     framerate_init(fps);
     menu_set_rs_speed(&g_menu, rs_speed);

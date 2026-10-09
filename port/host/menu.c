@@ -39,6 +39,19 @@ int menu_res_parse(const char *s) {
     return -1;
 }
 
+const char *menu_ren_key(int r) { return r == REN_GL ? "opengl" : r == REN_SOFTWARE ? "software" : "d3d11"; }
+
+int menu_ren_parse(const char *s) {
+    static const struct { const char *k; int r; } K[] = {
+        { "d3d11", REN_D3D11 }, { "opengl", REN_GL }, { "gl", REN_GL }, { "software", REN_SOFTWARE } };
+    for (size_t i = 0; i < sizeof K / sizeof K[0]; i++) {
+        const char *a = K[i].k, *b = s;
+        while (*a && *b && (*a == *b || *a - 32 == *b)) { a++; b++; }
+        if (!*a && (!*b || *b == '\r' || *b == '\n' || *b == ' ')) return K[i].r;
+    }
+    return -1;
+}
+
 uint32_t menu_inputs_from_psp(uint32_t psp, uint8_t ax, uint8_t ay) {
     enum { P_START = 0x0008, P_UP = 0x0010, P_RIGHT = 0x0020, P_DOWN = 0x0040, P_LEFT = 0x0080,
            P_CIRCLE = 0x2000, P_CROSS = 0x4000 };
@@ -69,6 +82,7 @@ static int change(menu_state *m, int dir) {
     case MENU_SEGA_SERVER: return dir == 0 ? MFX_EDIT_SEGA : 0;
     case MENU_ADHOC_SERVER: return dir == 0 ? MFX_EDIT_ADHOC : 0;
     case MENU_ADHOC_MODE:  m->adhoc_mode = (m->adhoc_mode + (dir < 0 ? 2 : 1)) % 3; return MFX_ADHOC_MODE;
+    case MENU_RENDERER:    m->renderer = (m->renderer + 1) % REN_MENU_CHOICES; return MFX_RENDERER;
     case MENU_RESOLUTION:
         m->res = (m->res + (dir < 0 ? RES_MODES - 1 : 1)) % RES_MODES;
         return MFX_RES_CHANGED;
@@ -236,7 +250,7 @@ static void frame(menu_image *img, int x, int y, int w, int h, uint32_t rgb) {
 void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *hotkey) {
     if (!m->open) return;
     char line[96];
-    const int bw = 288, bh = 196;
+    const int bw = 288, bh = 209;
     const int x0 = (img->w - bw) / 2, y0 = (img->h - bh) / 2;
     shade(img, x0, y0, bw, bh);
     frame(img, x0, y0, bw, bh, GREY);
@@ -246,10 +260,12 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     y += CELL_H + 8;
 
     static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "SEGA SERVER", "ADHOC SERVER",
-                                                   "ADHOC MODE", "RESOLUTION", "CLOSE" };
+                                                   "ADHOC MODE", "RESOLUTION", "RENDERER", "CLOSE" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
+    char ren[32];                                       /* the change applies at the next start */
+    snprintf(ren, sizeof ren, "< %s >%s", m->renderer == REN_GL ? "OPENGL" : "D3D11", m->renderer != m->renderer_now ? " RESTART" : "");
     char res[24];
     snprintf(res, sizeof res, "< %s >", menu_res_name(m->res));
     char sega[32];
@@ -265,7 +281,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_FPS_COUNTER ? (m->show_fps ? "< ON >" : "< OFF >")
                       : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega : i == MENU_ADHOC_SERVER ? adhoc
                       : i == MENU_ADHOC_MODE ? ADHOC_MODES[m->adhoc_mode % 3]
-                      : i == MENU_RESOLUTION ? res : "";
+                      : i == MENU_RESOLUTION ? res : i == MENU_RENDERER ? ren : "";
         menu_text(img, x0 + 130, y, v, col);
         y += CELL_H + 4;
     }
