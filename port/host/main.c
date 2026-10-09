@@ -93,6 +93,14 @@
 #define SCREEN_W 480
 #define SCREEN_H 272
 
+/* The window title: the game's name in the community build; dev builds add
+ * their progress to it (see the vblank handler). */
+#ifdef PSP2I_PROD
+#define WINDOW_TITLE "Phantasy Star Portable 2 Infinity Recompiled"
+#else
+#define WINDOW_TITLE "PSP2i (recompiled)"
+#endif
+
 /* ---- ELF loading ---------------------------------------------------------- */
 
 #pragma pack(push, 1)
@@ -478,10 +486,21 @@ static void window_open(int res) {
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.style = CS_OWNDC;                                     /* OpenGL keeps the window's DC */
+    /* The exe's icon (resource 1, asset/icon.ico; compiled into the prod
+     * build): large for the taskbar and Alt+Tab, small for the title bar.
+     * Without the resource both are NULL and Windows' default stays. */
+    wc.hIcon = (HICON)LoadImageA(wc.hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
+                                 GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
     RegisterClassA(&wc);
-    g_wnd = CreateWindowA("psp2i", "PSP2i (recompiled)", WS_OVERLAPPEDWINDOW,
+    g_wnd = CreateWindowA("psp2i", WINDOW_TITLE, WS_OVERLAPPEDWINDOW,
                           CW_USEDEFAULT, CW_USEDEFAULT, SCREEN_W * 2, SCREEN_H * 2,
                           NULL, NULL, wc.hInstance, NULL);
+    {
+        HICON sm_icon = (HICON)LoadImageA(wc.hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
+                                        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+        if (wc.hIcon) SendMessageA(g_wnd, WM_SETICON, ICON_BIG, (LPARAM)wc.hIcon);
+        if (sm_icon) SendMessageA(g_wnd, WM_SETICON, ICON_SMALL, (LPARAM)sm_icon);
+    }
     window_apply_res(res);
     const char *e = getenv("PSP2I_PRESENT");
     if (e && !strcmp(e, "gdi")) fprintf(stderr, "present: PSP2I_PRESENT=gdi, scaling with GDI\n");
@@ -1076,12 +1095,14 @@ static void on_vblank(void) {
             compose();
             if (window_show() != 0) InvalidateRect(g_wnd, NULL, FALSE);
         }
-        if ((vb % 30) == 0) {
+#ifndef PSP2I_PROD
+        if ((vb % 30) == 0) {                                /* dev builds: progress in the title */
             char title[160];
             snprintf(title, sizeof title, "PSP2i (recompiled) - vblank %llu, GE cmds %llu",
                      (unsigned long long)vb, (unsigned long long)psp_ge_command_count());
             SetWindowTextA(g_wnd, title);
         }
+#endif
         window_pump();
     }
 #endif
