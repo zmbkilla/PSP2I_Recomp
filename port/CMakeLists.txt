@@ -11,7 +11,7 @@
 #   cmake --build port/build --config Release
 
 cmake_minimum_required(VERSION 3.16)
-project(psp2i C)
+project(psp2i C CXX)                        # CXX: the ATRAC decoder DLL (atrac_dll/)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -35,7 +35,7 @@ add_executable(psp2i
     host/gl_wgl.c
     host/input_sdl.c
     host/audio_sdl.c
-    host/atrac_ffmpeg.c
+    host/atrac_at3.c
     host/framerate.c
     host/menu.c
     host/camera.c
@@ -70,12 +70,21 @@ if(MSVC)
     target_link_options(psp2i PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 endif()
 
-# Controllers: SDL3.dll is loaded at run time (host/input_sdl.c), so it is not a
-# link dependency. If a copy sits in the project root, put it next to the exe.
-set(PSP2I_SDL3_DLL ${CMAKE_CURRENT_SOURCE_DIR}/../SDL3.dll CACHE FILEPATH "SDL3.dll to copy next to psp2i.exe")
-if(EXISTS ${PSP2I_SDL3_DLL})
+# Controllers and sound: SDL3.dll is loaded at run time (host/input_sdl.c), so it
+# is not a link dependency; any SDL 3.x works. cmake/FetchSDL3.cmake fetches the
+# newest official release at configure time (or uses PSP2I_SDL3_DLL).
+# ATRAC music: psp2i_atrac.dll (LGPL decoder, its own DLL; see atrac_dll/), built
+# with the game and loaded at run time by host/atrac_at3.c. Replaces FFmpeg.
+add_subdirectory(atrac_dll)
+if(TARGET psp2i_atrac)
+    add_dependencies(psp2i psp2i_atrac)
+endif()
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchSDL3.cmake)
+psp2i_fetch_sdl3(PSP2I_SDL3_PATH)
+if(PSP2I_SDL3_PATH)
     add_custom_command(TARGET psp2i POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_SDL3_DLL} $<TARGET_FILE_DIR:psp2i>)
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_SDL3_PATH} $<TARGET_FILE_DIR:psp2i>)
 endif()
 
 # Unit tests for the settings menu, the FPS counter and run-time frame-rate
@@ -107,15 +116,16 @@ if(PSP2I_PROD)
         target_sources(psp2i PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/psp2i_icon.rc)
     endif()
     set(PSP2I_PROD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../prod CACHE PATH "Where the community build is copied")
-    set(PSP2I_FFMPEG_BIN ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg-9.0.1-full_build-shared/bin CACHE PATH "FFmpeg DLLs for the community build")
-    file(GLOB PSP2I_FFMPEG_DLLS ${PSP2I_FFMPEG_BIN}/avcodec-*.dll ${PSP2I_FFMPEG_BIN}/avutil-*.dll ${PSP2I_FFMPEG_BIN}/swresample-*.dll)
     add_custom_command(TARGET psp2i POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory ${PSP2I_PROD_DIR}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:psp2i> ${PSP2I_PROD_DIR}
         COMMENT "Copying the community build to ${PSP2I_PROD_DIR}")
-    foreach(dll ${PSP2I_SDL3_DLL} ${PSP2I_FFMPEG_DLLS})
-        if(EXISTS ${dll})
-            add_custom_command(TARGET psp2i POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${dll} ${PSP2I_PROD_DIR})
-        endif()
-    endforeach()
+    if(PSP2I_SDL3_PATH)
+        add_custom_command(TARGET psp2i POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_SDL3_PATH} ${PSP2I_PROD_DIR})
+    endif()
+    if(TARGET psp2i_atrac)                              # ATRAC music: the LGPL decoder DLL and its licence files
+        add_custom_command(TARGET psp2i POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:psp2i_atrac> ${PSP2I_PROD_DIR}
+            COMMAND ${CMAKE_COMMAND} -E copy_directory $<TARGET_FILE_DIR:psp2i_atrac>/licenses ${PSP2I_PROD_DIR}/licenses)
+    endif()
 endif()
