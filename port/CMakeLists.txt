@@ -29,6 +29,7 @@ add_executable(psp2i
     host/main.c
     host/oracle.c
     host/d3d11.c
+    host/present.c
     host/input_sdl.c
     host/audio_sdl.c
     host/atrac_ffmpeg.c
