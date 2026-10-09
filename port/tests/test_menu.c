@@ -80,6 +80,29 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_RIGHT, 0) == 0);                           /* Left/Right do nothing there */
     menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_RESOLUTION);
+    CHECK(m.res == RES_DEFAULT && m.res == RES_1920x1080);              /* 1080p is the default */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RES_CHANGED && m.res == RES_2560x1440);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_RES_CHANGED && m.res == RES_1920x1080);
+    menu_update(&m, 0, 0);
+    m.res = RES_FULLSCREEN;
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RES_CHANGED && m.res == RES_960x544);   /* wraps */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_RES_CHANGED && m.res == RES_FULLSCREEN);
+    menu_update(&m, 0, 0);
+    m.res = RES_DEFAULT;
+    {
+        int w = 0, h = 0;
+        CHECK(menu_res_size(RES_1920x1080, &w, &h) == 1 && w == 1920 && h == 1080);
+        CHECK(menu_res_size(RES_FULLSCREEN, &w, &h) == 0 && w == 0 && h == 0);
+        CHECK(menu_res_parse("1920x1080") == RES_1920x1080);
+        CHECK(menu_res_parse("FULLSCREEN") == RES_FULLSCREEN);
+        CHECK(menu_res_parse("fullscreen\r\n") == RES_FULLSCREEN);
+        CHECK(menu_res_parse("1920x1081") == -1);
+        CHECK(strcmp(menu_res_name(RES_3840x2160), "3840X2160") == 0);
+    }
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_FRAME_RATE);                    /* wraps */
@@ -161,6 +184,8 @@ static void test_buttons(void) {
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RS_SPEED);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_SEGA_SERVER);
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_RESOLUTION);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_CLOSE);
     CHECK(STEP(0) == 0);
@@ -399,8 +424,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 57, 384, 214));            /* the centred 288x157 box */
-    CHECK(!changed_outside(96, 57, 384, 214));
+    CHECK(changed_inside(96, 51, 384, 221));            /* the centred 288x170 box */
+    CHECK(!changed_outside(96, 51, 384, 221));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */

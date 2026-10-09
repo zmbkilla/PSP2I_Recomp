@@ -22,7 +22,15 @@ enum {
 };
 
 /* Menu items, top to bottom. */
-enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_CLOSE, MENU_ITEMS };
+enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_RESOLUTION, MENU_CLOSE, MENU_ITEMS };
+
+/* Output resolution: the window's client size (the 480x272 picture is scaled
+ * to fit it, aspect kept), or borderless fullscreen on the current monitor. */
+enum { RES_960x544, RES_1280x720, RES_1920x1080, RES_2560x1440, RES_3840x2160, RES_FULLSCREEN, RES_MODES };
+#define RES_DEFAULT RES_1920x1080
+const char *menu_res_name(int mode);                 /* "1920X1080", "FULLSCREEN" */
+int  menu_res_size(int mode, int *w, int *h);        /* client size; 0 for fullscreen */
+int  menu_res_parse(const char *s);                  /* "1920x1080" / "fullscreen" -> mode, -1 if unknown */
 
 /* Right-stick camera sensitivity: 1.00x .. 2.00x in 0.25 steps. */
 #define MENU_RS_STEPS 5
@@ -35,6 +43,7 @@ enum {
     MFX_SHOW_FPS    = 1 << 3,   /* show_fps changed */
     MFX_RS_SPEED    = 1 << 4,   /* rs_step changed: menu_rs_speed() */
     MFX_EDIT_SEGA   = 1 << 5,   /* Circle on SEGA SERVER: the caller opens its text editor */
+    MFX_RES_CHANGED = 1 << 6,   /* res changed: resize the window / go fullscreen */
 };
 
 typedef struct {
@@ -43,6 +52,7 @@ typedef struct {
     int      fps;          /* 30 or 60 */
     int      show_fps;     /* the FPS counter */
     int      rs_step;      /* right-stick sensitivity, 0..MENU_RS_STEPS-1 (1.00x + 0.25x each) */
+    int      res;          /* RES_*: output resolution */
     char     sega[64];     /* the SEGA server redirect, shown ("" = off); set by the caller */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */

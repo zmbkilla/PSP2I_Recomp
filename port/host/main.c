@@ -37,6 +37,11 @@
  *               with a window, off headless; PSP2I_AUDIO_DUMP=file.wav records
  *   --sdl / --no-sdl  controllers through SDL3.dll (input_sdl.c): on by default
  *               with a window, off headless unless --sdl
+ *   --resolution 960x544|1280x720|1920x1080|2560x1440|3840x2160|fullscreen
+ *               window size for this run (default: psp2i_display.ini next to
+ *               the exe, else 1920x1080); the settings menu changes and saves
+ *               it, Alt+Enter toggles fullscreen. PSP2I_PRESENT=gdi skips the
+ *               GPU presenter (present.c) and scales with GDI.
  *   --oracle    (trace builds) diff the function at ADDR against an interpreter
  *               the first time it runs; see host/oracle.c
  */
@@ -67,6 +72,7 @@
 #include "gamelog.h"
 #include "prod.h"
 #include "textedit.h"
+#include "present.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -289,6 +295,7 @@ static void compose(void) {
 
 #ifdef _WIN32
 static HWND g_wnd;
+static int g_alt_enter;                     /* Alt+Enter pressed; handled with the menu */
 static uint32_t g_keys;
 static WPARAM g_menu_vk = VK_F1;
 
@@ -358,12 +365,38 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         default: break;
         }
         g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); ctrl_commit(); return 0;
+    case WM_SYSKEYDOWN:
+        if (wp == VK_RETURN && (lp & (1 << 29))) {               /* Alt+Enter */
+            if (!(lp & (1 << 30))) g_alt_enter = 1;
+            return 0;
+        }
+        break;
+    case WM_SYSCHAR:
+        if (wp == '\r') return 0;                                 /* no beep for Alt+Enter */
+        break;
+    case WM_SIZE:    present_resized(); InvalidateRect(h, NULL, FALSE); return 0;
+    case WM_ERASEBKGND: return 1;                                 /* WM_PAINT covers it all */
     case WM_CLOSE:   psp_request_exit(); return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
+        if (present_active()) { EndPaint(h, &ps); return 0; }     /* the swap chain shows it */
         RECT rc;
         GetClientRect(h, &rc);
+        /* Aspect kept, black bars (GDI fallback; present.c does this on the GPU). */
+        int x, y, w, hh;
+        present_fit(rc.right, rc.bottom, SCREEN_W, SCREEN_H, &x, &y, &w, &hh);
+        HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
+        RECT bar;
+        if (x > 0) {
+            SetRect(&bar, 0, 0, x, rc.bottom); FillRect(dc, &bar, black);
+            SetRect(&bar, x + w, 0, rc.right, rc.bottom); FillRect(dc, &bar, black);
+        }
+        if (y > 0) {
+            SetRect(&bar, 0, 0, rc.right, y); FillRect(dc, &bar, black);
+            SetRect(&bar, 0, y + hh, rc.right, rc.bottom); FillRect(dc, &bar, black);
+        }
+        SetStretchBltMode(dc, COLORONCOLOR);
         BITMAPINFO bi;
         memset(&bi, 0, sizeof bi);
         bi.bmiHeader.biSize = sizeof bi.bmiHeader;
@@ -372,7 +405,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
-        StretchDIBits(dc, 0, 0, rc.right, rc.bottom, 0, 0, SCREEN_W, SCREEN_H,
+        StretchDIBits(dc, x, y, w, hh, 0, 0, SCREEN_W, SCREEN_H,
                       g_rgba, &bi, DIB_RGB_COLORS, SRCCOPY);
         EndPaint(h, &ps);
         return 0;
@@ -381,19 +414,57 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcA(h, msg, wp, lp);
 }
 
-static void window_open(void) {
+/* Size the window for a RES_ mode (menu.h): a framed window with that client
+ * size, shrunk (aspect kept) to fit the monitor's work area, or borderless
+ * covering the whole monitor for RES_FULLSCREEN. */
+static void window_apply_res(int mode) {
+    if (!g_wnd) return;
+    if (IsZoomed(g_wnd) || IsIconic(g_wnd)) ShowWindow(g_wnd, SW_RESTORE);
+    MONITORINFO mi;
+    memset(&mi, 0, sizeof mi);
+    mi.cbSize = sizeof mi;
+    GetMonitorInfoA(MonitorFromWindow(g_wnd, MONITOR_DEFAULTTONEAREST), &mi);
+    int w, h;
+    if (!menu_res_size(mode, &w, &h)) {
+        const RECT m = mi.rcMonitor;
+        SetWindowLongPtrA(g_wnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(g_wnd, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+    } else {
+        const RECT wa = mi.rcWork;
+        RECT r = { 0, 0, w, h };
+        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        const int fw = (r.right - r.left) - w, fh = (r.bottom - r.top) - h;   /* frame */
+        const int aw = (wa.right - wa.left) - fw, ah = (wa.bottom - wa.top) - fh;
+        if (w > aw || h > ah) {
+            int x, y;
+            present_fit(aw, ah, w, h, &x, &y, &w, &h);
+            fprintf(stderr, "window: %s does not fit this monitor; using %dx%d\n", menu_res_name(mode), w, h);
+        }
+        SetWindowLongPtrA(g_wnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        SetWindowPos(g_wnd, HWND_NOTOPMOST,
+                     wa.left + ((wa.right - wa.left) - (w + fw)) / 2, wa.top + ((wa.bottom - wa.top) - (h + fh)) / 2,
+                     w + fw, h + fh, SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+    }
+    present_resized();
+}
+
+static void window_open(int res) {
     WNDCLASSA wc;
     memset(&wc, 0, sizeof wc);
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = GetModuleHandleA(NULL);
     wc.lpszClassName = "psp2i";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     RegisterClassA(&wc);
-    RECT r = { 0, 0, SCREEN_W * 2, SCREEN_H * 2 };
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    g_wnd = CreateWindowA("psp2i", "PSP2i (recompiled)", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                          CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+    g_wnd = CreateWindowA("psp2i", "PSP2i (recompiled)", WS_OVERLAPPEDWINDOW,
+                          CW_USEDEFAULT, CW_USEDEFAULT, SCREEN_W * 2, SCREEN_H * 2,
                           NULL, NULL, wc.hInstance, NULL);
+    window_apply_res(res);
+    const char *e = getenv("PSP2I_PRESENT");
+    if (e && !strcmp(e, "gdi")) fprintf(stderr, "present: PSP2I_PRESENT=gdi, scaling with GDI\n");
+    else present_init(g_wnd);
 }
 
 static void window_pump(void) {
@@ -546,6 +617,40 @@ static uint32_t menu_inputs(uint32_t psp, uint8_t ax, uint8_t ay) {
     return menu_inputs_from_psp(psp, ax, ay) | ((psp & PRESS_MENU) ? MI_TOGGLE : 0);
 }
 
+/* The window size (menu RESOLUTION), kept in psp2i_display.ini next to the exe:
+ *   resolution=1920x1080      (or 960x544 ... 3840x2160, fullscreen) */
+static char g_display_ini[600];
+static int  g_last_windowed = RES_DEFAULT;  /* where Alt+Enter returns from fullscreen */
+
+static int display_load(void) {
+    FILE *f = g_display_ini[0] ? fopen(g_display_ini, "r") : NULL;
+    if (!f) return -1;
+    char line[128];
+    int res = -1;
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, "resolution=", 11)) res = menu_res_parse(line + 11);
+    fclose(f);
+    return res;
+}
+
+static void display_save(int res) {
+    FILE *f = g_display_ini[0] ? fopen(g_display_ini, "w") : NULL;
+    if (!f) { fprintf(stderr, "display: cannot write %s\n", g_display_ini); return; }
+    fprintf(f, "; psp2i display settings (the settings menu changes this)\n");
+    fprintf(f, "resolution=%s\n", menu_res_name(res));
+    fclose(f);
+}
+
+static void display_set(int res) {
+    if (res != RES_FULLSCREEN) g_last_windowed = res;
+    if (g_headless) { fprintf(stderr, "menu: resolution %s (headless: not saved)\n", menu_res_name(res)); return; }
+#ifdef _WIN32
+    window_apply_res(res);
+#endif
+    display_save(res);
+    fprintf(stderr, "menu: resolution %s (saved)\n", menu_res_name(res));
+}
+
 /* Once per vblank: the menu reads the raw input (the game's is filtered). */
 static void menu_step(void) {
     uint32_t psp = g_script_bits | g_pad_bits, latched = g_host_latched;
@@ -555,6 +660,13 @@ static void menu_step(void) {
 #endif
     g_keys_latched = 0;
     g_host_latched = 0;
+#ifdef _WIN32
+    if (g_alt_enter) {
+        g_alt_enter = 0;
+        g_menu.res = g_menu.res == RES_FULLSCREEN ? g_last_windowed : RES_FULLSCREEN;
+        display_set(g_menu.res);
+    }
+#endif
     uint8_t ax = g_pad_ax, ay = g_pad_ay;
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     uint32_t held = menu_inputs(psp, ax, ay) | g_host_held;
@@ -586,6 +698,7 @@ static void menu_step(void) {
         framerate_set(g_menu.fps);
         fprintf(stderr, "menu: frame rate %d fps\n", g_menu.fps);
     }
+    if (fx & MFX_RES_CHANGED) display_set(g_menu.res);
     if (fx & MFX_SHOW_FPS) fprintf(stderr, "menu: FPS counter %s\n", g_menu.show_fps ? "on" : "off");
     if (fx & MFX_RS_SPEED) {
         camera_set_speed(menu_rs_speed(&g_menu));
@@ -788,7 +901,10 @@ static void on_vblank(void) {
 #ifdef _WIN32
     if (!g_headless) {
         if (have_frame) g_have_frame = 1;
-        if (g_have_frame) { compose(); InvalidateRect(g_wnd, NULL, FALSE); }
+        if (g_have_frame) {
+            compose();
+            if (!present_active() || present_frame(g_rgba, SCREEN_W, SCREEN_H) != 0) InvalidateRect(g_wnd, NULL, FALSE);
+        }
         if ((vb % 30) == 0) {
             char title[160];
             snprintf(title, sizeof title, "PSP2i (recompiled) - vblank %llu, GE cmds %llu",
@@ -1277,6 +1393,7 @@ int main(int argc, char **argv) {
     char dir[512], root[600] = "", eboot[700] = "", ms_dir[600] = "";   /* --ms: memory stick elsewhere (tests) */
     uint32_t oracle_addr = 0;
     const char *renderer = "d3d11";
+    int res_arg = -1;                       /* --resolution; else psp2i_display.ini */
     int oracle_all = 0;
     int want_sdl = -1;                     /* -1: default (with a window) */
     int want_audio = -1;
@@ -1355,6 +1472,10 @@ int main(int argc, char **argv) {
             i += 2;
         }
         else if (!strcmp(argv[i], "--renderer") && i + 1 < argc)      renderer = argv[++i];
+        else if (!strcmp(argv[i], "--resolution") && i + 1 < argc) {
+            res_arg = menu_res_parse(argv[++i]);
+            if (res_arg < 0) { fprintf(stderr, "bad --resolution %s (want e.g. 1920x1080 or fullscreen)\n", argv[i]); return 1; }
+        }
         else if (!strcmp(argv[i], "--press") && i + 1 < argc) {
             if (add_press(argv[++i]) != 0) { fprintf(stderr, "bad --press %s (want e.g. cross@600+6)\n", argv[i]); return 1; }
         }
@@ -1460,13 +1581,18 @@ int main(int argc, char **argv) {
     uint32_t argp = psp_sysmem_alloc(0x100, 1);
     psp_mem_write_block(argp, boot_path, (uint32_t)sizeof boot_path);
 
+    snprintf(g_display_ini, sizeof g_display_ini, "%s/psp2i_display.ini", dir);
+    int res = res_arg >= 0 ? res_arg : display_load();
+    if (res < 0) res = RES_DEFAULT;
+    if (res != RES_FULLSCREEN) g_last_windowed = res;
 #ifdef _WIN32
-    if (!g_headless) window_open();
+    if (!g_headless) window_open(res);
 #endif
     if (want_sdl == 1 || (want_sdl < 0 && !g_headless)) g_sdl_on = input_sdl_init() == 0;
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
     atrac_ffmpeg_init(dir);        /* ATRAC music; silent if FFmpeg is absent */
     menu_init(&g_menu, fps, show_fps);
+    g_menu.res = res;
     fps_meter_init(&g_fpsm);
     framerate_init(fps);
     menu_set_rs_speed(&g_menu, rs_speed);
