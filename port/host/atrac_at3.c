@@ -37,8 +37,12 @@ typedef struct {
     float l[2048], r[2048];
 } dec;
 
+/* Music volume (menu MUSIC VOLUME), applied as the music is decoded. */
+static float g_gain = 1.0f;
+void atrac_at3_set_gain(float g) { g_gain = g < 0.0f ? 0.0f : g > 1.0f ? 1.0f : g; }
+
 static int16_t to16(float v) {
-    int x = (int)(v * 32767.0f);
+    int x = (int)(v * g_gain * 32767.0f);
     return (int16_t)(x < -32768 ? -32768 : x > 32767 ? 32767 : x);
 }
 
@@ -103,4 +107,5 @@ int atrac_at3_init(const char *exedir) {
 
 #else  /* another platform: dlopen libpsp2i_atrac.so the same way */
 int atrac_at3_init(const char *exedir) { (void)exedir; return -1; }
+void atrac_at3_set_gain(float g) { (void)g; }
 #endif

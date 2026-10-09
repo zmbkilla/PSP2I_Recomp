@@ -131,6 +131,34 @@ static void test_values(void) {
     CHECK(menu_ren_parse("opengl") == REN_GL && menu_ren_parse("gl\r\n") == REN_GL && menu_ren_parse("OPENGL") == REN_GL);
     CHECK(menu_ren_parse("d3d11") == REN_D3D11 && menu_ren_parse("software") == REN_SOFTWARE && menu_ren_parse("vulkan") == -1);
     CHECK(strcmp(menu_ren_key(REN_GL), "opengl") == 0 && strcmp(menu_ren_key(REN_D3D11), "d3d11") == 0);
+    /* volumes: 100% by default, 10% steps, Left/Right stop at the ends, Confirm wraps */
+    for (int k = 0; k < VOL_N; k++) {
+        menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+        CHECK(m.sel == MENU_MASTER_VOL + k && m.vol[k] == VOL_STEPS);
+        CHECK(menu_update(&m, MI_RIGHT, 0) == 0 && m.vol[k] == VOL_STEPS);          /* already at 100% */
+        menu_update(&m, 0, 0);
+        CHECK(menu_update(&m, MI_LEFT, 0) == MFX_AUDIO && m.vol[k] == VOL_STEPS - 1);
+        menu_update(&m, 0, 0);
+        CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_AUDIO && m.vol[k] == VOL_STEPS);
+        menu_update(&m, 0, 0);
+        CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_AUDIO && m.vol[k] == 0);         /* wraps to 0% */
+        menu_update(&m, 0, 0);
+        CHECK(menu_update(&m, MI_LEFT, 0) == 0 && m.vol[k] == 0);                   /* stays at 0% */
+        menu_update(&m, 0, 0);
+        m.vol[k] = VOL_STEPS;
+    }
+    /* attenuation: -12 dB by default; Right/Left cycle OFF, -6, -12, -20 */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_ATTENUATION && m.att == ATT_DEFAULT && menu_att_db(m.att) == -12);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_AUDIO && menu_att_db(m.att) == -20);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_AUDIO && m.att == ATT_OFF && menu_att_db(m.att) == 0);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_AUDIO && menu_att_db(m.att) == -20);
+    menu_update(&m, 0, 0);
+    m.att = ATT_DEFAULT;
+    CHECK(menu_att_parse(-12) == ATT_12DB && menu_att_parse(0) == ATT_OFF && menu_att_parse(-7) == ATT_6DB &&
+          menu_att_parse(-30) == ATT_20DB);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -222,6 +250,10 @@ static void test_buttons(void) {
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RENDERER);
     CHECK(STEP(0) == 0);
+    for (int k = MENU_MASTER_VOL; k <= MENU_ATTENUATION; k++) {
+        CHECK(STEP(DOWN) == 0 && m.sel == k);
+        CHECK(STEP(0) == 0);
+    }
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_CLOSE);
     CHECK(STEP(0) == 0);
     CHECK(STEP(CROSS) == MFX_CLOSED && !m.open);                /* Cross backs out */
@@ -459,8 +491,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 31, 384, 240));            /* the centred 288x209 box */
-    CHECK(!changed_outside(96, 31, 384, 240));
+    CHECK(changed_inside(96, 5, 384, 266));             /* the centred 288x261 box */
+    CHECK(!changed_outside(96, 5, 384, 266));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */

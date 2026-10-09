@@ -23,7 +23,17 @@ enum {
 
 /* Menu items, top to bottom. */
 enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
-       MENU_RESOLUTION, MENU_RENDERER, MENU_CLOSE, MENU_ITEMS };
+       MENU_RESOLUTION, MENU_RENDERER, MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION,
+       MENU_CLOSE, MENU_ITEMS };
+
+/* Volumes in tenths (0..10 = 0..100%); attenuation while other programs play
+ * sound: ATT_* (OFF, -6 dB, -12 dB, -20 dB). */
+enum { VOL_MASTER, VOL_MUSIC, VOL_SFX, VOL_N };
+#define VOL_STEPS 10
+enum { ATT_OFF, ATT_6DB, ATT_12DB, ATT_20DB, ATT_MODES };
+#define ATT_DEFAULT ATT_12DB
+int  menu_att_db(int mode);                          /* 0, -6, -12, -20 */
+int  menu_att_parse(int db);                         /* dB -> ATT_* (nearest; 0 = off) */
 
 /* Output resolution: the window's client size (the 480x272 picture is scaled
  * to fit it, aspect kept), or borderless fullscreen on the current monitor. */
@@ -54,6 +64,7 @@ enum {
     MFX_EDIT_ADHOC  = 1 << 7,   /* Circle on ADHOC SERVER: the caller opens its text editor */
     MFX_ADHOC_MODE  = 1 << 8,   /* adhoc_mode changed */
     MFX_RENDERER    = 1 << 9,   /* renderer changed: save it (used from the next start) */
+    MFX_AUDIO       = 1 << 10,  /* a volume or the attenuation changed: apply and save */
 };
 
 typedef struct {
@@ -68,6 +79,8 @@ typedef struct {
     int      adhoc_mode;   /* PSP_ADHOC_MODE_*: 0 PPSSPP direct, 1 PPSSPP relay, 2 modern; set by the caller */
     int      renderer;     /* REN_D3D11 / REN_GL: the saved choice */
     int      renderer_now; /* REN_*: the renderer running now (set by the caller) */
+    int      vol[VOL_N];   /* 0..VOL_STEPS, tenths */
+    int      att;          /* ATT_* */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */
     uint32_t game_mask;    /* PSP buttons held through a close, kept from the game until released */

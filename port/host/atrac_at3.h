@@ -6,5 +6,7 @@
 /* Load psp2i_atrac.dll from the exe's directory; 0 on success. On failure
  * ATRAC music is silent. */
 int atrac_at3_init(const char *exedir);
+/* Music volume, 0..1 (default 1). */
+void atrac_at3_set_gain(float gain);
 
 #endif /* PSP2I_ATRAC_AT3_H */
