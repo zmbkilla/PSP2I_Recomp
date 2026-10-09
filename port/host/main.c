@@ -31,6 +31,8 @@
  *   --rs-speed 1.0..2.0  right-stick camera sensitivity at start (default
  *               1.0; the settings menu changes it in 0.25 steps)
  *   --rstick X,Y@VBLANK[+N]  scripted right stick (PSP-style bytes), for tests
+ *   --replay-input FILE      play back a PSP2I_INPUT_RECORD=FILE recording (same
+ *               input on the same game frame; its fps unless --fps)
  *   --overlay-shot VBLANK  (repeatable) save the presented image, overlay
  *               included, as <capture-dir>/overlay_<vblank>.ppm
  *   --audio / --no-audio  sound through SDL3.dll (audio_sdl.c): on by default
@@ -566,6 +568,107 @@ static int add_stick(const char *spec) {
     return 0;
 }
 
+/* ---- input recording and replay -------------------------------------------------
+ * PSP2I_INPUT_RECORD=FILE records what the game reads -- buttons and left stick
+ * after the menu filter, and the camera stick -- whenever it changes, keyed by
+ * game frame (display flip; the game reads input once per frame), plus the
+ * frame-rate setting:
+ *   fps 60                     at the start, and after every menu change
+ *   F <flip> <buttons> <lx> <ly>   buttons in hex, sticks 0..255 (128 centre)
+ *   R <flip> <rx> <ry>
+ * --replay-input FILE plays such a file back: the same input on the same game
+ * frame, so a route a player walked once can be re-run headless (fps from the
+ * file unless --fps is given). */
+static FILE    *g_rec;
+static uint32_t g_rec_bits = 0xFFFFFFFFu;
+static uint8_t  g_rec_ax, g_rec_ay, g_rec_rx = 128, g_rec_ry = 128;
+
+static void rec_open(const char *path, int fps) {
+    g_rec = fopen(path, "w");
+    if (!g_rec) { fprintf(stderr, "input: cannot write the recording %s\n", path); return; }
+    fprintf(g_rec, "# psp2i input recording (see --replay-input)\nfps %d\n", fps);
+    fflush(g_rec);
+    fprintf(stderr, "input: recording to %s\n", path);
+}
+
+static void rec_pad(uint32_t bits, uint8_t ax, uint8_t ay) {
+    if (!g_rec || (bits == g_rec_bits && ax == g_rec_ax && ay == g_rec_ay)) return;
+    g_rec_bits = bits; g_rec_ax = ax; g_rec_ay = ay;
+    fprintf(g_rec, "F %llu %04X %u %u\n", (unsigned long long)psp_display_flips(), bits, ax, ay);
+    fflush(g_rec);
+}
+
+static void rec_cam(uint8_t rx, uint8_t ry) {
+    if (!g_rec || (rx == g_rec_rx && ry == g_rec_ry)) return;
+    g_rec_rx = rx; g_rec_ry = ry;
+    fprintf(g_rec, "R %llu %u %u\n", (unsigned long long)psp_display_flips(), rx, ry);
+    fflush(g_rec);
+}
+
+static void rec_fps(int fps) {
+    if (!g_rec) return;
+    fprintf(g_rec, "fps %d\n", fps);
+    fflush(g_rec);
+}
+
+typedef struct { uint64_t flip; char kind; uint32_t a; uint8_t x, y; } rep_event;
+static rep_event *g_rep;
+static int      g_nrep, g_rep_pos, g_rep_on;
+static uint32_t g_rep_bits;
+static uint8_t  g_rep_ax = 128, g_rep_ay = 128, g_rep_rx = 128, g_rep_ry = 128;
+
+/* Load a recording; returns its first fps (0 if none), -1 on error. */
+static int replay_load(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "input: cannot read the recording %s\n", path); return -1; }
+    char line[128];
+    int cap = 0, first_fps = 0;
+    uint64_t last_flip = 0;
+    while (fgets(line, sizeof line, f)) {
+        rep_event e;
+        memset(&e, 0, sizeof e);
+        unsigned long long fl;
+        unsigned a, x, y;
+        int fps;
+        if (line[0] == 'F' && sscanf(line + 1, "%llu %x %u %u", &fl, &a, &x, &y) == 4) { e.kind = 'F'; e.flip = fl; e.a = a; e.x = (uint8_t)x; e.y = (uint8_t)y; }
+        else if (line[0] == 'R' && sscanf(line + 1, "%llu %u %u", &fl, &x, &y) == 3) { e.kind = 'R'; e.flip = fl; e.x = (uint8_t)x; e.y = (uint8_t)y; }
+        else if (sscanf(line, "fps %d", &fps) == 1) { if (!first_fps && !g_nrep) { first_fps = fps; continue; } e.kind = 'S'; e.flip = last_flip; e.a = (uint32_t)fps; }
+        else continue;
+        last_flip = e.flip;
+        if (g_nrep == cap) {
+            cap = cap ? cap * 2 : 1024;
+            rep_event *n = (rep_event *)realloc(g_rep, sizeof *g_rep * (size_t)cap);
+            if (!n) { fclose(f); return -1; }
+            g_rep = n;
+        }
+        g_rep[g_nrep++] = e;
+    }
+    fclose(f);
+    g_rep_on = 1;
+    fprintf(stderr, "input: replaying %s (%d events, to game frame %llu)\n", path, g_nrep,
+            g_nrep ? (unsigned long long)g_rep[g_nrep - 1].flip : 0ull);
+    return first_fps;
+}
+
+static void ctrl_commit(void);
+static void replay_step(void) {
+    if (!g_rep_on) return;
+    const uint64_t f = psp_display_flips();
+    int pad = 0;
+    while (g_rep_pos < g_nrep && g_rep[g_rep_pos].flip <= f) {
+        const rep_event *e = &g_rep[g_rep_pos++];
+        if (e->kind == 'F') { g_rep_bits = e->a; g_rep_ax = e->x; g_rep_ay = e->y; pad = 1; }
+        else if (e->kind == 'R') { g_rep_rx = e->x; g_rep_ry = e->y; }
+        else if (e->kind == 'S') { framerate_set((int)e->a); g_menu.fps = (int)e->a; fprintf(stderr, "input: replay sets %u fps\n", e->a); }
+    }
+    if (pad) ctrl_commit();
+    if (g_rep_pos == g_nrep && g_nrep) {
+        fprintf(stderr, "input: replay finished at game frame %llu (vblank %llu)\n",
+                (unsigned long long)f, (unsigned long long)psp_sched_vblank_count());
+        g_nrep = 0;                                       /* report once; the last state stays */
+    }
+}
+
 /* --dump-ram-at VBLANK PATH (repeatable): guest RAM as a raw file. */
 #define MAX_RAMDUMP 8
 static struct { uint64_t at; char path[512]; } g_ramdump[MAX_RAMDUMP];
@@ -585,6 +688,7 @@ static void dump_ram_now(uint64_t vb) {
 static uint32_t g_logf_addr, g_logf_count, g_logf_every;
 
 static void apply_script(uint64_t vb) {
+    replay_step();
     if (g_nramdump) dump_ram_now(vb);
     if (g_logf_every && vb % g_logf_every == 0) {
         fprintf(stderr, "floats: vblank %llu flip %llu", (unsigned long long)vb, (unsigned long long)psp_display_flips());
@@ -632,6 +736,7 @@ static void ctrl_commit(void) {
 #endif
     uint8_t ax = g_pad_ax, ay = g_pad_ay;
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
+    if (g_rep_on) { bits |= g_rep_bits; ax = g_rep_ax; ay = g_rep_ay; }
     /* The settings menu takes all input while open (menu_filter_game). */
     if (g_login.state != LOGIN_CLOSED) {
         /* The sign-in screen has the input; buttons still held when it
@@ -642,6 +747,7 @@ static void ctrl_commit(void) {
     }
     bits = menu_filter_game(&g_menu, bits & ~PRESS_MENU);
     if (g_menu.open) ax = ay = 128;
+    if (!g_rep_on) rec_pad(bits, ax, ay);
     psp_ctrl_set(bits, ax, ay);
 }
 
@@ -753,6 +859,7 @@ static void menu_step(void) {
     }
     if (fx & MFX_FPS_CHANGED) {
         framerate_set(g_menu.fps);
+        rec_fps(g_menu.fps);
         fprintf(stderr, "menu: frame rate %d fps\n", g_menu.fps);
     }
     if (fx & MFX_RES_CHANGED) display_set(g_menu.res);
@@ -780,7 +887,9 @@ static void update_camera_stick(uint64_t vb) {
     if (g_sdl_on) input_sdl_right_stick(&rx, &ry);
     for (int i = 0; i < g_nrstick; i++)
         if (vb >= g_rstick[i].at && vb < g_rstick[i].at + g_rstick[i].len) { rx = g_rstick[i].x; ry = g_rstick[i].y; }
+    if (g_rep_on) { rx = g_rep_rx; ry = g_rep_ry; }
     if (g_menu.open) rx = ry = 128;
+    if (!g_rep_on) rec_cam(rx, ry);
     camera_set_stick(rx, ry);
 }
 
@@ -1467,7 +1576,8 @@ int main(int argc, char **argv) {
     int oracle_all = 0;
     int want_sdl = -1;                     /* -1: default (with a window) */
     int want_audio = -1;
-    int fps = 30;
+    int fps = 30, fps_arg = 0;
+    const char *replay_path = NULL;
     int show_fps = 1;                      /* the FPS counter: shown unless --hide-fps */
     float rs_speed = 1.0f;                 /* right-stick camera sensitivity */
     uint32_t dump_addr = 0, args_addr = 0;
@@ -1488,7 +1598,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--headless"))                      g_headless = 1;
         else if (!strcmp(argv[i], "--sdl"))                           want_sdl = 1;
         else if (!strcmp(argv[i], "--no-sdl"))                        want_sdl = 0;
-        else if (!strcmp(argv[i], "--fps") && i + 1 < argc)           fps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--fps") && i + 1 < argc)           { fps = atoi(argv[++i]); fps_arg = 1; }
+        else if (!strcmp(argv[i], "--replay-input") && i + 1 < argc)  replay_path = argv[++i];
         else if (!strcmp(argv[i], "--show-fps"))                      show_fps = 1;
         else if (!strcmp(argv[i], "--rs-speed") && i + 1 < argc)      rs_speed = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--rstick") && i + 1 < argc && g_nrstick < MAX_STICK) {
@@ -1675,6 +1786,15 @@ int main(int argc, char **argv) {
     if (want_sdl == 1 || (want_sdl < 0 && !g_headless)) g_sdl_on = input_sdl_init() == 0;
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
     atrac_ffmpeg_init(dir);        /* ATRAC music; silent if FFmpeg is absent */
+    if (replay_path) {                         /* a recorded route: its fps unless --fps */
+        const int rf = replay_load(replay_path);
+        if (rf < 0) return 1;
+        if (rf > 0 && !fps_arg) fps = rf;
+    }
+    {
+        const char *rp = getenv("PSP2I_INPUT_RECORD");
+        if (rp && *rp && !replay_path) rec_open(rp, fps);
+    }
     menu_init(&g_menu, fps, show_fps);
     g_menu.res = res;
     g_menu.renderer = g_ren_saved;
