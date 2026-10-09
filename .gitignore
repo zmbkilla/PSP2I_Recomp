@@ -92,3 +92,7 @@ online_log.txt
 
 # ---- tools: not tracked (kept on disk only)
 port/tools/
+
+# Session notes: kept local, never published
+port/HANDOFF.md
+temp_handoff.txt
