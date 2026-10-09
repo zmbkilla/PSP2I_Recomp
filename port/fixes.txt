@@ -11,3 +11,6 @@
 # phase at 4x speed (2x per frame, 2x the frames), and at the game's own
 # 20 fps mode at 0.44x. The PPSSPP 60 FPS cheat swaps the operands the same way.
 0x08A937B4 0x46010043   # div.s $f1, $f0, $f1   (30 / fps)
+0x08A6E914 0x2404003C
+0x089E14CC 0x34020000
+0x089E1600 0x34020000

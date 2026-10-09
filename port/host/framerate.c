@@ -32,6 +32,14 @@
 #define FN_FRAME          0x08B85AB0u   /* the main loop's per-frame pacing call (from 0x08B86320) */
 #define TIMING_FPS_INT    0x08EDA558u   /* the timing state's +0x0C: fps as an int */
 
+
+#define ADDR_DISABLE_VBLANK_WAIT 0x00385B78u
+
+static void disable_vblank_wait(void) {
+    psp_write32(ADDR_DISABLE_VBLANK_WAIT, 0x00000000u);
+}
+
+
 static int g_target = 30;
 static int g_asked;      /* the game's last own request (before mapping); 0 = none yet */
 static int g_pending;    /* the target changed: re-issue g_asked at the next frame */
@@ -75,8 +83,10 @@ void framerate_init(int fps) {
      * unchanged, and they are what lets the target change at run time. */
     psp_hook_set(FN_SET_FRAME_RATE, hook_set_frame_rate);
     psp_hook_set(FN_FRAME, hook_frame);
-    if (g_target == 60)
+    if (g_target == 60) {
+        disable_vblank_wait();
         fprintf(stderr, "framerate: 60 fps (the game's 30/20 fps requests run at 60 through its own timing)\n");
+    }
 }
 
 void framerate_set(int fps) {
