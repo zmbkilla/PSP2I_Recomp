@@ -58,6 +58,7 @@
 #include <psprecomp/hle.h>
 #include <psprecomp/dispatch.h>
 #include <psprecomp/vfpu.h>
+#include <signal.h>
 #include <time.h>
 #include <psprecomp/render.h>
 #include <psprecomp/net.h>
@@ -1553,12 +1554,34 @@ static void crash_report(EXCEPTION_POINTERS *ep) {
     fflush(stderr);
 }
 
+/* crash_dump.dmp next to crash_log.txt: the faulting thread's stack and the
+ * memory it points at, for a debugger. Written first -- heap corruption may
+ * leave too little working to finish the text report. */
+static void crash_minidump(EXCEPTION_POINTERS *ep) {
+    if (!g_crash_path[0]) return;
+    char path[720];
+    snprintf(path, sizeof path, "%s", g_crash_path);
+    char *s = strrchr(path, '\\');
+    snprintf(s ? s + 1 : path, sizeof path - (size_t)(s ? s + 1 - path : 0), "crash_dump.dmp");
+    HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    MINIDUMP_EXCEPTION_INFORMATION mei;
+    mei.ThreadId = g_crash_tid;
+    mei.ExceptionPointers = ep;
+    mei.ClientPointers = FALSE;
+    MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), f,
+                      (MINIDUMP_TYPE)(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo),
+                      &mei, NULL, NULL);
+    CloseHandle(f);
+}
+
 static DWORD WINAPI crash_report_thread(LPVOID p) { crash_report((EXCEPTION_POINTERS *)p); return 0; }
 
 static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
     static int once;
     if (once++) return EXCEPTION_CONTINUE_SEARCH;
     g_crash_tid = GetCurrentThreadId();
+    crash_minidump(ep);
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW) {
         /* No stack is left to report on (the handler itself used to die silently):
          * do it on a fresh thread while this one waits. */
@@ -1568,6 +1591,46 @@ static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
         crash_report(ep);
     }
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* Failures the unhandled-exception filter never sees, seen in multiplayer
+ * (2026-10-10, Windows event log, no crash_log.txt): heap corruption
+ * (0xC0000374, raised from ntdll and then fatal) and the C runtime's fast
+ * fail (0xC0000409 in ucrtbase: an invalid parameter, or abort). The first
+ * reaches a vectored handler; the others call ours before failing. */
+static LONG WINAPI on_vectored(EXCEPTION_POINTERS *ep) {
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code == 0xC0000374u || code == 0xC0000409u) on_crash(ep);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void crash_from_here(DWORD code, const char *what) {
+    CONTEXT ctx;
+    RtlCaptureContext(&ctx);
+    EXCEPTION_RECORD er;
+    memset(&er, 0, sizeof er);
+    er.ExceptionCode = code;
+    er.ExceptionAddress = (void *)(uintptr_t)ctx.Rip;
+    EXCEPTION_POINTERS ep = { &er, &ctx };
+    fprintf(stderr, "psp2i: %s\n", what);
+    on_crash(&ep);
+}
+
+static void on_invalid_parameter(const wchar_t *expr, const wchar_t *fn, const wchar_t *file, unsigned line, uintptr_t r) {
+    (void)expr; (void)fn; (void)file; (void)line; (void)r;
+    crash_from_here(0xC0000417u, "the C runtime was given an invalid parameter");
+}
+
+static void on_abort_signal(int sig) {
+    (void)sig;
+    crash_from_here(0xC0000409u, "abort()");
+}
+
+static void crash_handlers_install(void) {
+    SetUnhandledExceptionFilter(on_crash);
+    AddVectoredExceptionHandler(1, on_vectored);
+    _set_invalid_parameter_handler(on_invalid_parameter);
+    signal(SIGABRT, on_abort_signal);
 }
 #endif
 
@@ -1731,7 +1794,7 @@ int main(int argc, char **argv) {
     }
 
 #ifdef _WIN32
-    SetUnhandledExceptionFilter(on_crash);
+    crash_handlers_install();
     /* The scheduler sleeps until the next vblank or timeout with Sleep(ms - 1)
      * and spins the rest (threadman.c host_sleep_us), which assumes the 1 ms
      * timer resolution. At Windows' default (15.6 ms) one Sleep(1) can take a

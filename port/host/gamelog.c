@@ -233,11 +233,18 @@ static void hook_zone_player(void (*original)(void)) {
 static void hook_is_local(void (*original)(void)) {
     const uint32_t pl = psp_cpu.r[4];
     original();
-    static uint32_t last_pl, last_r = 0xFFFFFFFF;
-    if (pl != last_pl || psp_cpu.r[2] != last_r) {
-        last_pl = pl; last_r = psp_cpu.r[2];
-        logf_line("[party] player 0x%08X (+0x28 = %u) local? -> %d", pl, pl ? psp_read32(pl + 40) : 0, (int32_t)psp_cpu.r[2]);
-    }
+    /* Per player, only when the answer changes: the game asks for every
+     * player every frame, so "changed since the last call" logged ~900 lines
+     * a second in a 4-player ad hoc lobby (each flushed to disk). */
+    static struct { uint32_t pl, r; } seen[16];
+    static int nseen;
+    const uint32_t r = psp_cpu.r[2];
+    int k = 0;
+    while (k < nseen && seen[k].pl != pl) k++;
+    if (k < nseen && seen[k].r == r) return;
+    if (k == nseen) { if (nseen == 16) return; nseen++; seen[k].pl = pl; }
+    seen[k].r = r;
+    logf_line("[party] player 0x%08X (+0x28 = %u) local? -> %d", pl, pl ? psp_read32(pl + 40) : 0, (int32_t)r);
 }
 
 /* 0x08CB611C = "this room is an infra lobby" (room size == lobby size, or the
