@@ -1308,10 +1308,11 @@ static void crash_walk_stack(HANDLE proc, CONTEXT ctx) {
         si->SizeOfStruct = sizeof(SYMBOL_INFO);
         si->MaxNameLen = 255;
         DWORD64 disp = 0;
+        const unsigned long long rva = sf.AddrPC.Offset - (DWORD64)(uintptr_t)GetModuleHandleA(NULL);
         if (SymFromAddr(proc, sf.AddrPC.Offset, &disp, si))
-            fprintf(stderr, "    #%-2d %s+0x%llx\n", i, si->Name, (unsigned long long)disp);
+            fprintf(stderr, "    #%-2d %s+0x%llx  (exe+0x%llx)\n", i, si->Name, (unsigned long long)disp, rva);
         else
-            fprintf(stderr, "    #%-2d 0x%llX\n", i, (unsigned long long)sf.AddrPC.Offset);
+            fprintf(stderr, "    #%-2d exe+0x%llx\n", i, rva);
     }
     if (th) CloseHandle(th);
 }
@@ -1333,8 +1334,14 @@ static void crash_report(EXCEPTION_POINTERS *ep) {
         fprintf(stderr, "  %s of %p\n", er->ExceptionInformation[0] ? "write" : "read",
                 (void *)er->ExceptionInformation[1]);
     HANDLE proc = GetCurrentProcess();
+    const uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
+    fprintf(stderr, "  exe base %p, fault at exe+0x%llx\n", (void *)base,
+            (unsigned long long)((uintptr_t)er->ExceptionAddress - base));
+    /* The game-stack logger may already have initialised the symbol handler
+     * (a second SymInitialize fails): use it either way. */
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
-    if (SymInitialize(proc, NULL, TRUE)) {
+    SymInitialize(proc, NULL, TRUE);
+    {
         char buf[sizeof(SYMBOL_INFO) + 256];
         SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
         si->SizeOfStruct = sizeof(SYMBOL_INFO);
