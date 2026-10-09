@@ -9,7 +9,8 @@ Setup
 Put these next to psp2i.exe:
 
   GameData\disc\         your game disc, extracted (the folder that contains
-                         PSP_GAME\PARAM.SFO, PSP_GAME\USRDIR, PSP_GAME\SYSDIR)
+                         PSP_GAME\PARAM.SFO, PSP_GAME\USRDIR, PSP_GAME\SYSDIR).
+			 Ex. C:\psp2i\GameData\disc\PSP_GAME
   GameData\flash\font\   the PSP firmware fonts (jpn0.pgf, kr0.pgf,
                          ltn0.pgf ... ltn15.pgf) from your PSP's flash0:/font
 
