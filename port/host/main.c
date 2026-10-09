@@ -58,6 +58,7 @@
 #include <psprecomp/vfpu.h>
 #include <time.h>
 #include <psprecomp/render.h>
+#include <psprecomp/net.h>
 
 #include "recomp_funcs.h"
 #include "input_sdl.h"
@@ -266,6 +267,7 @@ static login_state g_login;
 static uint32_t    g_login_keys;          /* MI_* from navigation keys while a text screen is open */
 /* The settings menu's SEGA SERVER editor (textedit.c). */
 static textedit    g_sega_edit;
+static int         g_edit_adhoc;            /* the editor is open for ADHOC SERVER (else SEGA SERVER) */
 static int         g_edit_enter;          /* Enter pressed in the editor: save */
 
 static int text_ui_open(void) { return g_login.state != LOGIN_CLOSED || g_sega_edit.open; }
@@ -673,13 +675,18 @@ static void menu_step(void) {
     if (input_sdl_host_buttons() & (INPUT_HOST_GUIDE | INPUT_HOST_RSTICK)) held |= MI_TOGGLE;
 
     snprintf(g_menu.sega, sizeof g_menu.sega, "%s", online_sega_redirect());
+    snprintf(g_menu.adhoc, sizeof g_menu.adhoc, "%s", online_adhoc_server());
+    g_menu.adhoc_mode = online_adhoc_mode();
     if (g_sega_edit.open) {
-        /* The SEGA SERVER editor has the input (pad buttons and navigation
-         * keys; typed characters arrive through WM_CHAR). */
+        /* The text editor (SEGA SERVER or ADHOC SERVER) has the input (pad
+         * buttons and navigation keys; typed characters arrive through WM_CHAR). */
         const uint32_t pad = g_script_bits | g_pad_bits;
         int r = textedit_update(&g_sega_edit, menu_inputs_from_psp(pad & 0xFFFF, ax, ay) | g_login_keys, pad);
         if (g_edit_enter) { g_edit_enter = 0; g_sega_edit.open = 0; r = TE_SAVE; }
-        if (r == TE_SAVE) {
+        if (r == TE_SAVE && g_edit_adhoc) {
+            online_set_adhoc_server(g_sega_edit.text);
+            fprintf(stderr, "menu: ad hoc server %s\n", online_adhoc_server());
+        } else if (r == TE_SAVE) {
             online_set_sega_redirect(g_sega_edit.text);
             fprintf(stderr, "menu: SEGA server redirect %s\n", online_sega_redirect()[0] ? online_sega_redirect() : "off");
         }
@@ -693,6 +700,15 @@ static void menu_step(void) {
         char hint[96];
         snprintf(hint, sizeof hint, "%.22s -> HOST[:PORT], EMPTY = OFF", online_sega_host());
         textedit_open(&g_sega_edit, "SEGA SERVER REDIRECT", hint, online_sega_redirect());
+        g_edit_adhoc = 0;
+    }
+    if (fx & MFX_EDIT_ADHOC) {
+        textedit_open(&g_sega_edit, "ADHOC SERVER", "HOST[:PORT] (DEFAULT PORT 27312)", online_adhoc_server());
+        g_edit_adhoc = 1;
+    }
+    if (fx & MFX_ADHOC_MODE) {
+        online_set_adhoc_mode(g_menu.adhoc_mode);
+        fprintf(stderr, "menu: ad hoc connection %d (0 PPSSPP direct, 1 PPSSPP relay, 2 modern)\n", g_menu.adhoc_mode);
     }
     if (fx & MFX_FPS_CHANGED) {
         framerate_set(g_menu.fps);

@@ -67,6 +67,8 @@ static int change(menu_state *m, int dir) {
     case MENU_FRAME_RATE:  m->fps = m->fps == 60 ? 30 : 60; return MFX_FPS_CHANGED;
     case MENU_FPS_COUNTER: m->show_fps = !m->show_fps;      return MFX_SHOW_FPS;
     case MENU_SEGA_SERVER: return dir == 0 ? MFX_EDIT_SEGA : 0;
+    case MENU_ADHOC_SERVER: return dir == 0 ? MFX_EDIT_ADHOC : 0;
+    case MENU_ADHOC_MODE:  m->adhoc_mode = (m->adhoc_mode + (dir < 0 ? 2 : 1)) % 3; return MFX_ADHOC_MODE;
     case MENU_RESOLUTION:
         m->res = (m->res + (dir < 0 ? RES_MODES - 1 : 1)) % RES_MODES;
         return MFX_RES_CHANGED;
@@ -234,7 +236,7 @@ static void frame(menu_image *img, int x, int y, int w, int h, uint32_t rgb) {
 void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *hotkey) {
     if (!m->open) return;
     char line[96];
-    const int bw = 288, bh = 170;
+    const int bw = 288, bh = 196;
     const int x0 = (img->w - bw) / 2, y0 = (img->h - bh) / 2;
     shade(img, x0, y0, bw, bh);
     frame(img, x0, y0, bw, bh, GREY);
@@ -243,7 +245,11 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     menu_text(img, x0 + 10, y, "SETTINGS", WHITE);
     y += CELL_H + 8;
 
-    static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "SEGA SERVER", "RESOLUTION", "CLOSE" };
+    static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "SEGA SERVER", "ADHOC SERVER",
+                                                   "ADHOC MODE", "RESOLUTION", "CLOSE" };
+    static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
+    char adhoc[32];
+    snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
     char res[24];
     snprintf(res, sizeof res, "< %s >", menu_res_name(m->res));
     char sega[32];
@@ -257,7 +263,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
         menu_text(img, x0 + 22, y, NAMES[i], col);
         const char *v = i == MENU_FRAME_RATE ? (m->fps == 60 ? "< 60 FPS >" : "< 30 FPS >")
                       : i == MENU_FPS_COUNTER ? (m->show_fps ? "< ON >" : "< OFF >")
-                      : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega
+                      : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega : i == MENU_ADHOC_SERVER ? adhoc
+                      : i == MENU_ADHOC_MODE ? ADHOC_MODES[m->adhoc_mode % 3]
                       : i == MENU_RESOLUTION ? res : "";
         menu_text(img, x0 + 130, y, v, col);
         y += CELL_H + 4;

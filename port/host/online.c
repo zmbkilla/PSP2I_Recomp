@@ -36,6 +36,27 @@
  *                                if self-signed or for another name (test
  *                                servers only)
  *
+ *   Ad hoc play over the internet (psprecomp adhoc.c, PPSSPP's protocol):
+ *   adhoc_server=socom.cc        ad hoc server: host or host:port (port 27312
+ *                                by default)
+ *   adhoc_mode=ppsspp_direct     ppsspp_direct : PPSSPP style, game data
+ *                                         directly between players, ports
+ *                                         shifted by adhoc_port_offset (ports
+ *                                         must be reachable)
+ *                                ppsspp_relay : PPSSPP style, game data relayed
+ *                                         by the server (adhoc_relay_port) --
+ *                                         works behind any NAT
+ *                                modern : direct hosting through NAT traversal
+ *                                         (STUN, hole punching, IPv6) on one
+ *                                         UDP port, CGNAT included; recomp
+ *                                         players only; falls back to the
+ *                                         relay for a pair that cannot punch
+ *   adhoc_port_offset=10000      PPSSPP's default; all players must match
+ *   adhoc_relay_port=27313
+ *   adhoc_stun=stun.l.google.com:19302   modern: STUN server (empty = none)
+ *   adhoc_modern_port=27320      modern: the UDP port (all players should match;
+ *                                forwarding it, if possible, always works)
+ *
  * Logs: online_log.txt next to the exe -- network events, sign-in progress
  * (never the password), and every HTTP request with the game's handling of
  * the response. */
@@ -78,6 +99,42 @@ static char g_sega_scheme[16];
 static int  g_sega_ignore_cert;
 static int  g_in_redirect;               /* live_send is sending a redirected request */
 static FILE *g_log;
+static char g_adhoc_server[256] = "socom.cc";
+static int  g_adhoc_mode = PSP_ADHOC_MODE_PPSSPP_DIRECT;
+static int  g_adhoc_offset = 10000;
+static int  g_adhoc_relay_port = 27313;
+static char g_adhoc_stun[256] = "stun.l.google.com:19302";
+static int  g_adhoc_modern_port = 27320;
+
+static const char *const ADHOC_MODE_KEY[3] = { "ppsspp_direct", "ppsspp_relay", "modern" };
+static const char *const ADHOC_MODE_TEXT[3] = { "PPSSPP style, direct", "PPSSPP style, relayed", "modern (NAT traversal)" };
+
+static int adhoc_mode_parse(const char *e) {
+    for (int i = 0; i < 3; i++) if (!_stricmp(e, ADHOC_MODE_KEY[i])) return i;
+    if (!_stricmp(e, "relay")) return PSP_ADHOC_MODE_PPSSPP_RELAY;
+    return PSP_ADHOC_MODE_PPSSPP_DIRECT;                    /* "ppsspp", "direct", anything else */
+}
+static char g_online_name[64];
+
+/* Hand the ad hoc settings to psprecomp. */
+static void adhoc_apply(void) {
+    char host[256];
+    snprintf(host, sizeof host, "%s", g_adhoc_server);
+    uint16_t port = 0;
+    char *c = strrchr(host, ':');
+    if (c) { port = (uint16_t)atoi(c + 1); *c = '\0'; }
+    psp_adhoc_config ac;
+    memset(&ac, 0, sizeof ac);
+    ac.server = host;
+    ac.server_port = port;
+    ac.relay_port = (uint16_t)g_adhoc_relay_port;
+    ac.mode = g_adhoc_mode;
+    ac.port_offset = g_adhoc_offset;
+    ac.nickname = g_online_name[0] ? g_online_name : (g_user[0] ? g_user : "PSP2i");
+    ac.stun_server = g_adhoc_stun;
+    ac.mesh_port = (uint16_t)g_adhoc_modern_port;
+    psp_adhoc_configure(&ac);
+}
 
 static void cfg_path(char *out, size_t cap) { snprintf(out, cap, "%s/psp2i_online.ini", g_dir); }
 
@@ -93,6 +150,11 @@ static void cfg_save(void) {
                "; (host or host:port; empty = no redirect). See port/HANDOFF.md.\n");
     fprintf(f, "sega_server_host=%s\nsega_server_redirect=%s\nsega_server_scheme=%s\nsega_server_ignore_cert=%d\n",
             g_sega_host, g_sega_redirect, g_sega_scheme, g_sega_ignore_cert);
+    fprintf(f, "; Ad hoc: server host[:port] (default port 27312). adhoc_mode: ppsspp_direct = PPSSPP style,\n"
+               "; straight between players (ports + offset must be reachable); ppsspp_relay = PPSSPP style through\n"
+               "; the server's relay; modern = direct hosting through NAT traversal (CGNAT too; recomp players only)\n");
+    fprintf(f, "adhoc_server=%s\nadhoc_mode=%s\nadhoc_port_offset=%d\nadhoc_relay_port=%d\nadhoc_stun=%s\nadhoc_modern_port=%d\n",
+            g_adhoc_server, ADHOC_MODE_KEY[g_adhoc_mode], g_adhoc_offset, g_adhoc_relay_port, g_adhoc_stun, g_adhoc_modern_port);
     fclose(f);
 }
 
@@ -117,6 +179,12 @@ static void cfg_load(void) {
         else if (!strcmp(line, "sega_server_redirect")) snprintf(g_sega_redirect, sizeof g_sega_redirect, "%s", e);
         else if (!strcmp(line, "sega_server_scheme")) snprintf(g_sega_scheme, sizeof g_sega_scheme, "%s", e);
         else if (!strcmp(line, "sega_server_ignore_cert")) g_sega_ignore_cert = atoi(e) != 0;
+        else if (!strcmp(line, "adhoc_server")) { if (e[0]) snprintf(g_adhoc_server, sizeof g_adhoc_server, "%s", e); }
+        else if (!strcmp(line, "adhoc_mode")) g_adhoc_mode = adhoc_mode_parse(e);
+        else if (!strcmp(line, "adhoc_port_offset")) g_adhoc_offset = atoi(e) >= 0 ? atoi(e) : 10000;
+        else if (!strcmp(line, "adhoc_relay_port")) g_adhoc_relay_port = atoi(e) > 0 ? atoi(e) : 27313;
+        else if (!strcmp(line, "adhoc_stun")) snprintf(g_adhoc_stun, sizeof g_adhoc_stun, "%s", e);
+        else if (!strcmp(line, "adhoc_modern_port")) g_adhoc_modern_port = atoi(e) > 0 && atoi(e) < 65536 ? atoi(e) : 27320;
         else continue;
         seen++;
     }
@@ -124,7 +192,23 @@ static void cfg_load(void) {
     /* An ini written with the earlier single-name default: add the patched
      * EBOOT's name, or a redirect would miss it. */
     if (!strcmp(g_sega_host, "game.psp2infinity.jp")) { snprintf(g_sega_host, sizeof g_sega_host, "%s", SEGA_HOSTS_DEFAULT); seen = 0; }
-    if (seen < 10) cfg_save();          /* add any keys a older file lacks */
+    if (seen < 16) cfg_save();          /* add any keys a older file lacks */
+    adhoc_apply();
+}
+
+const char *online_adhoc_server(void) { return g_adhoc_server; }
+int online_adhoc_mode(void) { return g_adhoc_mode; }
+void online_set_adhoc_server(const char *s) {
+    if (s && s[0]) snprintf(g_adhoc_server, sizeof g_adhoc_server, "%s", s);
+    cfg_save();
+    adhoc_apply();
+    online_log("settings: ad hoc server %s (saved; used from the next ad hoc session)", g_adhoc_server);
+}
+void online_set_adhoc_mode(int mode) {
+    g_adhoc_mode = mode >= 0 && mode <= PSP_ADHOC_MODE_MODERN ? mode : PSP_ADHOC_MODE_PPSSPP_DIRECT;
+    cfg_save();
+    adhoc_apply();
+    online_log("settings: ad hoc connection %s (saved; used from the next ad hoc session)", ADHOC_MODE_TEXT[g_adhoc_mode]);
 }
 
 /* ---- log --------------------------------------------------------------------------- */
@@ -197,7 +281,6 @@ static struct {
 } g_job;
 
 static rpcn *g_session;                  /* signed in */
-static char  g_online_name[64];
 /* Player-to-player (psp_p2p_start), set by the sign-in thread and started on
  * the game thread: the RPCN server's IPv4 (host order) and the user ID. */
 #define RPCN_UDP_PORT 3657
@@ -459,6 +542,7 @@ static void run_signin(void) {
     snprintf(g_user, sizeof g_user, "%s", g_job.user);
     UNLOCK();
     cfg_save();
+    adhoc_apply();                       /* the online name is the ad hoc nickname too */
     rooms_set_self(g_job.user);
     net_start(r);
     {   /* other players reach us through UDP 3658, checked against the server's UDP port */

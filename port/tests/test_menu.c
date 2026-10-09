@@ -80,6 +80,26 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_RIGHT, 0) == 0);                           /* Left/Right do nothing there */
     menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_ADHOC_SERVER);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_EDIT_ADHOC && m.open);  /* Circle opens its editor */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == 0);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_ADHOC_MODE && m.adhoc_mode == 0);               /* PPSSPP direct by default */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 1);   /* PPSSPP relay */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 2); /* modern */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 0);   /* wraps */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 2);    /* Left goes back */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 1);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 0);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_RESOLUTION);
     CHECK(m.res == RES_DEFAULT && m.res == RES_1920x1080);              /* 1080p is the default */
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RES_CHANGED && m.res == RES_2560x1440);
@@ -184,6 +204,10 @@ static void test_buttons(void) {
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RS_SPEED);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_SEGA_SERVER);
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_ADHOC_SERVER);
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_ADHOC_MODE);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RESOLUTION);
     CHECK(STEP(0) == 0);
@@ -424,8 +448,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 51, 384, 221));            /* the centred 288x170 box */
-    CHECK(!changed_outside(96, 51, 384, 221));
+    CHECK(changed_inside(96, 38, 384, 234));            /* the centred 288x196 box */
+    CHECK(!changed_outside(96, 38, 384, 234));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */
