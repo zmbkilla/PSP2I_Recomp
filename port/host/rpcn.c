@@ -9,7 +9,7 @@
  * speaks version 27. A reply's payload starts with an error byte (0 = none).
  *
  *   Login (command 0):          user\0 password\0 token\0
- *                                -> online name\0 avatar URL\0 u64 user id ...
+ *                                -> online name\0 avatar URL\0 s64 user id ...
  *   RequestTicket (command 27): service id\0 u32 cookie length, cookie bytes
  *                                -> u32 ticket length, ticket bytes
  *   GetServerList (command 11): communication ID (12 bytes, "NPWR01446_00")
@@ -149,7 +149,8 @@ int rpcn_connect(rpcn **out, const char *host, int port, int timeout_ms, uint8_t
 uint32_t rpcn_server_version(const rpcn *r) { return r ? r->server_version : 0; }
 
 int rpcn_login(rpcn *r, const char *user, const char *password, const char *token,
-               char *online_name, size_t name_cap, char *err, size_t cap) {
+               char *online_name, size_t name_cap, int64_t *user_id, char *err, size_t cap) {
+    if (user_id) *user_id = 0;
     const size_t a = strlen(user) + 1, b = strlen(password) + 1, c = strlen(token) + 1;
     uint8_t *d = (uint8_t *)malloc(a + b + c);
     if (!d) return RPCN_ERR_CONNECT;
@@ -174,6 +175,11 @@ int rpcn_login(rpcn *r, const char *user, const char *password, const char *toke
         memcpy(online_name, p + 1, k);
         online_name[k] = '\0';
     }
+    /* ... avatar URL\0, s64 user ID (the matching server's UDP address check uses it) */
+    size_t o = 1 + n + 1;
+    while (o < len && p[o]) o++;
+    o++;
+    if (user_id && o + 8 <= len) *user_id = (int64_t)get64(p + o);
     free(p);
     return RPCN_OK;
 }

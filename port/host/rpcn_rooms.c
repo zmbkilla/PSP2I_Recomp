@@ -516,6 +516,21 @@ static void put_member(uint32_t a, fb_table m, uint32_t groups) {
     }
 }
 
+/* Tell p2p.c who a member is (signaling finds peers by online ID). */
+static void note_member(uint64_t room, fb_table m) {
+    char npid[17];
+    if (fb_str(fb_sub(m, 0), 0, npid, sizeof npid) >= 0) psp_p2p_room_member(room, fb_u16(m, 2), npid);
+}
+
+/* SignalingAddr {ip [ubyte], port} -> IPv4 (host order); 0 if not IPv4 */
+static uint32_t sig_ip(fb_table a, uint16_t *port) {
+    const fb_vec ip = fb_vec_of(a, 0);
+    *port = fb_u16(a, 1);
+    if (ip.n != 4) return 0;
+    return (uint32_t)fb_vec_u8_at(ip, 0) << 24 | (uint32_t)fb_vec_u8_at(ip, 1) << 16 |
+           (uint32_t)fb_vec_u8_at(ip, 2) << 8 | fb_vec_u8_at(ip, 3);
+}
+
 static int is_self(uint32_t member) {
     char id[17];
     psp_str(member + 4, id, sizeof id);
@@ -542,6 +557,7 @@ static void put_room_internal(uint32_t a, fb_table r) {
             const uint32_t m = ma + 80 * i;
             if (i + 1 < members.n) psp_write32(m, m + 80);
             put_member(m, fb_vec_table_at(members, i), groups);
+            note_member(fb_u64(r, 3), fb_vec_table_at(members, i));
             if (is_self(m)) psp_write32(a + 44, m);                     /* memberList.me */
             if (psp_read16(m + 56) == owner_id) psp_write32(a + 48, m);  /* memberList.owner */
         }
@@ -705,18 +721,29 @@ void rooms_reply(int kind, uint32_t req_id, const uint8_t *p, uint32_t len) {
     case PSP_M2_JOIN_ROOM: {                          /* JoinRoomResponse {room_data, signaling_data} */
         if (get_message(p, len, &off, &t)) break;
         LOG("JoinRoom (request %u): joined", req_id);
-        const fb_vec sig = fb_vec_of(t, 1);
-        if (sig.n) LOG("  %u members to connect to directly (player-to-player signaling is not implemented yet)", sig.n);
         const uint32_t a = psp_np2_alloc(4);
         if (!a) break;
         psp_write32(a, new_room_internal(fb_sub(t, 0)));
+        /* signaling_data: the members to connect to, at the addresses the server saw */
+        const uint64_t room = fb_u64(fb_sub(t, 0), 3);
+        const fb_vec sig = fb_vec_of(t, 1);
+        for (uint32_t i = 0; i < sig.n; i++) {
+            const fb_table si = fb_vec_table_at(sig, i);
+            uint16_t port;
+            const uint32_t ip = sig_ip(fb_sub(si, 1), &port);
+            LOG("  connect to member %u at %u.%u.%u.%u:%u", fb_u16(si, 0), ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255, port);
+            if (ip) psp_p2p_connect(room, fb_u16(si, 0), ip, port);
+        }
         psp_np2_request_done(req_id, 0, a);
         return;
     }
-    case PSP_M2_LEAVE_ROOM:
-        LOG("LeaveRoom (request %u): left room 0x%016llX", req_id, (unsigned long long)get_u64(p, len, &off));
+    case PSP_M2_LEAVE_ROOM: {
+        const uint64_t room = get_u64(p, len, &off);
+        LOG("LeaveRoom (request %u): left room 0x%016llX", req_id, (unsigned long long)room);
+        psp_p2p_room_closed(room);
         psp_np2_request_done(req_id, 0, 0);
         return;
+    }
     case PSP_M2_GET_ROOM_DATA_EXTERNAL_LIST: {        /* GetRoomDataExternalListResponse {rooms} */
         if (get_message(p, len, &off, &t)) break;
         const fb_vec rooms = fb_vec_of(t, 0);
@@ -762,8 +789,14 @@ void rooms_notification(uint16_t type, const uint8_t *p, uint32_t len) {
         const uint32_t d = new_member_update(fb_sub(t, 1), &member);
         char who[17] = "";
         if (d && psp_read32(d)) psp_str(psp_read32(d) + 4, who, sizeof who);
-        LOG("notification: %s (member %u) joined room 0x%016llX%s", who, member, (unsigned long long)room,
-            fb_has(t, 2) ? " (player-to-player signaling is not implemented yet)" : "");
+        LOG("notification: %s (member %u) joined room 0x%016llX", who, member, (unsigned long long)room);
+        if (who[0]) psp_p2p_room_member(room, member, who);
+        if (fb_has(t, 2)) {                           /* signaling: connect to the new member */
+            uint16_t port;
+            const uint32_t ip = sig_ip(fb_sub(t, 2), &port);
+            LOG("  connect to %s at %u.%u.%u.%u:%u", who, ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255, port);
+            if (ip) psp_p2p_connect(room, member, ip, port);
+        }
         psp_np2_room_event(room, member, ROOM_EVENT_MemberJoined, d);
         return;
     }
@@ -772,7 +805,8 @@ void rooms_notification(uint16_t type, const uint8_t *p, uint32_t len) {
         if (get_message(p, len, &off, &t)) break;
         const uint32_t d = new_member_update(t, &member);
         LOG("notification: member %u left room 0x%016llX", member, (unsigned long long)room);
-        psp_np2_room_event(room, member, ROOM_EVENT_MemberLeft, d);
+        psp_np2_room_event(room, member, ROOM_EVENT_MemberLeft, d);   /* the room event first, as the reference */
+        psp_p2p_member_left(room, member);
         return;
     }
     case NT_ROOM_DESTROYED: {                         /* u64 room, RoomUpdateInfo {eventCause, errorCode, optData} */
@@ -781,6 +815,7 @@ void rooms_notification(uint16_t type, const uint8_t *p, uint32_t len) {
         const uint32_t d = psp_np2_alloc(28);
         if (d) { psp_write8(d, fb_u8(t, 0)); psp_write32(d + 4, fb_u32(t, 1)); put_opt_data(d + 8, fb_sub(t, 2)); }
         LOG("notification: room 0x%016llX destroyed", (unsigned long long)room);
+        psp_p2p_room_closed(room);
         psp_np2_room_event(room, 0, ROOM_EVENT_RoomDestroyed, d);
         return;
     }
@@ -878,9 +913,16 @@ void rooms_notification(uint16_t type, const uint8_t *p, uint32_t len) {
         psp_np2_room_message(room, member, ROOM_MSG_EVENT_Message, d);
         return;
     }
-    case NT_SIGNALING_HELPER:
-        LOG("notification: signaling helper (player-to-player signaling is not implemented yet)");
+    case NT_SIGNALING_HELPER: {                       /* MatchingSignalingInfo {npid, addr} */
+        if (get_message(p, len, &off, &t)) break;
+        char npid[17] = "";
+        fb_str(t, 0, npid, sizeof npid);
+        uint16_t port;
+        const uint32_t ip = sig_ip(fb_sub(t, 1), &port);
+        LOG("notification: open the path to %s at %u.%u.%u.%u:%u", npid, ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255, port);
+        if (ip && npid[0]) psp_p2p_info(npid, ip, port);
         return;
+    }
     default:
         LOG("notification type %u (%u bytes): not used here", type, len);
         return;

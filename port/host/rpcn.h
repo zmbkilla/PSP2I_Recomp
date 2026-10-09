@@ -17,7 +17,7 @@ typedef struct rpcn rpcn;
 int  rpcn_connect(rpcn **out, const char *host, int port, int timeout_ms, uint8_t cert_sha256[32], char *err, size_t cap);
 uint32_t rpcn_server_version(const rpcn *r);
 int  rpcn_login(rpcn *r, const char *user, const char *password, const char *token,
-                char *online_name, size_t name_cap, char *err, size_t cap);
+                char *online_name, size_t name_cap, int64_t *user_id, char *err, size_t cap);
 int  rpcn_request_ticket(rpcn *r, const char *service_id, const uint8_t *cookie, uint32_t cookie_len,
                          uint8_t **ticket, uint32_t *ticket_len, char *err, size_t cap);
 /* NP matching 2 on a signed-in session; com_id is "NPWRnnnnn_nn". */

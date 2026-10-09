@@ -198,6 +198,12 @@ static struct {
 
 static rpcn *g_session;                  /* signed in */
 static char  g_online_name[64];
+/* Player-to-player (psp_p2p_start), set by the sign-in thread and started on
+ * the game thread: the RPCN server's IPv4 (host order) and the user ID. */
+#define RPCN_UDP_PORT 3657
+static volatile int g_p2p_pending;
+static uint32_t g_p2p_server_ip;
+static int64_t  g_p2p_user_id;
 static int   g_signin_state = PSP_NP_SIGNIN_NONE;
 static struct { int state; uint8_t *data; uint32_t len; uint32_t err; } g_tickets[4];
 
@@ -436,7 +442,8 @@ static void run_signin(void) {
     }
     online_log("connected: TLS, RPCN protocol %u, certificate sha256 %s", rpcn_server_version(r), fphex);
     char name[64] = "";
-    rc = rpcn_login(r, g_job.user, g_job.pass, "", name, sizeof name, err, sizeof err);
+    int64_t user_id = 0;
+    rc = rpcn_login(r, g_job.user, g_job.pass, "", name, sizeof name, &user_id, err, sizeof err);
     memset(g_job.pass, 0, sizeof g_job.pass);
     if (rc != RPCN_OK) {
         rpcn_close(r);
@@ -454,6 +461,23 @@ static void run_signin(void) {
     cfg_save();
     rooms_set_self(g_job.user);
     net_start(r);
+    {   /* other players reach us through UDP 3658, checked against the server's UDP port */
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        uint32_t ip = 0;
+        if (getaddrinfo(g_host, NULL, &hints, &res) == 0 && res) {
+            ip = ntohl(((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr);
+            freeaddrinfo(res);
+        }
+        if (ip) {
+            g_p2p_server_ip = ip;
+            g_p2p_user_id = user_id;
+            g_p2p_pending = 1;
+            online_log("player-to-player: user ID %lld, address check at %s:%d (UDP)", (long long)user_id, g_host, RPCN_UDP_PORT);
+        } else online_log("player-to-player: cannot resolve %s; other players will not reach this one", g_host);
+    }
     g_job.ok = 1;
     snprintf(g_job.msg, sizeof g_job.msg, "Signed in to %s as %s (RPCN test account, not PSN).", g_host, g_online_name);
     online_log("signed in as %s", g_online_name);
@@ -690,6 +714,10 @@ static int be_m2_room_request(int kind, const char *com_id, uint32_t req_id, uin
 
 /* Once per vblank on the game thread: replies and notifications to the game. */
 static void be_m2_poll(void) {
+    if (g_p2p_pending) {
+        g_p2p_pending = 0;
+        psp_p2p_start(g_p2p_server_ip, RPCN_UDP_PORT, g_p2p_user_id, g_user);
+    }
     NLOCK();
     nmsg *m = g_in_head;
     g_in_head = g_in_tail = NULL;
