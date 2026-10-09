@@ -23,4 +23,11 @@ const char *online_sega_redirect(void);
 const char *online_sega_host(void);
 void        online_set_sega_redirect(const char *target);
 
+/* Ad hoc (psp2i_online.ini adhoc_server / adhoc_mode): host[:port], and
+ * PSP_ADHOC_MODE_PPSSPP_DIRECT, _PPSSPP_RELAY or _MODERN (psprecomp/net.h). */
+const char *online_adhoc_server(void);
+int         online_adhoc_mode(void);
+void        online_set_adhoc_server(const char *server);
+void        online_set_adhoc_mode(int mode);
+
 #endif /* PSP2I_ONLINE_H */

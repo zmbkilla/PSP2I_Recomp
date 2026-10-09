@@ -22,7 +22,8 @@ enum {
 };
 
 /* Menu items, top to bottom. */
-enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_RESOLUTION, MENU_CLOSE, MENU_ITEMS };
+enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
+       MENU_RESOLUTION, MENU_CLOSE, MENU_ITEMS };
 
 /* Output resolution: the window's client size (the 480x272 picture is scaled
  * to fit it, aspect kept), or borderless fullscreen on the current monitor. */
@@ -44,6 +45,8 @@ enum {
     MFX_RS_SPEED    = 1 << 4,   /* rs_step changed: menu_rs_speed() */
     MFX_EDIT_SEGA   = 1 << 5,   /* Circle on SEGA SERVER: the caller opens its text editor */
     MFX_RES_CHANGED = 1 << 6,   /* res changed: resize the window / go fullscreen */
+    MFX_EDIT_ADHOC  = 1 << 7,   /* Circle on ADHOC SERVER: the caller opens its text editor */
+    MFX_ADHOC_MODE  = 1 << 8,   /* adhoc_mode changed */
 };
 
 typedef struct {
@@ -54,6 +57,8 @@ typedef struct {
     int      rs_step;      /* right-stick sensitivity, 0..MENU_RS_STEPS-1 (1.00x + 0.25x each) */
     int      res;          /* RES_*: output resolution */
     char     sega[64];     /* the SEGA server redirect, shown ("" = off); set by the caller */
+    char     adhoc[64];    /* the ad hoc server host[:port], shown; set by the caller */
+    int      adhoc_mode;   /* PSP_ADHOC_MODE_*: 0 PPSSPP direct, 1 PPSSPP relay, 2 modern; set by the caller */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */
     uint32_t game_mask;    /* PSP buttons held through a close, kept from the game until released */
