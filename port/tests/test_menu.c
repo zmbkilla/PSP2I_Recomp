@@ -123,6 +123,15 @@ static void test_values(void) {
         CHECK(strcmp(menu_res_name(RES_3840x2160), "3840X2160") == 0);
     }
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_RENDERER && m.renderer == REN_D3D11);         /* Direct3D 11 by default */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RENDERER && m.renderer == REN_GL);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_RENDERER && m.renderer == REN_D3D11);   /* two choices: wraps */
+    menu_update(&m, 0, 0);
+    CHECK(menu_ren_parse("opengl") == REN_GL && menu_ren_parse("gl\r\n") == REN_GL && menu_ren_parse("OPENGL") == REN_GL);
+    CHECK(menu_ren_parse("d3d11") == REN_D3D11 && menu_ren_parse("software") == REN_SOFTWARE && menu_ren_parse("vulkan") == -1);
+    CHECK(strcmp(menu_ren_key(REN_GL), "opengl") == 0 && strcmp(menu_ren_key(REN_D3D11), "d3d11") == 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_FRAME_RATE);                    /* wraps */
@@ -210,6 +219,8 @@ static void test_buttons(void) {
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_ADHOC_MODE);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RESOLUTION);
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_RENDERER);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_CLOSE);
     CHECK(STEP(0) == 0);
@@ -448,8 +459,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 38, 384, 234));            /* the centred 288x196 box */
-    CHECK(!changed_outside(96, 38, 384, 234));
+    CHECK(changed_inside(96, 31, 384, 240));            /* the centred 288x209 box */
+    CHECK(!changed_outside(96, 31, 384, 240));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */
