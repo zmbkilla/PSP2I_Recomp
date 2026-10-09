@@ -1171,9 +1171,36 @@ static void watch_backtrace(uint32_t addr, uint32_t value) {
  * runtime or the generated code. Report where -- host function, PSP state,
  * thread table -- before the process dies, so it can be found. */
 static char g_crash_path[700];          /* crash_log.txt next to the exe */
-static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
-    static int once;
-    if (once++) return EXCEPTION_CONTINUE_SEARCH;
+static DWORD g_crash_tid;               /* the faulting thread */
+
+/* The faulting thread's own call stack, innermost first: for a stack overflow
+ * (endless recursion) the first few dozen frames show the cycle. */
+static void crash_walk_stack(HANDLE proc, CONTEXT ctx) {
+    HANDLE th = OpenThread(THREAD_ALL_ACCESS, FALSE, g_crash_tid);
+    STACKFRAME64 sf;
+    memset(&sf, 0, sizeof sf);
+    sf.AddrPC.Offset = ctx.Rip;    sf.AddrPC.Mode = AddrModeFlat;
+    sf.AddrFrame.Offset = ctx.Rsp; sf.AddrFrame.Mode = AddrModeFlat;
+    sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+    fprintf(stderr, "  call stack (innermost first):\n");
+    for (int i = 0; i < 60; i++) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, th ? th : GetCurrentThread(), &sf, &ctx, NULL,
+                         SymFunctionTableAccess64, SymGetModuleBase64, NULL) || !sf.AddrPC.Offset)
+            break;
+        char buf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
+        si->SizeOfStruct = sizeof(SYMBOL_INFO);
+        si->MaxNameLen = 255;
+        DWORD64 disp = 0;
+        if (SymFromAddr(proc, sf.AddrPC.Offset, &disp, si))
+            fprintf(stderr, "    #%-2d %s+0x%llx\n", i, si->Name, (unsigned long long)disp);
+        else
+            fprintf(stderr, "    #%-2d 0x%llX\n", i, (unsigned long long)sf.AddrPC.Offset);
+    }
+    if (th) CloseHandle(th);
+}
+
+static void crash_report(EXCEPTION_POINTERS *ep) {
     /* The report also goes to crash_log.txt: run.bat shows stderr only in the
      * console, which closes with the game. */
     if (g_crash_path[0]) {
@@ -1199,6 +1226,7 @@ static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
         DWORD64 disp = 0;
         if (SymFromAddr(proc, (DWORD64)(uintptr_t)er->ExceptionAddress, &disp, si))
             fprintf(stderr, "  in %s+0x%llx\n", si->Name, (unsigned long long)disp);
+        crash_walk_stack(proc, *ep->ContextRecord);
     }
     fprintf(stderr, "  last recompiled function entered: 0x%08X\n", psp_trace_last());
     for (int i = 0; i < 32; i += 4)
@@ -1207,6 +1235,22 @@ static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
                 psp_reg_names[i + 2], psp_cpu.r[i + 2], psp_reg_names[i + 3], psp_cpu.r[i + 3]);
     psp_sched_dump(stderr);
     fflush(stderr);
+}
+
+static DWORD WINAPI crash_report_thread(LPVOID p) { crash_report((EXCEPTION_POINTERS *)p); return 0; }
+
+static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
+    static int once;
+    if (once++) return EXCEPTION_CONTINUE_SEARCH;
+    g_crash_tid = GetCurrentThreadId();
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW) {
+        /* No stack is left to report on (the handler itself used to die silently):
+         * do it on a fresh thread while this one waits. */
+        HANDLE t = CreateThread(NULL, 1u << 20, crash_report_thread, ep, 0, NULL);
+        if (t) { WaitForSingleObject(t, 60000); CloseHandle(t); }
+    } else {
+        crash_report(ep);
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 #endif

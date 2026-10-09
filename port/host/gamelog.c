@@ -523,7 +523,7 @@ static void hook_game_fatal(void (*original)(void)) {
 
 static void hook_pattern_key(void (*original)(void)) {
     const int32_t index = (int32_t)psp_cpu.r[4];
-    if (index > 10000 || index < 0) {
+    if (index > 10000) {                /* the game's own "Large PatternIndex Error." case; -1 is normal ("no pattern") */
         char where[400] = "";
         game_stack(where, sizeof where, 16);
         logf_line("[game error] pattern key: index %d (limit 10000), a1 %d, f12 %f, a2 0x%08X a3 0x%08X  [game: %s]",
