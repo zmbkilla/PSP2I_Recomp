@@ -3,12 +3,13 @@
  * The prod build takes no command line. Everything is found from the folder
  * psp2i.exe is in ("the root"):
  *
- *   <root>\GameData\disc\PSP_GAME\PARAM.SFO, USRDIR\   the game disc (extracted UMD)
- *   <root>\EBOOT.BIN                                  the decrypted game EBOOT, or else
- *   <root>\GameData\disc\PSP_GAME\SYSDIR\EBOOT.BIN
+ *   <root>\*.iso or <root>\GameData\*.iso            the game disc image, or else
+ *   <root>\GameData\disc\PSP_GAME\PARAM.SFO, USRDIR\   the extracted disc
+ *   <root>\EBOOT.BIN                                  a decrypted game EBOOT, or else the
+ *                                                     disc's PSP_GAME\SYSDIR\EBOOT.BIN
  *   <root>\GameData\flash\font\*.pgf                  the PSP firmware fonts
  *   <root>\SDL3.dll                                   controllers, sound
- *   <root>\avcodec-*.dll, avutil-*.dll, swresample-*.dll   FFmpeg (ATRAC music)
+ *   <root>\psp2i_atrac.dll                            the ATRAC music decoder
  *
  * The EBOOT must be a decrypted (plain ELF) NPJH50332 EBOOT: its code region
  * is checked against the code this build was recompiled from (the revival's
@@ -16,6 +17,8 @@
  * is listed in one message box, and the program exits.
  */
 #include "prod.h"
+
+#include <psprecomp/hle.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -70,6 +73,8 @@ static void add(char *out, size_t cap, const char *fmt, const char *arg) {
     snprintf(out + n, cap - n, fmt, arg);
 }
 
+static const char *check_eboot_buf(uint8_t *b, long len);
+
 /* NULL if the EBOOT at `path` is usable, else why not. */
 static const char *check_eboot(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -81,6 +86,11 @@ static const char *check_eboot(const char *path) {
     const int ok = b && fread(b, 1, (size_t)len, f) == (size_t)len;
     fclose(f);
     if (!ok) { free(b); return "cannot be read"; }
+    return check_eboot_buf(b, len);
+}
+
+/* The same for an EBOOT in memory (taken and freed). */
+static const char *check_eboot_buf(uint8_t *b, long len) {
     const char *why = NULL;
     if (len >= 4 && !memcmp(b, "~PSP", 4)) why = "is encrypted (~PSP): decrypt it first";
     else if (len < 52 || memcmp(b, "\x7F" "ELF", 4) != 0) why = "is not a PSP ELF";
@@ -104,26 +114,57 @@ static const char *check_eboot(const char *path) {
     return why;
 }
 
-int prod_check(const char *dir, char *root, size_t root_cap, char *eboot, size_t eboot_cap) {
+/* The first *.iso in `d`, into out; 0 if there is none. */
+static int find_iso_in(const char *d, char *out, size_t cap) {
+#ifdef _WIN32
+    char pat[800];
+    snprintf(pat, sizeof pat, "%s\\*.iso", d);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    FindClose(h);
+    snprintf(out, cap, "%s\\%s", d, fd.cFileName);
+    return 1;
+#else
+    (void)d; (void)out; (void)cap;
+    return 0;
+#endif
+}
+
+int prod_check(const char *dir, char *root, size_t root_cap, char *eboot, size_t eboot_cap,
+               char *iso, size_t iso_cap) {
     char missing[4096] = "", p[800];
     snprintf(root, root_cap, "%s\\GameData", dir);
 
     if (!dir_exists(root)) add(missing, sizeof missing, "  - the GameData folder: %s\n", root);
-    snprintf(p, sizeof p, "%s\\disc\\PSP_GAME\\PARAM.SFO", root);
-    if (!file_exists(p)) add(missing, sizeof missing, "  - the game disc (extracted UMD): %s\n", p);
-    snprintf(p, sizeof p, "%s\\disc\\PSP_GAME\\USRDIR", root);
-    if (!dir_exists(p)) add(missing, sizeof missing, "  - the game data folder: %s\n", p);
+    iso[0] = '\0';
+    if (find_iso_in(dir, iso, iso_cap) || find_iso_in(root, iso, iso_cap)) {
+        if (psp_io_open_disc_image(iso) != 0) {
+            add(missing, sizeof missing, "  - a PSP disc image: %s is not one\n", iso);
+        }
+    } else {
+        snprintf(p, sizeof p, "%s\\disc\\PSP_GAME\\PARAM.SFO", root);
+        if (!file_exists(p)) add(missing, sizeof missing, "  - the game: an .iso next to psp2i.exe, or the extracted disc (%s)\n", p);
+    }
 
     snprintf(eboot, eboot_cap, "%s\\EBOOT.BIN", dir);
-    if (!file_exists(eboot)) snprintf(eboot, eboot_cap, "%s\\disc\\PSP_GAME\\SYSDIR\\EBOOT.BIN", root);
-    if (!file_exists(eboot)) add(missing, sizeof missing, "  - the game EBOOT: %s (or EBOOT.BIN next to psp2i.exe)\n", eboot);
-    else {
-        const char *why = check_eboot(eboot);
-        if (why) {
-            char line[1000];
-            snprintf(line, sizeof line, "  - a usable EBOOT: %s %s\n", eboot, why);
-            add(missing, sizeof missing, "%s", line);
-        }
+    if (!file_exists(eboot)) {
+        if (iso[0]) eboot[0] = '\0';
+        else snprintf(eboot, eboot_cap, "%s\\disc\\PSP_GAME\\SYSDIR\\EBOOT.BIN", root);
+    }
+    const char *why = NULL;
+    if (eboot[0]) {
+        if (!file_exists(eboot)) add(missing, sizeof missing, "  - the game EBOOT: %s (or EBOOT.BIN next to psp2i.exe)\n", eboot);
+        else why = check_eboot(eboot);
+    } else if (psp_io_has_disc_image()) {
+        uint32_t len = 0;
+        uint8_t *b = psp_io_disc_file("PSP_GAME/SYSDIR/EBOOT.BIN", &len);
+        why = b ? check_eboot_buf(b, (long)len) : "is missing from the disc image";
+    }
+    if (why) {
+        char line[1000];
+        snprintf(line, sizeof line, "  - a usable EBOOT: %s %s\n", eboot[0] ? eboot : "the disc image's EBOOT.BIN", why);
+        add(missing, sizeof missing, "%s", line);
     }
 
     for (size_t i = 0; i < sizeof FONTS / sizeof FONTS[0]; i++) {
@@ -133,16 +174,14 @@ int prod_check(const char *dir, char *root, size_t root_cap, char *eboot, size_t
 
     snprintf(p, sizeof p, "%s\\SDL3.dll", dir);
     if (!file_exists(p)) add(missing, sizeof missing, "  - %s\n", p);
-    if (!glob_exists(dir, "avcodec-*.dll"))    add(missing, sizeof missing, "  - FFmpeg: avcodec-*.dll next to psp2i.exe%s\n", "");
-    if (!glob_exists(dir, "avutil-*.dll"))     add(missing, sizeof missing, "  - FFmpeg: avutil-*.dll next to psp2i.exe%s\n", "");
-    if (!glob_exists(dir, "swresample-*.dll")) add(missing, sizeof missing, "  - FFmpeg: swresample-*.dll next to psp2i.exe%s\n", "");
+    if (!glob_exists(dir, "psp2i_atrac.dll")) add(missing, sizeof missing, "  - the music decoder: psp2i_atrac.dll next to psp2i.exe%s\n", "");
 
     if (!missing[0]) return 0;
     char msg[5000];
     snprintf(msg, sizeof msg,
              "PSP2i cannot start. These are missing or unusable:\n\n%s\n"
              "Folder layout (next to psp2i.exe):\n"
-             "  GameData\\disc\\PSP_GAME\\...   the extracted game disc\n"
+             "  <game>.iso                    the game disc image (or GameData\\disc\\PSP_GAME\\...)\n"
              "  GameData\\flash\\font\\*.pgf    the PSP firmware fonts\n"
              "See README.txt.", missing);
     fprintf(stderr, "%s\n", msg);

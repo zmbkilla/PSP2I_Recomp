@@ -190,3 +190,10 @@ if(WIN32 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/atrac_probe.c)
     target_include_directories(atrac_probe PRIVATE host ${PSPRECOMP_DIR}/tools/allegrexrecomp)
     target_link_libraries(atrac_probe PRIVATE psprecomp)
 endif()
+
+# iso_check: compare a disc image served by the runtime with the extracted files (local tool).
+if(WIN32 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/iso_check.c)
+    add_executable(iso_check tools/iso_check.c ${PSPRECOMP_DIR}/tools/allegrexrecomp/crypto/sha1.c)
+    target_include_directories(iso_check PRIVATE ${PSPRECOMP_DIR}/tools/allegrexrecomp)
+    target_link_libraries(iso_check PRIVATE psprecomp)
+endif()

@@ -4,9 +4,11 @@
 
 #include <stddef.h>
 
-/* Find the game data from the exe's folder `dir`: fills root (GameData) and
- * eboot. Returns 0 when everything is there; otherwise shows one error
- * listing what is missing and returns nonzero (the caller exits). */
-int prod_check(const char *dir, char *root, size_t root_cap, char *eboot, size_t eboot_cap);
+/* Find the game data from the exe's folder `dir`: fills root (GameData),
+ * iso (the disc image, or "" for the extracted disc) and eboot ("" = the
+ * disc image's own). Returns 0 when everything is there; otherwise shows one
+ * error listing what is missing and returns nonzero (the caller exits). */
+int prod_check(const char *dir, char *root, size_t root_cap, char *eboot, size_t eboot_cap,
+               char *iso, size_t iso_cap);
 
 #endif

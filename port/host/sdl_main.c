@@ -17,8 +17,11 @@
  * (Android/data/<package>/files, reachable over USB or with a file manager;
  * elsewhere next to the executable or in $PSP2I_DATA):
  *
- *   GameData/disc/     the disc's files (PSP_GAME/...); its SYSDIR/EBOOT.BIN is
- *                      used when it is decrypted
+ *   the game           an ISO: on Android picked on first start (remembered),
+ *                      elsewhere psp2i.ini iso=<path>; or the extracted files
+ *                      in GameData/disc/ (PSP_GAME/...)
+ *   GameData/flash/    the PSP fonts (on Android copied in from a folder the
+ *                      user picks, once)
  *   EBOOT.BIN          optional: a decrypted EBOOT, when the disc's is encrypted
  *   GameData/ms/       the memory stick (saves), created on first save
  *   psp2i.ini          optional: fps=60, touch=off
@@ -91,10 +94,8 @@ static uint8_t *read_file(const char *path, size_t *len) {
 }
 
 /* Place the PT_LOAD segments; $gp and the name from .rodata.sceModuleInfo. */
-static int load_elf(const char *path, module_info *mi) {
-    size_t len = 0;
-    uint8_t *b = read_file(path, &len);
-    if (!b) return -1;
+/* (The ELF's bytes are taken and freed.) -2 if it is not a decrypted ELF. */
+static int load_elf_buf(uint8_t *b, size_t len, module_info *mi) {
     const Elf32_Ehdr *eh = (const Elf32_Ehdr *)b;
     if (len < sizeof *eh || memcmp(eh->ident, "\x7F" "ELF", 4) != 0 || eh->machine != 8) { free(b); return -2; }
     memset(mi, 0, sizeof *mi);
@@ -450,17 +451,125 @@ static void find_base(void) {
     if (n > 1 && (g_base[n - 1] == '/' || g_base[n - 1] == '\\')) g_base[n - 1] = '\0';
 }
 
+static char g_iso_path[1024];            /* psp2i.ini iso= (desktop; Android asks) */
+
 static int read_ini(int *fps) {
-    char path[1100], line[128];
+    char path[1100], line[1100];
     snprintf(path, sizeof path, "%s/psp2i.ini", g_base);
     FILE *f = fopen(path, "r");
     if (!f) return 0;
     while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = '\0';
         if (!strncmp(line, "fps=", 4)) *fps = atoi(line + 4) >= 60 ? 60 : 30;
         else if (!strncmp(line, "touch=", 6)) g_touch_on = strncmp(line + 6, "off", 3) != 0;
+        else if (!strncmp(line, "iso=", 4)) snprintf(g_iso_path, sizeof g_iso_path, "%s", line + 4);
     }
     fclose(f);
     return 1;
+}
+
+static int path_exists(const char *p) { return SDL_GetPathInfo(p, NULL); }
+
+#ifdef SDL_PLATFORM_ANDROID
+#include <jni.h>
+
+/* PSP2iActivity's static helpers (they show Android's pickers and wait). */
+static jclass activity_class(JNIEnv **env) {
+    *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!*env || !act) return NULL;
+    jclass c = (**env)->GetObjectClass(*env, act);
+    (**env)->DeleteLocalRef(*env, act);
+    return c;
+}
+
+/* A file descriptor for the game's ISO, asking for it when `choose` is set
+ * or none is remembered; -1 if the user declined. */
+static int android_open_iso(int choose) {
+    JNIEnv *env;
+    jclass c = activity_class(&env);
+    if (!c) return -1;
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "openGameImage", "(Z)I");
+    const int fd = m ? (*env)->CallStaticIntMethod(env, c, m, (jboolean)(choose != 0)) : -1;
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, c);
+    return fd;
+}
+
+/* Copy the PSP fonts (flash/) from a folder the user picks into the app. */
+static int android_copy_fonts(void) {
+    JNIEnv *env;
+    jclass c = activity_class(&env);
+    if (!c) return 0;
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "copyFonts", "()Z");
+    const int ok = m ? (*env)->CallStaticBooleanMethod(env, c, m) : 0;
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, c);
+    return ok;
+}
+#endif
+
+/* Where the game comes from. With GameData/disc/ in the files folder: the
+ * extracted files, as on Windows. Otherwise a disc image -- on Android the
+ * ISO the user picks (remembered), elsewhere psp2i.ini iso=. A decrypted
+ * EBOOT.BIN in the files folder overrides the disc's. Returns the EBOOT's
+ * bytes (malloc'd) or NULL, having told the user why. */
+static uint8_t *find_game(const char *root, size_t *len) {
+    char p[1300], msg[1600];
+    snprintf(p, sizeof p, "%s/disc/PSP_GAME", root);
+    const int extracted = path_exists(p);
+    if (!extracted) {
+#ifdef SDL_PLATFORM_ANDROID
+        for (int attempt = 0; ; attempt++) {
+            const int fd = android_open_iso(attempt > 0);
+            if (fd < 0) { fail("No game ISO was chosen."); return NULL; }
+            FILE *f = fdopen(fd, "rb");
+            if (f && psp_io_set_disc_image(f) == 0) break;
+            if (f) fclose(f);
+            if (attempt >= 3) { fail("That file is not a PSP disc image (.iso)."); return NULL; }
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "PSP2i", "That file is not a PSP disc image (.iso). Choose the game's ISO.", g_win);
+        }
+#else
+        if (!g_iso_path[0] || psp_io_open_disc_image(g_iso_path) != 0) {
+            snprintf(msg, sizeof msg, "No game found.\n\nPut iso=<path to the game's .iso> in %s/psp2i.ini, "
+                                      "or the extracted files in %s/disc/.", g_base, root);
+            fail(msg);
+            return NULL;
+        }
+#endif
+    }
+    snprintf(p, sizeof p, "%s/EBOOT.BIN", g_base);
+    size_t n = 0;
+    uint8_t *b = read_file(p, &n);
+    if (b) fprintf(stderr, "eboot: %s\n", p);
+    if (!b && extracted) {
+        snprintf(p, sizeof p, "%s/disc/PSP_GAME/SYSDIR/EBOOT.BIN", root);
+        b = read_file(p, &n);
+    }
+    if (!b && !extracted) {
+        uint32_t l = 0;
+        b = psp_io_disc_file("PSP_GAME/SYSDIR/EBOOT.BIN", &l);
+        n = l;
+    }
+    if (!b) { fail("The disc has no PSP_GAME/SYSDIR/EBOOT.BIN."); return NULL; }
+    if (n < 4 || memcmp(b, "\x7F" "ELF", 4) != 0) {
+        snprintf(msg, sizeof msg, "The disc's EBOOT.BIN is encrypted. Put a decrypted EBOOT.BIN in:\n%s", g_base);
+        fail(msg);
+        free(b);
+        return NULL;
+    }
+
+    /* The PSP's fonts: GameData/flash/ (on Android, copied in once). */
+    snprintf(p, sizeof p, "%s/flash/font", root);
+#ifdef SDL_PLATFORM_ANDROID
+    if (!path_exists(p) && !android_copy_fonts())
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "PSP2i",
+            "The PSP fonts were not found (GameData/flash/font). The game's text may not show.", g_win);
+#else
+    if (!path_exists(p)) fprintf(stderr, "psp2i: no fonts in %s; the game's text may not show\n", p);
+#endif
+    *len = n;
+    return b;
 }
 
 int main(int argc, char **argv) {
@@ -510,26 +619,15 @@ int main(int argc, char **argv) {
     return 1;
 #endif
 
-    char eboot[1100], root[1100], msg[2600];
-    snprintf(eboot, sizeof eboot, "%s/EBOOT.BIN", g_base);
-    snprintf(root, sizeof root, "%s/GameData", g_base);
+    char root[1100];
+    snprintf(root, sizeof root, "%s/GameData", g_base);    /* fonts (flash/), saves (ms/), extracted disc */
     if (psp_mem_init() != 0) { fail("Out of memory."); return 1; }
     psp_cpu_reset();
+    size_t elf_len = 0;
+    uint8_t *elf = find_game(root, &elf_len);
+    if (!elf) return 1;
     module_info mi;
-    int le = load_elf(eboot, &mi);
-    if (le == -1) {                     /* none beside GameData: the disc's own, if it is decrypted */
-        snprintf(eboot, sizeof eboot, "%s/disc/PSP_GAME/SYSDIR/EBOOT.BIN", root);
-        le = load_elf(eboot, &mi);
-    }
-    if (le != 0) {
-        if (le == -1)
-            snprintf(msg, sizeof msg, "The game files were not found.\n\nCopy the GameData folder (with disc/PSP_GAME inside) to:\n%s", g_base);
-        else
-            snprintf(msg, sizeof msg, "%s is encrypted. Put a decrypted EBOOT.BIN next to the GameData folder in:\n%s", eboot, g_base);
-        fail(msg);
-        return 1;
-    }
-    fprintf(stderr, "eboot: %s\n", eboot);
+    if (load_elf_buf(elf, elf_len, &mi) != 0) { fail("The EBOOT could not be loaded (see psp2i_log.txt)."); return 1; }
     fprintf(stderr, "module '%s': entry 0x%08X, gp 0x%08X\n", mi.name, mi.entry, mi.gp);
 
     psp_hle_init();
