@@ -308,7 +308,7 @@ static login_state g_login;
 static uint32_t    g_login_keys;          /* MI_* from navigation keys while a text screen is open */
 /* The settings menu's SEGA SERVER editor (textedit.c). */
 static textedit    g_sega_edit;
-static int         g_edit_adhoc;            /* the editor is open for ADHOC SERVER (else SEGA SERVER) */
+static int         g_edit_adhoc;            /* the editor is open for: 0 SEGA SERVER, 1 ADHOC SERVER, 2 MODERN SERVER */
 static int         g_edit_enter;          /* Enter pressed in the editor: save */
 
 static int text_ui_open(void) { return g_login.state != LOGIN_CLOSED || g_sega_edit.open; }
@@ -887,6 +887,7 @@ static void menu_step(void) {
 
     snprintf(g_menu.sega, sizeof g_menu.sega, "%s", online_sega_redirect());
     snprintf(g_menu.adhoc, sizeof g_menu.adhoc, "%s", online_adhoc_server());
+    snprintf(g_menu.modern, sizeof g_menu.modern, "%s", online_modern_server());
     g_menu.adhoc_mode = online_adhoc_mode();
     if (g_sega_edit.open) {
         /* The text editor (SEGA SERVER or ADHOC SERVER) has the input (pad
@@ -894,7 +895,10 @@ static void menu_step(void) {
         const uint32_t pad = g_script_bits | g_pad_bits;
         int r = textedit_update(&g_sega_edit, menu_inputs_from_psp(pad & 0xFFFF, ax, ay) | g_login_keys, pad);
         if (g_edit_enter) { g_edit_enter = 0; g_sega_edit.open = 0; r = TE_SAVE; }
-        if (r == TE_SAVE && g_edit_adhoc) {
+        if (r == TE_SAVE && g_edit_adhoc == 2) {
+            online_set_modern_server(g_sega_edit.text);
+            fprintf(stderr, "menu: modern server %s\n", online_modern_server());
+        } else if (r == TE_SAVE && g_edit_adhoc) {
             online_set_adhoc_server(g_sega_edit.text);
             fprintf(stderr, "menu: ad hoc server %s\n", online_adhoc_server());
         } else if (r == TE_SAVE) {
@@ -916,6 +920,18 @@ static void menu_step(void) {
     if (fx & MFX_EDIT_ADHOC) {
         textedit_open(&g_sega_edit, "ADHOC SERVER", "HOST[:PORT] (DEFAULT PORT 27312)", online_adhoc_server());
         g_edit_adhoc = 1;
+    }
+    if (fx & MFX_EDIT_MODERN) {
+        textedit_open(&g_sega_edit, "MODERN SERVER", "HOST, OR THE HOSTING PLAYER (IPV4 OR IPV6)", online_modern_server());
+        g_edit_adhoc = 2;
+    }
+    if (fx & MFX_OPENED) {                    /* what the others type to join, if this game hosts modern */
+        char v4[64], v6[64];
+        psp_adhoc_host_addresses(v4, sizeof v4, v6, sizeof v6);
+        const char *ms = online_modern_server();
+        if (!ms[0] || !strcmp(ms, "host"))
+            snprintf(g_menu.share, sizeof g_menu.share, "%s%s%s", v6[0] ? v6 : v4, v6[0] && v4[0] ? " / " : "", v6[0] ? v4 : "");
+        else g_menu.share[0] = '\0';
     }
     if (fx & MFX_ADHOC_MODE) {
         online_set_adhoc_mode(g_menu.adhoc_mode);

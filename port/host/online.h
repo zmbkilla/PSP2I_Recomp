@@ -26,6 +26,10 @@ void        online_set_sega_redirect(const char *target);
 /* Ad hoc (psp2i_online.ini adhoc_server / adhoc_mode): host[:port], and
  * PSP_ADHOC_MODE_PPSSPP_DIRECT, _PPSSPP_RELAY or _MODERN (psprecomp/net.h). */
 const char *online_adhoc_server(void);
+/* The modern connection's own server (psp2i_online.ini modern_server): "host"
+ * runs it in this game; else the address of the player or machine hosting. */
+const char *online_modern_server(void);
+void        online_set_modern_server(const char *server);
 int         online_adhoc_mode(void);
 void        online_set_adhoc_server(const char *server);
 void        online_set_adhoc_mode(int mode);

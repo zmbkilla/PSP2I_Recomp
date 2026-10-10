@@ -10,7 +10,7 @@ static const char KEYS[TE_ROWS][TE_COLS + 1] = {
     "abcdefghij",
     "klmnopqrst",
     "uvwxyz.-_:",
-    "/<<<<<   >",       /* '/' ; "<" = delete, ' ' = space-free filler, '>' = save */
+    "/<<<<<[] >",       /* '/' ; "<" = delete, '[' ']' for IPv6 with a port, ' ' = filler, '>' = save */
 };
 
 char textedit_key(int x, int y) {

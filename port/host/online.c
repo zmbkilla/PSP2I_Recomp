@@ -56,6 +56,14 @@
  *   adhoc_stun=stun.l.google.com:19302   modern: STUN server (empty = none)
  *   adhoc_modern_port=27320      modern: the UDP port (all players should match;
  *                                forwarding it, if possible, always works)
+ *   modern_server=host           modern only (never a PPSSPP server): "host" runs
+ *                                the built-in server in this game -- the others
+ *                                type this machine's address (the settings menu
+ *                                shows it; IPv6 works through carrier-grade NAT
+ *                                where the ISP gives IPv6) -- or the address of
+ *                                the player / machine hosting: IPv4, IPv6 or a
+ *                                name, [v6]:port or v4:port for another port
+ *   modern_port=27330            modern: the server's TCP port (relay: the next)
  *
  * Logs: online_log.txt next to the exe -- network events, sign-in progress
  * (never the password), and every HTTP request with the game's handling of
@@ -105,6 +113,8 @@ static int  g_adhoc_offset = 10000;
 static int  g_adhoc_relay_port = 27313;
 static char g_adhoc_stun[256] = "stun.l.google.com:19302";
 static int  g_adhoc_modern_port = 27320;
+static char g_modern_server[256] = "host";
+static int  g_modern_port = 27330;
 
 static const char *const ADHOC_MODE_KEY[3] = { "ppsspp_direct", "ppsspp_relay", "modern" };
 static const char *const ADHOC_MODE_TEXT[3] = { "PPSSPP style, direct", "PPSSPP style, relayed", "modern (NAT traversal)" };
@@ -133,6 +143,8 @@ static void adhoc_apply(void) {
     ac.nickname = g_online_name[0] ? g_online_name : (g_user[0] ? g_user : "PSP2i");
     ac.stun_server = g_adhoc_stun;
     ac.mesh_port = (uint16_t)g_adhoc_modern_port;
+    ac.modern_server = g_modern_server;
+    ac.modern_port = (uint16_t)g_modern_port;
     psp_adhoc_configure(&ac);
 }
 
@@ -155,6 +167,9 @@ static void cfg_save(void) {
                "; the server's relay; modern = direct hosting through NAT traversal (CGNAT too; recomp players only)\n");
     fprintf(f, "adhoc_server=%s\nadhoc_mode=%s\nadhoc_port_offset=%d\nadhoc_relay_port=%d\nadhoc_stun=%s\nadhoc_modern_port=%d\n",
             g_adhoc_server, ADHOC_MODE_KEY[g_adhoc_mode], g_adhoc_offset, g_adhoc_relay_port, g_adhoc_stun, g_adhoc_modern_port);
+    fprintf(f, "; Modern only, never a PPSSPP server: host = this game hosts (others type its address, shown in\n"
+               "; the settings menu), else the hosting player's address (IPv4, IPv6 or name; [v6]:port, v4:port)\n");
+    fprintf(f, "modern_server=%s\nmodern_port=%d\n", g_modern_server, g_modern_port);
     fclose(f);
 }
 
@@ -185,6 +200,8 @@ static void cfg_load(void) {
         else if (!strcmp(line, "adhoc_relay_port")) g_adhoc_relay_port = atoi(e) > 0 ? atoi(e) : 27313;
         else if (!strcmp(line, "adhoc_stun")) snprintf(g_adhoc_stun, sizeof g_adhoc_stun, "%s", e);
         else if (!strcmp(line, "adhoc_modern_port")) g_adhoc_modern_port = atoi(e) > 0 && atoi(e) < 65536 ? atoi(e) : 27320;
+        else if (!strcmp(line, "modern_server")) snprintf(g_modern_server, sizeof g_modern_server, "%s", e[0] ? e : "host");
+        else if (!strcmp(line, "modern_port")) g_modern_port = atoi(e) > 0 && atoi(e) < 65535 ? atoi(e) : 27330;
         else continue;
         seen++;
     }
@@ -192,11 +209,18 @@ static void cfg_load(void) {
     /* An ini written with the earlier single-name default: add the patched
      * EBOOT's name, or a redirect would miss it. */
     if (!strcmp(g_sega_host, "game.psp2infinity.jp")) { snprintf(g_sega_host, sizeof g_sega_host, "%s", SEGA_HOSTS_DEFAULT); seen = 0; }
-    if (seen < 16) cfg_save();          /* add any keys a older file lacks */
+    if (seen < 18) cfg_save();          /* add any keys a older file lacks */
     adhoc_apply();
 }
 
 const char *online_adhoc_server(void) { return g_adhoc_server; }
+const char *online_modern_server(void) { return g_modern_server; }
+void online_set_modern_server(const char *s) {
+    snprintf(g_modern_server, sizeof g_modern_server, "%s", s && s[0] ? s : "host");
+    cfg_save();
+    adhoc_apply();
+    online_log("settings: modern server %s (saved; used from the next ad hoc session)", g_modern_server);
+}
 int online_adhoc_mode(void) { return g_adhoc_mode; }
 void online_set_adhoc_server(const char *s) {
     if (s && s[0]) snprintf(g_adhoc_server, sizeof g_adhoc_server, "%s", s);

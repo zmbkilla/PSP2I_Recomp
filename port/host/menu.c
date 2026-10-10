@@ -94,6 +94,7 @@ static int change(menu_state *m, int dir) {
     case MENU_FPS_COUNTER: m->show_fps = !m->show_fps;      return MFX_SHOW_FPS;
     case MENU_SEGA_SERVER: return dir == 0 ? MFX_EDIT_SEGA : 0;
     case MENU_ADHOC_SERVER: return dir == 0 ? MFX_EDIT_ADHOC : 0;
+    case MENU_MODERN_SERVER: return dir == 0 ? MFX_EDIT_MODERN : 0;
     case MENU_ADHOC_MODE:  m->adhoc_mode = (m->adhoc_mode + (dir < 0 ? 2 : 1)) % 3; return MFX_ADHOC_MODE;
     case MENU_RENDERER:    m->renderer = (m->renderer + 1) % REN_MENU_CHOICES; return MFX_RENDERER;
     case MENU_MASTER_VOL: case MENU_MUSIC_VOL: case MENU_SFX_VOL: {
@@ -221,6 +222,7 @@ static const struct { char c; uint8_t r[7]; } FONT[] = {
     { '*', { 0x00,0x04,0x15,0x0E,0x15,0x04,0x00 } }, { '_', { 0x00,0x00,0x00,0x00,0x00,0x00,0x1F } },
     { '@', { 0x0E,0x11,0x17,0x15,0x17,0x10,0x0E } }, { '!', { 0x04,0x04,0x04,0x04,0x04,0x00,0x04 } },
     { '?', { 0x0E,0x11,0x01,0x02,0x04,0x00,0x04 } }, { '#', { 0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A } },
+    { '[', { 0x0E,0x08,0x08,0x08,0x08,0x08,0x0E } }, { ']', { 0x0E,0x02,0x02,0x02,0x02,0x02,0x0E } },
 };
 
 static const uint8_t *glyph(char c) {
@@ -284,11 +286,14 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     y += CELL_H + 8;
 
     static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "SEGA SERVER", "ADHOC SERVER",
-                                                   "ADHOC MODE", "RESOLUTION", "RENDERER", "MASTER VOLUME",
+                                                   "ADHOC MODE", "MODERN SERVER", "RESOLUTION", "RENDERER", "MASTER VOLUME",
                                                    "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "CLOSE" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
+    char modern[32];
+    if (!m->modern[0] || !strcmp(m->modern, "host")) snprintf(modern, sizeof modern, "HOST (THIS GAME)");
+    else snprintf(modern, sizeof modern, "%.25s", m->modern);
     char vol[VOL_N][16], att[24];
     for (int k = 0; k < VOL_N; k++) snprintf(vol[k], sizeof vol[k], "< %d%% >", m->vol[k] * 10);
     if (m->att == ATT_OFF) snprintf(att, sizeof att, "< OFF >");
@@ -310,11 +315,12 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_FPS_COUNTER ? (m->show_fps ? "< ON >" : "< OFF >")
                       : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega : i == MENU_ADHOC_SERVER ? adhoc
                       : i == MENU_ADHOC_MODE ? ADHOC_MODES[m->adhoc_mode % 3]
+                      : i == MENU_MODERN_SERVER ? modern
                       : i == MENU_RESOLUTION ? res : i == MENU_RENDERER ? ren
                       : i >= MENU_MASTER_VOL && i <= MENU_SFX_VOL ? vol[i - MENU_MASTER_VOL]
                       : i == MENU_ATTENUATION ? att : "";
         menu_text(img, x0 + 130, y, v, col);
-        y += CELL_H + 4;
+        y += CELL_H + 3;
     }
     y += 4;
     if (game_fps > 0) snprintf(line, sizeof line, "GAME TIMING NOW: %d FPS", game_fps);
@@ -325,8 +331,13 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     y += CELL_H + 4;
     menu_text(img, x0 + 10, y, "CIRCLE (KEY X): ACCEPT  CROSS (KEY Z): BACK", GREY);
     y += CELL_H + 2;
-    snprintf(line, sizeof line, "%s / R3: CLOSE   D-PAD / ARROWS: MOVE", hotkey ? hotkey : "F1");
-    menu_text(img, x0 + 10, y, line, GREY);
+    if (m->sel == MENU_MODERN_SERVER && m->share[0]) {
+        snprintf(line, sizeof line, "JOIN AT %.38s", m->share);   /* what the others type */
+        menu_text(img, x0 + 10, y, line, YELLOW);
+    } else {
+        snprintf(line, sizeof line, "%s / R3: CLOSE   D-PAD / ARROWS: MOVE", hotkey ? hotkey : "F1");
+        menu_text(img, x0 + 10, y, line, GREY);
+    }
 }
 
 void fps_draw(const fps_meter *fm, menu_image *img) {
