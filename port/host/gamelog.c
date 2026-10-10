@@ -556,6 +556,7 @@ static void hook_hang_pattern(void (*original)(void)) { (void)original; park_han
 static void hook_hang_break(void (*original)(void))   { (void)original; park_hang(0x08B8D840u); }
 
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
+static void atrac_line(const char *line) { logf_line("[atrac] %s", line); }
 
 void gamelog_init(const char *exe_dir) {
     snprintf(g_dir, sizeof g_dir, "%s", exe_dir);
@@ -587,4 +588,5 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08CB1538u, hook_member_netid);
     psp_hook_set(0x08D10ACCu, hook_server_client_netid);
     psp_io_set_ms_log(ms_line);
+    psp_atrac_set_log(atrac_line);
 }
