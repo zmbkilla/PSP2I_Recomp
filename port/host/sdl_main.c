@@ -17,8 +17,9 @@
  * (Android/data/<package>/files, reachable over USB or with a file manager;
  * elsewhere next to the executable or in $PSP2I_DATA):
  *
- *   EBOOT.BIN          the game's decrypted EBOOT (as for the Windows build)
- *   GameData/disc/     the disc's files (PSP_GAME/...)
+ *   GameData/disc/     the disc's files (PSP_GAME/...); its SYSDIR/EBOOT.BIN is
+ *                      used when it is decrypted
+ *   EBOOT.BIN          optional: a decrypted EBOOT, when the disc's is encrypted
  *   GameData/ms/       the memory stick (saves), created on first save
  *   psp2i.ini          optional: fps=60, touch=off
  *   psp2i_log.txt      the log of the last run
@@ -515,14 +516,20 @@ int main(int argc, char **argv) {
     if (psp_mem_init() != 0) { fail("Out of memory."); return 1; }
     psp_cpu_reset();
     module_info mi;
-    const int le = load_elf(eboot, &mi);
+    int le = load_elf(eboot, &mi);
+    if (le == -1) {                     /* none beside GameData: the disc's own, if it is decrypted */
+        snprintf(eboot, sizeof eboot, "%s/disc/PSP_GAME/SYSDIR/EBOOT.BIN", root);
+        le = load_elf(eboot, &mi);
+    }
     if (le != 0) {
-        snprintf(msg, sizeof msg, le == -1
-            ? "EBOOT.BIN not found.\n\nCopy the game's decrypted EBOOT.BIN and its GameData folder (with disc/PSP_GAME inside) to:\n%s"
-            : "%s/EBOOT.BIN is not a decrypted PSP EBOOT.", g_base);
+        if (le == -1)
+            snprintf(msg, sizeof msg, "The game files were not found.\n\nCopy the GameData folder (with disc/PSP_GAME inside) to:\n%s", g_base);
+        else
+            snprintf(msg, sizeof msg, "%s is encrypted. Put a decrypted EBOOT.BIN next to the GameData folder in:\n%s", eboot, g_base);
         fail(msg);
         return 1;
     }
+    fprintf(stderr, "eboot: %s\n", eboot);
     fprintf(stderr, "module '%s': entry 0x%08X, gp 0x%08X\n", mi.name, mi.entry, mi.gp);
 
     psp_hle_init();
