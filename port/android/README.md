@@ -21,10 +21,10 @@ The game's code is C that `allegrexrecomp` generates from your decrypted `EBOOT.
 
    ```
    cd port/android
-   gradle assembleRelease
+   ./gradlew assembleRelease        (gradlew.bat on Windows)
    ```
 
-   - Gradle 8.9 or later is required.
+   - The Gradle wrapper downloads Gradle 8.9 itself (checksum-verified).
    - The first build downloads the newest SDL3 release's source into `port/android/deps/SDL`.
    - To use another SDL checkout, pass `-PsdlDir=<path>`.
    - To also build for emulators, pass `-Pabis=arm64-v8a,x86_64`.
