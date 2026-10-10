@@ -100,6 +100,12 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_LEFT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 0);
     menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_MODERN_SERVER);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_EDIT_MODERN);             /* Circle opens its editor */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_RESOLUTION);
     CHECK(m.res == RES_DEFAULT && m.res == RES_1920x1080);              /* 1080p is the default */
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RES_CHANGED && m.res == RES_2560x1440);
@@ -245,6 +251,8 @@ static void test_buttons(void) {
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_ADHOC_SERVER);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_ADHOC_MODE);
+    CHECK(STEP(0) == 0);
+    CHECK(STEP(DOWN) == 0 && m.sel == MENU_MODERN_SERVER);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RESOLUTION);
     CHECK(STEP(0) == 0);

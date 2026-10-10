@@ -23,7 +23,7 @@ enum {
 
 /* Menu items, top to bottom. */
 enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
-       MENU_RESOLUTION, MENU_RENDERER, MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION,
+       MENU_MODERN_SERVER, MENU_RESOLUTION, MENU_RENDERER, MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION,
        MENU_CLOSE, MENU_ITEMS };
 
 /* Volumes in tenths (0..10 = 0..100%); attenuation while other programs play
@@ -65,6 +65,7 @@ enum {
     MFX_ADHOC_MODE  = 1 << 8,   /* adhoc_mode changed */
     MFX_RENDERER    = 1 << 9,   /* renderer changed: save it (used from the next start) */
     MFX_AUDIO       = 1 << 10,  /* a volume or the attenuation changed: apply and save */
+    MFX_EDIT_MODERN = 1 << 11,  /* Circle on MODERN SERVER: the caller opens its text editor */
 };
 
 typedef struct {
@@ -77,6 +78,8 @@ typedef struct {
     char     sega[64];     /* the SEGA server redirect, shown ("" = off); set by the caller */
     char     adhoc[64];    /* the ad hoc server host[:port], shown; set by the caller */
     int      adhoc_mode;   /* PSP_ADHOC_MODE_*: 0 PPSSPP direct, 1 PPSSPP relay, 2 modern; set by the caller */
+    char     modern[64];   /* the modern server: "host" or an address; set by the caller */
+    char     share[96];    /* while hosting modern: the addresses others type; set by the caller */
     int      renderer;     /* REN_D3D11 / REN_GL: the saved choice */
     int      renderer_now; /* REN_*: the renderer running now (set by the caller) */
     int      vol[VOL_N];   /* 0..VOL_STEPS, tenths */
