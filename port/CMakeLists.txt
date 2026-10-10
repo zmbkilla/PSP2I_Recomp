@@ -36,6 +36,7 @@ add_executable(psp2i
     host/input_sdl.c
     host/audio_sdl.c
     host/atrac_at3.c
+    host/h264_openh264.c
     host/duck_win.c
     host/framerate.c
     host/menu.c
@@ -88,6 +89,42 @@ if(PSP2I_SDL3_PATH)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_SDL3_PATH} $<TARGET_FILE_DIR:psp2i>)
 endif()
 
+# Movies (sceMpeg): H.264 through Cisco's OpenH264 DLL, which the game downloads
+# from Cisco on first start (host/h264_openh264.c; see cmake/FetchOpenH264.cmake
+# for why it is not shipped). The build needs only the decoder's headers and
+# bzip2's decompressor, fetched at configure time.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchOpenH264.cmake)
+psp2i_fetch_openh264(PSP2I_H264_INC PSP2I_BZ2_DIR)
+if(WIN32 AND PSP2I_H264_INC AND PSP2I_BZ2_DIR)
+    add_library(psp2i_bz2 STATIC
+        ${PSP2I_BZ2_DIR}/blocksort.c ${PSP2I_BZ2_DIR}/huffman.c ${PSP2I_BZ2_DIR}/crctable.c
+        ${PSP2I_BZ2_DIR}/randtable.c ${PSP2I_BZ2_DIR}/compress.c ${PSP2I_BZ2_DIR}/decompress.c
+        ${PSP2I_BZ2_DIR}/bzlib.c)
+    target_include_directories(psp2i_bz2 PUBLIC ${PSP2I_BZ2_DIR})
+    target_compile_definitions(psp2i_bz2 PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_include_directories(psp2i PRIVATE ${PSP2I_H264_INC})
+    target_compile_definitions(psp2i PRIVATE PSP2I_OPENH264)
+    target_link_libraries(psp2i PRIVATE psp2i_bz2)
+    file(WRITE ${CMAKE_BINARY_DIR}/_deps/openh264/OpenH264-NOTICE.txt
+"OpenH264 Video Codec provided by Cisco Systems, Inc.
+
+Movies are decoded by Cisco's prebuilt OpenH264 ${PSP2I_OPENH264_VERSION} DLL. It is not
+included: on first start the game downloads it from ciscobinary.openh264.org,
+checks its SHA-256 and keeps it next to the exe. Set openh264=off in
+psp2i_display.ini to stop the download (movies then play black, with sound);
+delete the DLL to remove it. Cisco's binary licence:
+https://www.openh264.org/BINARY_LICENSE.txt
+
+OpenH264-LICENSE.txt: the licence of the OpenH264 headers used to build the game.
+bzip2-LICENSE.txt: bzip2 1.0.8, compiled in to decompress Cisco's download.
+")
+    add_custom_command(TARGET psp2i POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:psp2i>/licenses
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/_deps/openh264/OpenH264-NOTICE.txt $<TARGET_FILE_DIR:psp2i>/licenses/OpenH264-NOTICE.txt
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/_deps/openh264/LICENSE $<TARGET_FILE_DIR:psp2i>/licenses/OpenH264-LICENSE.txt
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PSP2I_BZ2_DIR}/LICENSE $<TARGET_FILE_DIR:psp2i>/licenses/bzip2-LICENSE.txt)
+endif()
+
 # Unit tests for the settings menu, the FPS counter and run-time frame-rate
 # switching (no game data needed): ctest -C Release, or run test_menu.
 enable_testing()
@@ -97,9 +134,12 @@ target_link_libraries(test_menu PRIVATE psprecomp)
 add_test(NAME test_menu COMMAND test_menu)
 
 # rpcn_probe: check an RPCN server (TLS, protocol version, refusal of a bad login).
-add_executable(rpcn_probe tools/rpcn_probe.c host/rpcn.c host/tls.c)
-if(WIN32)
-    target_link_libraries(rpcn_probe PRIVATE secur32 crypt32 ws2_32)
+# (port/tools/ is local-only, not in the repository: these are skipped without it.)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/rpcn_probe.c)
+    add_executable(rpcn_probe tools/rpcn_probe.c host/rpcn.c host/tls.c)
+    if(WIN32)
+        target_link_libraries(rpcn_probe PRIVATE secur32 crypt32 ws2_32)
+    endif()
 endif()
 
 if(PSP2I_TRACE)
@@ -129,4 +169,16 @@ if(PSP2I_PROD)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:psp2i_atrac> ${PSP2I_PROD_DIR}
             COMMAND ${CMAKE_COMMAND} -E copy_directory $<TARGET_FILE_DIR:psp2i_atrac>/licenses ${PSP2I_PROD_DIR}/licenses)
     endif()
+    add_custom_command(TARGET psp2i POST_BUILD             # the OpenH264 notice and licences (see above)
+        COMMAND ${CMAKE_COMMAND} -E copy_directory $<TARGET_FILE_DIR:psp2i>/licenses ${PSP2I_PROD_DIR}/licenses)
+endif()
+
+# mpeg_probe: play one .pmf through the runtime's sceMpeg with the host codecs,
+# without the game (pictures, audio frames, the end; saves some pictures).
+if(TARGET psp2i_bz2 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/mpeg_probe.c)
+    add_executable(mpeg_probe tools/mpeg_probe.c host/h264_openh264.c host/atrac_at3.c
+        ${PSPRECOMP_DIR}/tools/allegrexrecomp/crypto/sha1.c)
+    target_include_directories(mpeg_probe PRIVATE host ${PSP2I_H264_INC} ${PSPRECOMP_DIR}/tools/allegrexrecomp)
+    target_compile_definitions(mpeg_probe PRIVATE PSP2I_OPENH264)
+    target_link_libraries(mpeg_probe PRIVATE psprecomp psp2i_bz2 winhttp bcrypt)
 endif()

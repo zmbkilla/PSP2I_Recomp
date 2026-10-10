@@ -67,6 +67,7 @@
 #include "input_sdl.h"
 #include "audio_sdl.h"
 #include "atrac_at3.h"
+#include "h264_openh264.h"
 #include "framerate.h"
 #include "menu.h"
 #include "camera.h"
@@ -786,6 +787,7 @@ static int g_res_saved = RES_DEFAULT;       /* what psp2i_display.ini holds */
 static int g_ren_saved = REN_D3D11;
 static int g_vol_saved[VOL_N] = { VOL_STEPS, VOL_STEPS, VOL_STEPS };
 static int g_att_saved = ATT_DEFAULT;
+static int g_openh264 = 1;                  /* fetch Cisco's OpenH264 for movies (h264_openh264.c) */
 
 /* "80" -> 8 tenths (0..100, rounded to 10%). */
 static int vol_parse(const char *s) {
@@ -805,6 +807,7 @@ static int display_load(void) {
         else if (!strncmp(line, "music_volume=", 13))  g_vol_saved[VOL_MUSIC] = vol_parse(line + 13);
         else if (!strncmp(line, "sfx_volume=", 11))    g_vol_saved[VOL_SFX] = vol_parse(line + 11);
         else if (!strncmp(line, "attenuation=", 12))   g_att_saved = !strncmp(line + 12, "off", 3) ? ATT_OFF : menu_att_parse(atoi(line + 12));
+        else if (!strncmp(line, "openh264=", 9))       g_openh264 = strncmp(line + 9, "off", 3) != 0;
     }
     fclose(f);
     if (res >= 0) g_res_saved = res;
@@ -824,6 +827,8 @@ static void display_save(int res) {
             g_vol_saved[VOL_MASTER] * 10, g_vol_saved[VOL_MUSIC] * 10, g_vol_saved[VOL_SFX] * 10);
     if (g_att_saved == ATT_OFF) fprintf(f, "attenuation=off\n");
     else fprintf(f, "attenuation=%ddb\n", menu_att_db(g_att_saved));
+    fprintf(f, "; movies: on = download Cisco's OpenH264 decoder on first start (licenses/OpenH264-NOTICE.txt), off = black movies\n");
+    fprintf(f, "openh264=%s\n", g_openh264 ? "on" : "off");
     fclose(f);
 }
 
@@ -1904,6 +1909,7 @@ int main(int argc, char **argv) {
     if (want_sdl == 1 || (want_sdl < 0 && !g_headless)) g_sdl_on = input_sdl_init() == 0;
     audio_init(want_audio == 1 || (want_audio < 0 && !g_headless));
     atrac_at3_init(dir);           /* ATRAC music (psp2i_atrac.dll); silent without it */
+    h264_openh264_init(dir, g_openh264);   /* movies; black (with sound) until it is ready */
     if (replay_path) {                         /* a recorded route: its fps unless --fps */
         const int rf = replay_load(replay_path);
         if (rf < 0) return 1;
