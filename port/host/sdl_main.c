@@ -613,12 +613,6 @@ int main(int argc, char **argv) {
     SDL_GL_SetSwapInterval(0);                       /* the scheduler paces frames, not the swap */
     if (gl_load(gl_get) != 0 || gl_ge_init() != 0) { fail("OpenGL ES 3.0 setup failed; see psp2i_log.txt."); return 1; }
 
-#ifdef PSP2I_NO_GAME_CODE
-    fail("This build has no game code. Generate port/gen from your own EBOOT.BIN "
-         "(see port/android/README.md) and build again.");
-    return 1;
-#endif
-
     char root[1100];
     snprintf(root, sizeof root, "%s/GameData", g_base);    /* fonts (flash/), saves (ms/), extracted disc */
     if (psp_mem_init() != 0) { fail("Out of memory."); return 1; }
@@ -626,6 +620,12 @@ int main(int argc, char **argv) {
     size_t elf_len = 0;
     uint8_t *elf = find_game(root, &elf_len);
     if (!elf) return 1;
+#ifdef PSP2I_NO_GAME_CODE
+    /* The setup above still runs, so the game files can be checked with this build. */
+    fail("The game files are set up and usable.\n\nThis build has no game code, though: generate port/gen "
+         "from your own EBOOT.BIN and build the app yourself (see port/android/README.md).");
+    return 1;
+#endif
     module_info mi;
     if (load_elf_buf(elf, elf_len, &mi) != 0) { fail("The EBOOT could not be loaded (see psp2i_log.txt)."); return 1; }
     fprintf(stderr, "module '%s': entry 0x%08X, gp 0x%08X\n", mi.name, mi.entry, mi.gp);
