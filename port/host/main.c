@@ -13,13 +13,19 @@
  *      guest memory, its $gp from the module info;
  *   5. run the scheduler, presenting the framebuffer every vblank.
  *
- * usage: psp2i [--root DIR] [--eboot FILE] [--headless] [--seconds N]
- *              [--capture-every N] [--capture-dir DIR]
+ * usage: psp2i [--root DIR] [--iso FILE | --extracted] [--eboot FILE] [--headless]
+ *              [--seconds N] [--capture-every N] [--capture-dir DIR]
  *
- *   --root      directory holding disc/ (the UMD contents) and ms/ (memory
- *               stick); default: GameData next to the executable, else ./GameData
+ *   --root      directory holding flash/ (the PSP fonts), ms/ (memory stick)
+ *               and, for an extracted disc, disc/; default: GameData next to
+ *               the executable, else ./GameData
+ *   --iso       the game's disc image (.iso), read directly; default: the first
+ *               *.iso next to the executable, in the root, or in the root's
+ *               parent folder
+ *   --extracted use the extracted disc in <root>/disc/ even when an ISO is
+ *               found (the default when there is none)
  *   --eboot     the decrypted EBOOT.BIN; default: EBOOT.BIN next to the
- *               executable, else <root>/disc/PSP_GAME/SYSDIR/EBOOT.BIN
+ *               executable, else the disc's PSP_GAME/SYSDIR/EBOOT.BIN
  *   --headless  no window
  *   --seconds   stop after N seconds of game time and print the report
  *   --capture-every / --capture-dir  dump the framebuffer as PPM every N vblanks
@@ -170,10 +176,17 @@ static uint8_t *read_file(const char *path, size_t *len) {
     return b;
 }
 
+static int load_elf_buf(uint8_t *b, size_t len, const char *path, module_info *mi);
+
 static int load_elf(const char *path, module_info *mi) {
     size_t len = 0;
     uint8_t *b = read_file(path, &len);
     if (!b) { fprintf(stderr, "psp2i: cannot read %s\n", path); return -1; }
+    return load_elf_buf(b, len, path, mi);
+}
+
+/* The ELF in memory (taken and freed); `path` names it in messages. */
+static int load_elf_buf(uint8_t *b, size_t len, const char *path, module_info *mi) {
     const Elf32_Ehdr *eh = (const Elf32_Ehdr *)b;
     if (len < sizeof *eh || memcmp(eh->ident, "\x7F" "ELF", 4) != 0 || eh->machine != 8) {
         fprintf(stderr, "psp2i: %s is not a decrypted MIPS ELF (encrypted EBOOTs must be decrypted first)\n", path);
@@ -1039,6 +1052,38 @@ static void find_word(void) {
 
 static void exe_dir(char *out, size_t cap);
 
+static int dir_exists(const char *p) {
+#ifdef _WIN32
+    const DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    (void)p;
+    return 1;
+#endif
+}
+
+/* The first *.iso next to the exe, in the root, or in the root's parent
+ * (FinalBuild keeps the root at ..\GameData, the image beside it). */
+static void find_iso(const char *dir, const char *root, char *out, size_t cap) {
+#ifdef _WIN32
+    char parent[700];
+    snprintf(parent, sizeof parent, "%s/..", root);
+    const char *const where[3] = { dir, root, parent };
+    for (int i = 0; i < 3; i++) {
+        char pat[760];
+        snprintf(pat, sizeof pat, "%s\\*.iso", where[i]);
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        FindClose(h);
+        snprintf(out, cap, "%s\\%s", where[i], fd.cFileName);
+        return;
+    }
+#else
+    (void)dir; (void)root; (void)out; (void)cap;
+#endif
+}
+
 /* F12: the displayed frame as dumps/frame_<vblank>.ppm and every draw of the
  * next frame as dumps/draws_<vblank>.txt, next to the exe. */
 static void take_dump(uint64_t vb) {
@@ -1693,6 +1738,8 @@ static int exists(const char *p) {
 
 int main(int argc, char **argv) {
     char dir[512], root[600] = "", eboot[700] = "", ms_dir[600] = "";   /* --ms: memory stick elsewhere (tests) */
+    char iso[700] = "";                    /* --iso, or found: the disc image */
+    int extracted = 0;                     /* --extracted: the disc folder even with an ISO about */
     uint32_t oracle_addr = 0;
     const char *renderer = NULL;            /* --renderer; else psp2i_display.ini */
     int res_arg = -1;                       /* --resolution; else psp2i_display.ini */
@@ -1717,6 +1764,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--root") && i + 1 < argc)          snprintf(root, sizeof root, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--eboot") && i + 1 < argc)         snprintf(eboot, sizeof eboot, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--iso") && i + 1 < argc)           snprintf(iso, sizeof iso, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--extracted"))                     extracted = 1;
         else if (!strcmp(argv[i], "--ms") && i + 1 < argc)            snprintf(ms_dir, sizeof ms_dir, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--headless"))                      g_headless = 1;
         else if (!strcmp(argv[i], "--sdl"))                           want_sdl = 1;
@@ -1802,21 +1851,24 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--seconds") && i + 1 < argc)       g_seconds = atof(argv[++i]);
         else if (!strcmp(argv[i], "--capture-every") && i + 1 < argc) g_capture_every = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--capture-dir") && i + 1 < argc)   snprintf(g_capture_dir, sizeof g_capture_dir, "%s", argv[++i]);
-        else { fprintf(stderr, "usage: %s [--root DIR] [--eboot FILE] [--headless] [--seconds N] "
+        else { fprintf(stderr, "usage: %s [--root DIR] [--iso FILE | --extracted] [--eboot FILE] [--headless] [--seconds N] "
                                "[--capture-every N] [--capture-dir DIR]\n", argv[0]); return 2; }
     }
 #ifdef PSP2I_PROD
-    if (prod_check(dir, root, sizeof root, eboot, sizeof eboot) != 0) return 1;
+    if (prod_check(dir, root, sizeof root, eboot, sizeof eboot, iso, sizeof iso) != 0) return 1;
 #endif
     if (!root[0]) {
         snprintf(root, sizeof root, "%s/GameData", dir);
-        char probe[700];
-        snprintf(probe, sizeof probe, "%s/disc/PSP_GAME/PARAM.SFO", root);
-        if (!exists(probe)) snprintf(root, sizeof root, "GameData");
+        if (!dir_exists(root)) snprintf(root, sizeof root, "GameData");
     }
+    if (!iso[0] && !extracted) find_iso(dir, root, iso, sizeof iso);
+    if (extracted) iso[0] = '\0';
     if (!eboot[0]) {
         snprintf(eboot, sizeof eboot, "%s/EBOOT.BIN", dir);
-        if (!exists(eboot)) snprintf(eboot, sizeof eboot, "%s/disc/PSP_GAME/SYSDIR/EBOOT.BIN", root);
+        if (!exists(eboot)) {
+            if (iso[0]) eboot[0] = '\0';                     /* the image's own */
+            else snprintf(eboot, sizeof eboot, "%s/disc/PSP_GAME/SYSDIR/EBOOT.BIN", root);
+        }
     }
     if (g_capture_every || g_noverlay_shot) host_mkdir(g_capture_dir);
     {
@@ -1843,13 +1895,25 @@ int main(int argc, char **argv) {
     timeBeginPeriod(1);
     psp_mem_set_watch_hook(watch_backtrace);
 #endif
-    printf("root:  %s\neboot: %s\n", root, eboot);
+    printf("root:  %s\ndisc:  %s\neboot: %s\n", root, iso[0] ? iso : "extracted (root/disc)",
+           eboot[0] ? eboot : "from the disc image");
 
     if (psp_mem_init() != 0) { fprintf(stderr, "psp2i: psp_mem_init failed\n"); return 1; }
     psp_cpu_reset();
 
     module_info mi;
-    if (load_elf(eboot, &mi) != 0) return 1;
+    if (iso[0] && psp_io_open_disc_image(iso) != 0) {
+        fprintf(stderr, "psp2i: %s is not a PSP disc image (.iso)\n", iso);
+        return 1;
+    }
+    if (eboot[0]) {
+        if (load_elf(eboot, &mi) != 0) return 1;
+    } else {
+        uint32_t len = 0;
+        uint8_t *b = psp_io_disc_file("PSP_GAME/SYSDIR/EBOOT.BIN", &len);
+        if (!b) { fprintf(stderr, "psp2i: %s has no PSP_GAME/SYSDIR/EBOOT.BIN\n", iso); return 1; }
+        if (load_elf_buf(b, len, "the disc image's EBOOT.BIN", &mi) != 0) return 1;
+    }
     printf("module '%s': entry 0x%08X, gp 0x%08X, image 0x%08X..0x%08X\n",
            mi.name, mi.entry, mi.gp, mi.load_lo, mi.load_hi);
 

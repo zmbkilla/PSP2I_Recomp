@@ -5,7 +5,7 @@ An Android build of the recompiled game. It contains the psprecomp runtime, an S
 ## What you need
 
 - A phone or tablet with Android 7.0 or later, arm64, and OpenGL ES 3.0.
-- Your own copy of the game: the disc's files, with a decrypted `EBOOT.BIN`. The Windows build uses the same files.
+- Your own copy of the game: its disc image (.iso, with a decrypted EBOOT), and the PSP fonts (GameData/flash, as for the Windows build).
 
 ## Building a playable APK
 
@@ -34,19 +34,25 @@ The game's code is C that `allegrexrecomp` generates from your decrypted `EBOOT.
 
 ## Setting up the game files
 
-Start the app once. It creates its folder and tells you where it is:
+Copy two things anywhere onto the device (Downloads is fine):
+
+- **the game's ISO**: an `.iso` of the disc whose `PSP_GAME/SYSDIR/EBOOT.BIN` is decrypted
+- **your GameData folder**: the PSP fonts in its `flash/` are copied from it once (the Windows build uses the same folder)
+
+On first start the app asks for each with Android's own file picker: first the ISO, then the GameData folder (or its `flash` folder). It remembers the ISO and keeps a copy of the fonts, so later starts go straight into the game. No storage permission is needed. If the ISO is moved or deleted, the app asks for it again.
+
+The app's own folder, `Android/data/com.psp2i.recomp/files/`, holds:
 
 ```
-Android/data/com.psp2i.recomp/files/
-    GameData/disc/     the disc's files (PSP_GAME/...)
-    GameData/disc_lba.txt, GameData/flash/   as for the Windows build
-    EBOOT.BIN          only if the disc's PSP_GAME/SYSDIR/EBOOT.BIN is encrypted: a decrypted one
-    GameData/ms/       the memory stick, holding saves (created when the game first saves)
-    psp2i.ini          optional settings
-    psp2i_log.txt      the last run's log (include it when reporting a problem)
+GameData/flash/    the copied fonts
+GameData/ms/       the memory stick, holding saves (created when the game first saves)
+psp2i.ini          optional settings
+psp2i_log.txt      the last run's log (include it when reporting a problem)
 ```
 
-To copy files there, connect the device over USB, or use a file manager that can open `Android/data`.
+Saves live there, so uninstalling the app deletes them; copy `GameData/ms` off the device (USB or adb) to keep them.
+
+The extracted layout still works: a `GameData/disc/` folder in the app's folder is used instead of an ISO, and an `EBOOT.BIN` there is used if your disc's EBOOT is encrypted.
 
 ### psp2i.ini
 
