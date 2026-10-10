@@ -182,3 +182,11 @@ if(TARGET psp2i_bz2 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/mpeg_probe.c)
     target_compile_definitions(mpeg_probe PRIVATE PSP2I_OPENH264)
     target_link_libraries(mpeg_probe PRIVATE psprecomp psp2i_bz2 winhttp bcrypt)
 endif()
+
+# atrac_probe: stream one ATRAC3plus track out of a file through the runtime's
+# sceAtrac with the host decoder, as a game does (local tool, like mpeg_probe).
+if(WIN32 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/atrac_probe.c)
+    add_executable(atrac_probe tools/atrac_probe.c host/atrac_at3.c ${PSPRECOMP_DIR}/tools/allegrexrecomp/crypto/sha1.c)
+    target_include_directories(atrac_probe PRIVATE host ${PSPRECOMP_DIR}/tools/allegrexrecomp)
+    target_link_libraries(atrac_probe PRIVATE psprecomp)
+endif()
