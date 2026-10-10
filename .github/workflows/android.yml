@@ -32,15 +32,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+      - uses: gradle/actions/setup-gradle@v4     # caches; the build itself runs the repository's wrapper
 
       - name: Build the APK
         working-directory: port/android
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}    # the SDL release lookup, without the anonymous rate limit
-        run: gradle assembleRelease --no-daemon --stacktrace
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
