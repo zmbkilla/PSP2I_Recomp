@@ -48,7 +48,10 @@ android {
         ndk { abiFilters.addAll(abiList) }
         externalNativeBuild {
             cmake {
-                arguments "-DSDL_DIR=${sdlDir}", '-DANDROID_STL=c++_shared'
+                // at most 4 compiles at once: the game code's parts take ~1-2 GB each
+                arguments "-DSDL_DIR=${sdlDir}", '-DANDROID_STL=c++_shared',
+                          '-DCMAKE_JOB_POOLS=compile=4', '-DCMAKE_JOB_POOL_COMPILE=compile'
+                targets 'main', 'psp2i_atrac'          // not the recompiler or the standalone server
             }
         }
     }

@@ -27,9 +27,21 @@ add_subdirectory(${PSPRECOMP_DIR} psprecomp EXCLUDE_FROM_ALL)
 add_subdirectory(${PORT}/atrac_dll atrac_dll)
 
 if(EXISTS ${PORT}/gen/recomp_funcs.c)
-    set(GAME_SOURCES ${PORT}/gen/recomp_funcs.c ${PORT}/gen/recomp_imports.c)
-    # ~200 MB of C: -O1 keeps the compiler's time and memory bounded on it.
-    set_source_files_properties(${PORT}/gen/recomp_funcs.c PROPERTIES COMPILE_OPTIONS "-O1")
+    # ~200 MB of C in one file is more than clang can hold while optimising
+    # (it ran out of memory with 32 GB): split_gen.py cuts it into parts that
+    # compile alone, without debug information (-g0), at -O1.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(SPLIT_DIR ${CMAKE_BINARY_DIR}/gen_split)
+    execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/split_gen.py
+                            ${PORT}/gen/recomp_funcs.c ${SPLIT_DIR} 24
+                    RESULT_VARIABLE split_rc)
+    if(NOT split_rc EQUAL 0)
+        message(FATAL_ERROR "split_gen.py could not split port/gen/recomp_funcs.c")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PORT}/gen/recomp_funcs.c)
+    file(GLOB GEN_PARTS ${SPLIT_DIR}/recomp_part_*.c)
+    set(GAME_SOURCES ${GEN_PARTS} ${PORT}/gen/recomp_imports.c)
+    set_source_files_properties(${GEN_PARTS} PROPERTIES COMPILE_OPTIONS "-O1;-g0")
     set(HAVE_GAME_CODE ON)
     message(STATUS "PSP2i: building with the game code in port/gen")
 else()
@@ -46,7 +58,7 @@ add_library(main SHARED
     ${PORT}/host/camera.c
     ${PORT}/host/framerate.c
     ${GAME_SOURCES})
-target_include_directories(main PRIVATE ${PORT}/host ${PORT}/gen)
+target_include_directories(main PRIVATE ${PORT}/host ${PORT}/gen ${CMAKE_BINARY_DIR}/gen_split)
 target_compile_definitions(main PRIVATE PSP2I_GLES)
 if(NOT HAVE_GAME_CODE)
     target_compile_definitions(main PRIVATE PSP2I_NO_GAME_CODE)

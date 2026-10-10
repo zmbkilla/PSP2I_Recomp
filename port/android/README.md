@@ -30,6 +30,12 @@ The game's code is C that `allegrexrecomp` generates from your decrypted `EBOOT.
    - To also build for emulators, pass `-Pabis=arm64-v8a,x86_64`.
    - The generated C is large, so expect the first compile to take a while.
 
+   **On Windows without Android Studio:** `port/android/build_local.bat` builds it with a minimal toolchain kept in one folder (`PSP2I_ANDROID_TOOLS`, default `F:\psp2i-android-tools`; about 3 GB for the tools plus 1-2 GB of Gradle cache). That folder holds:
+   - `jdk17\`: a JDK 17 (Temurin zip)
+   - `sdk\`: the command-line tools plus `platforms;android-35`, `build-tools;34.0.0`, `ndk;27.0.12077973` and `cmake;3.22.1`, installed with `sdkmanager --sdk_root=<folder>\sdk`
+
+   The script points Gradle's cache, the SDK's settings and temporary files into that folder too, so nothing goes to C:, and deleting the folder removes everything. It copies the APK to `FinalBuild\psp2i-android.apk`.
+
 3. Install `app/build/outputs/apk/release/app-release.apk`. It is signed with the debug key, so it installs directly. Sign it with your own key before publishing it anywhere.
 
 ## Setting up the game files
