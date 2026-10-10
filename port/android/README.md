@@ -5,7 +5,7 @@ An Android build of the recompiled game. It contains the psprecomp runtime, an S
 ## What you need
 
 - A phone or tablet with Android 7.0 or later, arm64, and OpenGL ES 3.0.
-- Your own copy of the game: its decrypted `EBOOT.BIN` and the disc's files. The Windows build uses the same files.
+- Your own copy of the game: the disc's files, with a decrypted `EBOOT.BIN`. The Windows build uses the same files.
 
 ## Building a playable APK
 
@@ -38,8 +38,9 @@ Start the app once. It creates its folder and tells you where it is:
 
 ```
 Android/data/com.psp2i.recomp/files/
-    EBOOT.BIN          the decrypted EBOOT
     GameData/disc/     the disc's files (PSP_GAME/...)
+    GameData/disc_lba.txt, GameData/flash/   as for the Windows build
+    EBOOT.BIN          only if the disc's PSP_GAME/SYSDIR/EBOOT.BIN is encrypted: a decrypted one
     GameData/ms/       the memory stick, holding saves (created when the game first saves)
     psp2i.ini          optional settings
     psp2i_log.txt      the last run's log (include it when reporting a problem)
