@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write     # the android-latest release (master builds only; pull requests get read-only tokens)
 
 jobs:
   apk:
@@ -56,3 +56,28 @@ jobs:
           name: psp2i-android-no-game-code
           path: port/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      # Artifacts need a GitHub login to download; a release does not. Each
+      # build of master replaces the APK on the "android-latest" pre-release,
+      # and the tag moves to the commit it was built from.
+      - name: Publish to the android-latest release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp port/android/app/build/outputs/apk/release/app-release.apk psp2i-android-no-game-code.apk
+          git tag -f android-latest
+          git push -f origin refs/tags/android-latest
+          cat > notes.md <<'EOF'
+          Automatic build of the Android app from the latest master (arm64).
+
+          **This APK does not contain the game.** The game's code is generated from your own decrypted EBOOT.BIN and cannot be distributed, so this build installs, starts, and tells you the game code is missing. To build a playable APK, see [port/android/README.md](https://github.com/${{ github.repository }}/blob/master/port/android/README.md).
+
+          Includes libpsp2i_atrac.so, FFmpeg's ATRAC decoder as extracted by PPSSPP, under the LGPL 2.1 or later. Source: https://github.com/hrydgard/ppsspp/tree/master/ext/at3_standalone and port/atrac_dll in this repository.
+          EOF
+          if gh release view android-latest >/dev/null 2>&1; then
+            gh release edit android-latest --title "Android build (latest master)" --notes-file notes.md --prerelease --target "$GITHUB_SHA"
+            gh release upload android-latest psp2i-android-no-game-code.apk --clobber
+          else
+            gh release create android-latest psp2i-android-no-game-code.apk --title "Android build (latest master)" --notes-file notes.md --prerelease --target "$GITHUB_SHA"
+          fi
