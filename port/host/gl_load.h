@@ -1,5 +1,6 @@
-/* OpenGL 3.3 core: the types, constants and entry points the GE backend
- * (gl_ge.c) and the presenter use, loaded at run time through a callback.
+/* OpenGL 3.3 core (or OpenGL ES 3.0 with PSP2I_GLES, for Android): the types,
+ * constants and entry points the GE backend (gl_ge.c) and the presenter use,
+ * loaded at run time through a callback.
  *
  * No GL headers or loader libraries: a platform supplies a current 3.3 core
  * context and a "get function address" callback (wglGetProcAddress here; SDL_
@@ -57,6 +58,10 @@ typedef struct __GLsync *GLsync;
 #define GL_FUNC_SUBTRACT 0x800A
 #define GL_FUNC_REVERSE_SUBTRACT 0x800B
 #define GL_DEPTH_TEST 0x0B71
+#define GL_TEXTURE_SWIZZLE_R 0x8E42
+#define GL_TEXTURE_SWIZZLE_B 0x8E44
+#define GL_RED 0x1903
+#define GL_BLUE 0x1905
 #define GL_BLEND 0x0BE2
 #define GL_SCISSOR_TEST 0x0C11
 #define GL_CULL_FACE 0x0B44
@@ -125,12 +130,10 @@ typedef struct __GLsync *GLsync;
     X(void, glViewport, (GLint, GLint, GLsizei, GLsizei)) \
     X(void, glScissor, (GLint, GLint, GLsizei, GLsizei)) \
     X(void, glClearColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
-    X(void, glClearDepth, (GLdouble)) \
     X(void, glClear, (GLbitfield)) \
     X(void, glColorMask, (GLboolean, GLboolean, GLboolean, GLboolean)) \
     X(void, glDepthMask, (GLboolean)) \
     X(void, glDepthFunc, (GLenum)) \
-    X(void, glDepthRange, (GLdouble, GLdouble)) \
     X(void, glBlendFuncSeparate, (GLenum, GLenum, GLenum, GLenum)) \
     X(void, glBlendEquationSeparate, (GLenum, GLenum)) \
     X(void, glBlendColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
@@ -179,7 +182,6 @@ typedef struct __GLsync *GLsync;
     X(GLuint, glCreateProgram, (void)) \
     X(void, glAttachShader, (GLuint, GLuint)) \
     X(void, glBindAttribLocation, (GLuint, GLuint, const GLchar *)) \
-    X(void, glBindFragDataLocation, (GLuint, GLuint, const GLchar *)) \
     X(void, glLinkProgram, (GLuint)) \
     X(void, glGetProgramiv, (GLuint, GLenum, GLint *)) \
     X(void, glGetProgramInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *)) \
@@ -191,7 +193,21 @@ typedef struct __GLsync *GLsync;
     X(void, glDrawArrays, (GLenum, GLint, GLsizei)) \
     X(GLsync, glFenceSync, (GLenum, GLbitfield)) \
     X(GLenum, glClientWaitSync, (GLsync, GLbitfield, GLuint64)) \
-    X(void, glDeleteSync, (GLsync))
+    X(void, glDeleteSync, (GLsync)) \
+    GL_FUNCS_VARIANT(X)
+
+/* What OpenGL ES 3.0 spells differently: float depth calls, and a fragment
+ * shader's single output needs no binding. */
+#ifdef PSP2I_GLES
+#define GL_FUNCS_VARIANT(X) \
+    X(void, glClearDepthf, (GLfloat)) \
+    X(void, glDepthRangef, (GLfloat, GLfloat))
+#else
+#define GL_FUNCS_VARIANT(X) \
+    X(void, glClearDepth, (GLdouble)) \
+    X(void, glDepthRange, (GLdouble, GLdouble)) \
+    X(void, glBindFragDataLocation, (GLuint, GLuint, const GLchar *))
+#endif
 
 #define GL_DECLARE(ret, name, args) typedef ret (GLAPIENTRY *PFN_##name) args; extern PFN_##name p_##name;
 GL_FUNCS(GL_DECLARE)
@@ -206,12 +222,10 @@ GL_FUNCS(GL_DECLARE)
 #define glViewport p_glViewport
 #define glScissor p_glScissor
 #define glClearColor p_glClearColor
-#define glClearDepth p_glClearDepth
 #define glClear p_glClear
 #define glColorMask p_glColorMask
 #define glDepthMask p_glDepthMask
 #define glDepthFunc p_glDepthFunc
-#define glDepthRange p_glDepthRange
 #define glBlendFuncSeparate p_glBlendFuncSeparate
 #define glBlendEquationSeparate p_glBlendEquationSeparate
 #define glBlendColor p_glBlendColor
@@ -260,7 +274,6 @@ GL_FUNCS(GL_DECLARE)
 #define glCreateProgram p_glCreateProgram
 #define glAttachShader p_glAttachShader
 #define glBindAttribLocation p_glBindAttribLocation
-#define glBindFragDataLocation p_glBindFragDataLocation
 #define glLinkProgram p_glLinkProgram
 #define glGetProgramiv p_glGetProgramiv
 #define glGetProgramInfoLog p_glGetProgramInfoLog
@@ -273,6 +286,23 @@ GL_FUNCS(GL_DECLARE)
 #define glFenceSync p_glFenceSync
 #define glClientWaitSync p_glClientWaitSync
 #define glDeleteSync p_glDeleteSync
+#ifdef PSP2I_GLES
+#define glClearDepth(d) p_glClearDepthf((GLfloat)(d))
+#define glDepthRange(n, f) p_glDepthRangef((GLfloat)(n), (GLfloat)(f))
+#define glBindFragDataLocation(p, i, name) ((void)0)
+#else
+#define glClearDepth p_glClearDepth
+#define glDepthRange p_glDepthRange
+#define glBindFragDataLocation p_glBindFragDataLocation
+#endif
+
+/* The first line of every shader: GLSL 330 core, or GLSL ES 300 with full
+ * precision. */
+#ifdef PSP2I_GLES
+#define GLSL_HEADER "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+#else
+#define GLSL_HEADER "#version 330 core\n"
+#endif
 
 /* Load every entry point through get(name). 0 when all were found; else the
  * count missing (each is named on stderr). */

@@ -9,7 +9,10 @@
  *
  * ATRAC3 (not plus) needs the stream's codec extra data, which the runtime's
  * codec interface does not carry; it is reported unsupported (silent), as
- * before. PSP2i uses ATRAC3plus. */
+ * before. PSP2i uses ATRAC3plus.
+ *
+ * Android and other Unix-likes load libpsp2i_atrac.so (the same source, built
+ * by atrac_dll/CMakeLists.txt) with dlopen. */
 
 #include "atrac_at3.h"
 
@@ -19,9 +22,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32) || defined(__unix__)
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#define AT3_LIB "psp2i_atrac.dll"
+#else
+#include <dlfcn.h>
+#define AT3_LIB "libpsp2i_atrac.so"
+#endif
 
 static struct {
     int   (*api)(void);
@@ -85,27 +94,44 @@ static void dec_close(void *p) {
 
 static const psp_atrac_codec CODEC = { "psp2i_atrac (FFmpeg ATRAC3plus, LGPL)", dec_open, dec_decode, dec_reset, dec_close };
 
-int atrac_at3_init(const char *exedir) {
+#ifdef _WIN32
+static void *lib_open(const char *dir) {
     char path[900];
-    snprintf(path, sizeof path, "%s\\psp2i_atrac.dll", exedir);
-    HMODULE m = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (!m) { fprintf(stderr, "audio: psp2i_atrac.dll not found next to the exe; ATRAC music will be silent\n"); return -1; }
-    *(FARPROC *)&A.api    = GetProcAddress(m, "psp2i_atrac_api");
-    *(FARPROC *)&A.open   = GetProcAddress(m, "psp2i_at3p_open");
-    *(FARPROC *)&A.close  = GetProcAddress(m, "psp2i_at3p_close");
-    *(FARPROC *)&A.flush  = GetProcAddress(m, "psp2i_at3p_flush");
-    *(FARPROC *)&A.decode = GetProcAddress(m, "psp2i_at3p_decode");
+    snprintf(path, sizeof path, "%s\\" AT3_LIB, dir);
+    return (void *)LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+}
+static void *lib_sym(void *m, const char *name) { return (void *)GetProcAddress((HMODULE)m, name); }
+static void lib_close(void *m) { FreeLibrary((HMODULE)m); }
+#else
+static void *lib_open(const char *dir) {
+    char path[900];
+    snprintf(path, sizeof path, "%s/" AT3_LIB, dir ? dir : ".");
+    void *m = dir ? dlopen(path, RTLD_NOW) : NULL;
+    return m ? m : dlopen(AT3_LIB, RTLD_NOW);            /* Android: from the app's native libraries */
+}
+static void *lib_sym(void *m, const char *name) { return dlsym(m, name); }
+static void lib_close(void *m) { dlclose(m); }
+#endif
+
+int atrac_at3_init(const char *exedir) {
+    void *m = lib_open(exedir);
+    if (!m) { fprintf(stderr, "audio: " AT3_LIB " not found next to the exe; ATRAC music will be silent\n"); return -1; }
+    *(void **)&A.api    = lib_sym(m, "psp2i_atrac_api");
+    *(void **)&A.open   = lib_sym(m, "psp2i_at3p_open");
+    *(void **)&A.close  = lib_sym(m, "psp2i_at3p_close");
+    *(void **)&A.flush  = lib_sym(m, "psp2i_at3p_flush");
+    *(void **)&A.decode = lib_sym(m, "psp2i_at3p_decode");
     if (!A.api || !A.open || !A.close || !A.flush || !A.decode || A.api() != 1) {
-        fprintf(stderr, "audio: psp2i_atrac.dll has another interface; ATRAC music will be silent\n");
-        FreeLibrary(m);
+        fprintf(stderr, "audio: " AT3_LIB " has another interface; ATRAC music will be silent\n");
+        lib_close(m);
         return -1;
     }
     psp_atrac_set_codec(&CODEC);
-    fprintf(stderr, "audio: ATRAC music decoded by psp2i_atrac.dll\n");
+    fprintf(stderr, "audio: ATRAC music decoded by " AT3_LIB "\n");
     return 0;
 }
 
-#else  /* another platform: dlopen libpsp2i_atrac.so the same way */
+#else
 int atrac_at3_init(const char *exedir) { (void)exedir; return -1; }
 void atrac_at3_set_gain(float g) { (void)g; }
 #endif

@@ -1,0 +1,80 @@
+// PSP2i for Android: the runtime and the SDL3 host (port/host/sdl_main.c) as
+// libmain.so, SDL3 as libSDL3.so, the ATRAC decoder as libpsp2i_atrac.so.
+//
+// SDL3: the newest official release's source is fetched on the first build
+// into port/android/deps/SDL (its Java glue and its native library must come
+// from the same release); -PsdlDir=<path> uses another checkout instead.
+// ABIs: arm64-v8a by default; -Pabis=arm64-v8a,x86_64 adds the emulator's.
+
+plugins {
+    id 'com.android.application'
+}
+
+def sdlDir = project.hasProperty('sdlDir') ? file(project.property('sdlDir')) : file("${rootDir}/deps/SDL")
+def abiList = (project.findProperty('abis') ?: 'arm64-v8a').toString().split(',').collect { it.trim() }
+
+tasks.register('fetchSdl') {
+    description = 'Downloads the newest SDL3 release source into deps/SDL'
+    doLast {
+        if (new File(sdlDir, 'CMakeLists.txt').exists()) return
+        def conn = new URL('https://api.github.com/repos/libsdl-org/SDL/releases/latest').openConnection()
+        def token = System.getenv('GITHUB_TOKEN')
+        if (token) conn.setRequestProperty('Authorization', "Bearer ${token}")
+        def release = new groovy.json.JsonSlurper().parse(conn.inputStream)
+        def asset = release.assets.find { it.name ==~ /SDL3-[0-9.]+\.zip/ }
+        if (asset == null) throw new GradleException("SDL ${release.tag_name}: no source zip among its assets")
+        logger.lifecycle("SDL3: downloading ${release.tag_name}")
+        def zip = new File(buildDir, asset.name)
+        zip.parentFile.mkdirs()
+        new URL(asset.browser_download_url).withInputStream { input -> zip.withOutputStream { it << input } }
+        def deps = sdlDir.parentFile
+        copy { from zipTree(zip); into deps }
+        def unpacked = new File(deps, asset.name - '.zip')
+        if (!unpacked.renameTo(sdlDir)) throw new GradleException("cannot move ${unpacked} to ${sdlDir}")
+    }
+}
+preBuild.dependsOn 'fetchSdl'
+
+android {
+    namespace 'com.psp2i.recomp'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.psp2i.recomp'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1'
+        ndk { abiFilters.addAll(abiList) }
+        externalNativeBuild {
+            cmake {
+                arguments "-DSDL_DIR=${sdlDir}", '-DANDROID_STL=c++_shared'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path '../CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += "${sdlDir}/android-project/app/src/main/java"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug     // installable as built; sign with your own key to publish
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}

@@ -1,0 +1,49 @@
+# Builds the Android APK (port/android): the psprecomp runtime, the SDL3 host,
+# SDL3 and the ATRAC decoder, for arm64-v8a.
+#
+# The game's generated C (port/gen) is derived from the EBOOT and is not in
+# the repository, so this APK cannot start the game by itself: it checks that
+# the Android build works and that everything except the game code compiles
+# and links. A playable APK is built locally with port/gen present (see
+# port/android/README.md).
+
+name: Android
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build the APK
+        working-directory: port/android
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}    # the SDL release lookup, without the anonymous rate limit
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: psp2i-android-no-game-code
+          path: port/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

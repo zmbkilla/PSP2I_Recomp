@@ -21,7 +21,10 @@
  * scissor, viewport, uploads and readbacks all use PSP rows unchanged.
  *
  * Nothing here is platform-specific: the platform makes a 3.3 core context
- * current and loads the entry points (gl_load), then calls gl_ge_init. */
+ * current and loads the entry points (gl_load), then calls gl_ge_init. Built
+ * with PSP2I_GLES it runs on OpenGL ES 3.0 (Android) instead: the shaders get
+ * a GLSL ES header, and there is no depth clamp (depth is clamped in the
+ * vertex shader anyway) and no BGRA upload (the frame texture swizzles). */
 
 #include "gl_load.h"
 #include "gl_ge.h"
@@ -170,7 +173,7 @@ static void rows_clear(rt_entry *t, uint32_t y0, uint32_t y1) {
 /* ---- shaders (the HLSL of d3d11.c in GLSL; the y axis is not flipped) ---------------- */
 
 static const char *VS_SRC =
-"#version 330 core\n"
+GLSL_HEADER
 "uniform vec4 vp;\n"
 "in vec4 a_p; in vec2 a_uv; in vec4 a_c;\n"
 "out vec2 v_uv; out vec4 v_c;\n"
@@ -184,7 +187,7 @@ static const char *VS_SRC =
 "}\n";
 
 static const char *FS_SRC =
-"#version 330 core\n"
+GLSL_HEADER
 "uniform vec4 env; uniform uvec4 tf; uniform uvec4 at; uniform uvec4 misc;\n"
 "uniform sampler2D T;\n"
 "in vec2 v_uv; in vec4 v_c; out vec4 o_c;\n"
@@ -217,14 +220,14 @@ static const char *FS_SRC =
 
 /* One target's bytes as another target's pixels (d3d11.c XFER_SRC). */
 static const char *XVS_SRC =
-"#version 330 core\n"
+GLSL_HEADER
 "void main() {\n"
 "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
 "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
 "}\n";
 
 static const char *XFS_SRC =
-"#version 330 core\n"
+GLSL_HEADER
 "uniform uvec4 dst; uniform uvec4 src; uniform uvec4 rng;\n"   /* off, stride, fmt, bpp; ...; lo, hi */
 "uniform sampler2D Y;\n"
 "out vec4 o_c;\n"
@@ -984,7 +987,7 @@ static GLuint g_bprog, g_btex;
 static int g_btex_w, g_btex_h;
 
 static const char *BVS_SRC =
-"#version 330 core\n"
+GLSL_HEADER
 "out vec2 v_uv;\n"
 "void main() {\n"
 "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
@@ -992,7 +995,7 @@ static const char *BVS_SRC =
 "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
 "}\n";
 static const char *BFS_SRC =
-"#version 330 core\n"
+GLSL_HEADER
 "uniform sampler2D F; in vec2 v_uv; out vec4 o_c;\n"
 "void main() { o_c = vec4(texture(F, v_uv).rgb, 1.0); }\n";
 
@@ -1006,10 +1009,19 @@ int gl_blit_frame(const uint32_t *px, int w, int h, int x, int y, int vw, int vh
         if (g_btex) glDeleteTextures(1, &g_btex);
         g_btex = new_texture((uint32_t)w, (uint32_t)h);
         g_btex_w = w; g_btex_h = h;
+#ifdef PSP2I_GLES
+        glBindTexture(GL_TEXTURE_2D, g_btex);            /* bytes B, G, R, A read as R, G, B, A */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+#endif
     }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_btex);
+#ifdef PSP2I_GLES
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+#else
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);   /* 0xAARRGGBB */
+#endif
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
@@ -1068,7 +1080,9 @@ int gl_ge_init(void) {
 
     glDisable(GL_CULL_FACE);                              /* culling is done before submission */
     glDisable(GL_DITHER);
+#ifndef PSP2I_GLES
     glEnable(GL_DEPTH_CLAMP);                             /* as DepthClipEnable = FALSE */
+#endif
     glDepthRange(0.0, 1.0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
