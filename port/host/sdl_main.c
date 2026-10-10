@@ -24,7 +24,11 @@
  *                      user picks, once)
  *   EBOOT.BIN          optional: a decrypted EBOOT, when the disc's is encrypted
  *   GameData/ms/       the memory stick (saves), created on first save
- *   psp2i.ini          optional: fps=60, touch=off
+ *   psp2i.ini          optional: fps=60, touch=off; ad hoc multiplayer:
+ *                      adhoc_mode=modern (default) | ppsspp_direct | ppsspp_relay,
+ *                      modern_server=host (default) or the hosting player's
+ *                      address (IPv4/IPv6), adhoc_server= (PPSSPP modes),
+ *                      nickname=
  *   psp2i_log.txt      the log of the last run
  *
  * Not here yet: online play, the settings menu, movie video (movies play
@@ -38,6 +42,7 @@
 #include <psprecomp/dispatch.h>
 #include <psprecomp/hle.h>
 #include <psprecomp/mem.h>
+#include <psprecomp/net.h>
 
 #include "atrac_at3.h"
 #include "camera.h"
@@ -452,6 +457,11 @@ static void find_base(void) {
 }
 
 static char g_iso_path[1024];            /* psp2i.ini iso= (desktop; Android asks) */
+/* ad hoc multiplayer (psp2i.ini) */
+static int  g_adhoc_mode = PSP_ADHOC_MODE_MODERN;
+static char g_modern_server[256] = "host";
+static char g_adhoc_server[256] = "socom.cc";
+static char g_nick[64] = "PSP2i";
 
 static int read_ini(int *fps) {
     char path[1100], line[1100];
@@ -463,6 +473,12 @@ static int read_ini(int *fps) {
         if (!strncmp(line, "fps=", 4)) *fps = atoi(line + 4) >= 60 ? 60 : 30;
         else if (!strncmp(line, "touch=", 6)) g_touch_on = strncmp(line + 6, "off", 3) != 0;
         else if (!strncmp(line, "iso=", 4)) snprintf(g_iso_path, sizeof g_iso_path, "%s", line + 4);
+        else if (!strncmp(line, "adhoc_mode=", 11))
+            g_adhoc_mode = !strcmp(line + 11, "ppsspp_direct") ? PSP_ADHOC_MODE_PPSSPP_DIRECT
+                         : !strcmp(line + 11, "ppsspp_relay") ? PSP_ADHOC_MODE_PPSSPP_RELAY : PSP_ADHOC_MODE_MODERN;
+        else if (!strncmp(line, "modern_server=", 14)) snprintf(g_modern_server, sizeof g_modern_server, "%s", line[14] ? line + 14 : "host");
+        else if (!strncmp(line, "adhoc_server=", 13)) { if (line[13]) snprintf(g_adhoc_server, sizeof g_adhoc_server, "%s", line + 13); }
+        else if (!strncmp(line, "nickname=", 9)) { if (line[9]) snprintf(g_nick, sizeof g_nick, "%s", line + 9); }
     }
     fclose(f);
     return 1;
@@ -494,6 +510,23 @@ static int android_open_iso(int choose) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     (*env)->DeleteLocalRef(env, c);
     return fd;
+}
+
+/* The modern multiplayer server, asked in a dialog (no settings menu here). */
+static void android_ask_modern_server(char *out, size_t cap) {
+    JNIEnv *env;
+    jclass c = activity_class(&env);
+    if (!c) return;
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "askModernServer", "()Ljava/lang/String;");
+    jstring s = m ? (jstring)(*env)->CallStaticObjectMethod(env, c, m) : NULL;
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (s) {
+        const char *t = (*env)->GetStringUTFChars(env, s, NULL);
+        if (t && t[0]) snprintf(out, cap, "%s", t);
+        if (t) (*env)->ReleaseStringUTFChars(env, s, t);
+        (*env)->DeleteLocalRef(env, s);
+    }
+    (*env)->DeleteLocalRef(env, c);
 }
 
 /* Copy the PSP fonts (flash/) from a folder the user picks into the app. */
@@ -632,6 +665,26 @@ int main(int argc, char **argv) {
 
     psp_hle_init();
     psp_io_set_root(root);
+    {   /* ad hoc multiplayer, from psp2i.ini (the Windows build has its settings menu) */
+#ifdef SDL_PLATFORM_ANDROID
+        android_ask_modern_server(g_modern_server, sizeof g_modern_server);
+#endif
+        char host[256];
+        snprintf(host, sizeof host, "%s", g_adhoc_server);
+        uint16_t port = 0;
+        char *c = strrchr(host, ':');
+        if (c) { port = (uint16_t)atoi(c + 1); *c = '\0'; }
+        psp_adhoc_config ac;
+        memset(&ac, 0, sizeof ac);
+        ac.server = host;
+        ac.server_port = port;
+        ac.mode = g_adhoc_mode;
+        ac.port_offset = 10000;
+        ac.nickname = g_nick;
+        ac.modern_server = g_modern_server;
+        psp_adhoc_configure(&ac);
+        fprintf(stderr, "adhoc: mode %d, modern server %s, nickname %s\n", g_adhoc_mode, g_modern_server, g_nick);
+    }
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
     psp_audio_set_sink(audio_sink);

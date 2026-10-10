@@ -88,6 +88,42 @@ public class PSP2iActivity extends SDLActivity {
         super.onActivityResult(requestCode, resultCode, data);
     }
 
+    /* The modern multiplayer server: "host" (this phone hosts) or the hosting
+     * player's address. Asked at every start, prefilled with the last answer. */
+    public static String askModernServer() {
+        final PSP2iActivity a = sSelf;
+        if (a == null) return null;
+        final SharedPreferences prefs = a.getSharedPreferences("psp2i", MODE_PRIVATE);
+        final String last = prefs.getString("modern_server", "host");
+        final String[] answer = { last };
+        final CountDownLatch latch = new CountDownLatch(1);
+        a.runOnUiThread(() -> {
+            final android.widget.EditText edit = new android.widget.EditText(a);
+            edit.setSingleLine(true);
+            edit.setText(last);
+            edit.setSelection(last.length());
+            new AlertDialog.Builder(a)
+                .setTitle("Multiplayer server")
+                .setMessage("Ad hoc multiplayer (modern): type host to host on this device, or the address of the "
+                            + "player hosting (shown in their settings menu under MODERN SERVER).")
+                .setView(edit)
+                .setCancelable(false)
+                .setPositiveButton("OK", (d, w) -> {
+                    String t = edit.getText().toString().trim();
+                    answer[0] = t.isEmpty() ? "host" : t;
+                    prefs.edit().putString("modern_server", answer[0]).apply();
+                    latch.countDown();
+                })
+                .show();
+        });
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            return last;
+        }
+        return answer[0];
+    }
+
     /* A file descriptor for the game's ISO (the caller owns it), or -1. */
     public static int openGameImage(boolean choose) {
         final PSP2iActivity a = sSelf;
