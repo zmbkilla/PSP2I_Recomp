@@ -73,6 +73,11 @@ android {
         }
     }
 
+    lint {
+        checkReleaseBuilds false    // SDL's Java is not ours to lint; a release build must not stop on it
+        abortOnError false
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
