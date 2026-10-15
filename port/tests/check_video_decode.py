@@ -25,7 +25,12 @@ def main():
         run('ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
             'testsrc2=size=480x272:rate=30000/1001', '-frames:v', '90',
             '-c:v', 'libx264', '-bf', '3', '-f', 'h264', synthetic)
-        inputs = [synthetic]
+        full = work / 'full-range.h264'
+        run('ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+            'testsrc2=size=480x272:rate=30000/1001', '-frames:v', '90',
+            '-vf', 'scale=in_range=tv:out_range=pc', '-pix_fmt', 'yuvj420p',
+            '-color_range', 'pc', '-c:v', 'libx264', '-bf', '3', '-f', 'h264', full)
+        inputs = [synthetic, full]
         if args.movie:
             movie = work / 'movie.h264'
             run('ffmpeg', '-v', 'error', '-y', '-i', args.movie.resolve(),
@@ -34,7 +39,8 @@ def main():
         for source in inputs:
             actual, expected = work / 'actual.yuv', work / 'expected.yuv'
             run(probe, source, actual)
-            run('ffmpeg', '-v', 'error', '-y', '-i', source, '-pix_fmt',
+            run('ffmpeg', '-v', 'error', '-y', '-i', source,
+                '-vf', 'scale=out_range=tv:flags=bicubic', '-pix_fmt',
                 'yuv420p', '-fps_mode', 'passthrough', '-f', 'rawvideo', expected)
             if actual.stat().st_size == 0:
                 raise RuntimeError('Decoder produced no frames')

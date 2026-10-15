@@ -5,6 +5,8 @@
 #include <psprecomp/hle.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/opt.h>
+#include <libswscale/swscale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +19,8 @@ typedef struct {
     AVCodecContext *ctx;
     AVPacket *packet;
     AVFrame *shown;
+    struct SwsContext *convert;
+    int convert_w, convert_h;
     picture *head, *tail;
     int draining;
     unsigned frames;
@@ -34,6 +38,7 @@ static void close_decoder(void *opaque) {
     if (d->frames) fprintf(stderr, "video: decoded %u H.264 frames\n", d->frames);
     av_frame_free(&d->shown);
     av_packet_free(&d->packet);
+    sws_freeContext(d->convert);
     avcodec_free_context(&d->ctx);
     free(d);
 }
@@ -61,10 +66,46 @@ static int receive_pictures(decoder *d) {
             av_frame_free(&f);
             return rc == AVERROR(EAGAIN) || rc == AVERROR_EOF ? 0 : -1;
         }
-        if (f->format != AV_PIX_FMT_YUV420P || f->width <= 0 || f->height <= 0 ||
+        if ((f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) || f->width <= 0 || f->height <= 0 ||
             f->width > 1024 || f->height > 1024 || f->linesize[1] != f->linesize[2]) {
             av_frame_free(&f);
             return -1;
+        }
+        /* psprecomp's movie CSC expects studio-range BT.601. Some cutscenes
+         * are full-range YUV420P: accepting their planes unchanged washes out
+         * or clips the picture, so normalize range before handing it over. */
+        if (f->format == AV_PIX_FMT_YUVJ420P || f->color_range == AVCOL_RANGE_JPEG) {
+            AVFrame *limited = av_frame_alloc();
+            if (!limited) { av_frame_free(&f); return -1; }
+            limited->format = AV_PIX_FMT_YUV420P;
+            limited->width = f->width; limited->height = f->height;
+            limited->pts = f->pts;
+            if (!d->convert || d->convert_w != f->width || d->convert_h != f->height) {
+                sws_freeContext(d->convert);
+                d->convert = sws_alloc_context();
+                if (d->convert) {
+                    av_opt_set_int(d->convert, "srcw", f->width, 0);
+                    av_opt_set_int(d->convert, "srch", f->height, 0);
+                    av_opt_set_int(d->convert, "dstw", f->width, 0);
+                    av_opt_set_int(d->convert, "dsth", f->height, 0);
+                    av_opt_set_int(d->convert, "src_format", AV_PIX_FMT_YUV420P, 0);
+                    av_opt_set_int(d->convert, "dst_format", AV_PIX_FMT_YUV420P, 0);
+                    av_opt_set_int(d->convert, "src_range", 1, 0);
+                    av_opt_set_int(d->convert, "dst_range", 0, 0);
+                    av_opt_set_int(d->convert, "sws_flags", SWS_BICUBIC, 0);
+                    if (sws_init_context(d->convert, NULL, NULL) < 0) {
+                        sws_freeContext(d->convert); d->convert = NULL;
+                    }
+                }
+                d->convert_w = f->width; d->convert_h = f->height;
+            }
+            if (!d->convert || av_frame_get_buffer(limited, 32) < 0 ||
+                sws_scale(d->convert, (const uint8_t *const *)f->data, f->linesize,
+                          0, f->height, limited->data, limited->linesize) != f->height) {
+                av_frame_free(&limited); av_frame_free(&f); return -1;
+            }
+            av_frame_free(&f);
+            f = limited;
         }
         picture *p = calloc(1, sizeof *p);
         if (!p) { av_frame_free(&f); return -1; }

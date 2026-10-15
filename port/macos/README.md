@@ -43,7 +43,7 @@ Keyboard controls (click the game window first):
 SDL-compatible controllers are also supported, including right-stick camera.
 Close the game window to quit.
 
-Movie video uses the system FFmpeg libraries (libavcodec and libavutil).
+Movie video uses the system FFmpeg libraries (libavcodec, libavutil, and libswscale).
 The runtime supplies H.264 access units; the host returns decoded YUV420P
 frames with their presentation timestamps. Decoder buffers are drained at EOF.
 To build without video decoding, configure with `-DPSP2I_LIBAV=OFF`; movies
@@ -74,3 +74,7 @@ interface and demultiplexer.
 
 This SDL host still lacks the Windows settings menu, infrastructure online
 support, and encrypted save compatibility with PSP/PPSSPP/Windows saves.
+
+Full-range cutscenes (YUVJ420P, including the Continue path) are normalized to
+studio-range YUV420P before the runtime's BT.601 color conversion. The decoder
+comparison also covers 90 full-range frames with B-frame reordering.
