@@ -1,0 +1,46 @@
+diff --git a/src/hle/threadman.c b/src/hle/threadman.c
+index 76235c3..401e948 100644
+--- a/src/hle/threadman.c
++++ b/src/hle/threadman.c
+@@ -58,7 +58,7 @@
+  * needs, since its GL context and event pump belong to that thread. Elsewhere
+  * (or with PSPRECOMP_THREAD_FIBERS) each fiber is a host thread and switching
+  * hands a baton from one to the next, so exactly one ever runs. */
+-#if defined(__ANDROID__) && !defined(PSPRECOMP_THREAD_FIBERS) && !defined(PSPRECOMP_ASM_FIBERS)
++#if (defined(__ANDROID__) || (defined(__APPLE__) && defined(__aarch64__))) && !defined(PSPRECOMP_THREAD_FIBERS) && !defined(PSPRECOMP_ASM_FIBERS)
+ #  if defined(__aarch64__) || defined(__x86_64__)
+ #    define PSPRECOMP_ASM_FIBERS 1
+ #  else
+@@ -176,8 +176,12 @@ void psp_fiber_start(void);
+ /* x19-x28, x29 (fp), x30 (lr), d8-d15: 160 bytes. x19 = entry, x20 = arg. */
+ __asm__(
+     ".text\n.p2align 2\n"
++#ifdef __APPLE__
++    ".globl _psp_fiber_switch\n_psp_fiber_switch:\n"
++#else
+     ".globl psp_fiber_switch\n.type psp_fiber_switch, %function\n"
+     "psp_fiber_switch:\n"
++#endif
+     "  sub sp, sp, #160\n"
+     "  stp x19, x20, [sp, #0]\n  stp x21, x22, [sp, #16]\n  stp x23, x24, [sp, #32]\n"
+     "  stp x25, x26, [sp, #48]\n  stp x27, x28, [sp, #64]\n  stp x29, x30, [sp, #80]\n"
+@@ -187,11 +191,18 @@ __asm__(
+     "  ldp x25, x26, [sp, #48]\n  ldp x27, x28, [sp, #64]\n  ldp x29, x30, [sp, #80]\n"
+     "  ldp d8, d9, [sp, #96]\n  ldp d10, d11, [sp, #112]\n  ldp d12, d13, [sp, #128]\n  ldp d14, d15, [sp, #144]\n"
+     "  add sp, sp, #160\n  ret\n"
++#ifdef __APPLE__
++    ".globl _psp_fiber_start\n_psp_fiber_start:\n"
++#else
+     ".size psp_fiber_switch, .-psp_fiber_switch\n"
+     ".globl psp_fiber_start\n.type psp_fiber_start, %function\n"
+     "psp_fiber_start:\n"
++#endif
+     "  mov x0, x20\n  blr x19\n  brk #0\n"
+-    ".size psp_fiber_start, .-psp_fiber_start\n");
++#ifndef __APPLE__
++    ".size psp_fiber_start, .-psp_fiber_start\n"
++#endif
++);
+ #elif defined(__x86_64__)
+ /* rbp, rbx, r12-r15, then the return address. r12 = entry, r13 = arg. */
+ __asm__(
