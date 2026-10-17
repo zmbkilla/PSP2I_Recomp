@@ -304,6 +304,9 @@ static uint8_t stick_byte(int16_t v) {
     return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i);
 }
 
+static int g_swap_oc;                     /* Circle <-> Cross (input_sdl_set_swap_circle_cross) */
+void input_sdl_set_swap_circle_cross(int on) { g_swap_oc = on != 0; }
+
 int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
     *buttons = 0; *ax = 128; *ay = 128;
     g_host_bits = 0;
@@ -374,6 +377,7 @@ int input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay) {
     int ix = 128 + (int)(bx * 127.5f), iy = 128 + (int)(by * 127.5f);
     *ax = (uint8_t)(ix < 0 ? 0 : ix > 255 ? 255 : ix);
     *ay = (uint8_t)(iy < 0 ? 0 : iy > 255 ? 255 : iy);
+    if (g_swap_oc && ((bits & P_CIRCLE) != 0) != ((bits & P_CROSS) != 0)) bits ^= P_CIRCLE | P_CROSS;
     *buttons = bits;
 
     if (g_trace) {

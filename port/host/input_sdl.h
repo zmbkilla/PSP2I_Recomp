@@ -23,6 +23,10 @@ int  input_sdl_poll(uint32_t *buttons, uint8_t *ax, uint8_t *ay);
 #define INPUT_HOST_RSTICK 0x2u
 uint32_t input_sdl_host_buttons(void);
 
+/* Circle and Cross exchanged on every controller (the settings menu's
+ * CIRCLE/CROSS; psp2i_display.ini swap_circle_cross=). */
+void input_sdl_set_swap_circle_cross(int on);
+
 /* The right stick as of the last input_sdl_poll, as PSP-style bytes (0..255,
  * 128 = centre; the most deflected of the connected gamepads), with no dead
  * zone applied: the camera applies the game cheat's own (camera.c). */

@@ -108,6 +108,7 @@ static int change(menu_state *m, int dir) {
     case MENU_ATTENUATION:
         m->att = (m->att + (dir < 0 ? ATT_MODES - 1 : 1)) % ATT_MODES;
         return MFX_AUDIO;
+    case MENU_SWAP_OC:     m->swap_oc = !m->swap_oc; return MFX_SWAP_OC;
     case MENU_FONT:
         if (m->font_n < 2) return 0;
         m->font = (m->font + (dir < 0 ? m->font_n - 1 : 1)) % m->font_n;
@@ -291,7 +292,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
 
     static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "SEGA SERVER", "ADHOC SERVER",
                                                    "ADHOC MODE", "MODERN SERVER", "RESOLUTION", "RENDERER", "MASTER VOLUME",
-                                                   "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "FONT", "CLOSE" };
+                                                   "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "FONT", "CIRCLE/CROSS",
+                                                   "CLOSE" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
@@ -325,7 +327,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_MODERN_SERVER ? modern
                       : i == MENU_RESOLUTION ? res : i == MENU_RENDERER ? ren
                       : i >= MENU_MASTER_VOL && i <= MENU_SFX_VOL ? vol[i - MENU_MASTER_VOL]
-                      : i == MENU_ATTENUATION ? att : i == MENU_FONT ? font : "";
+                      : i == MENU_ATTENUATION ? att : i == MENU_FONT ? font
+                      : i == MENU_SWAP_OC ? (m->swap_oc ? "< SWAPPED >" : "< NORMAL >") : "";
         menu_text(img, x0 + 130, y, v, col);
         y += CELL_H + 2;
     }
@@ -336,7 +339,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     y += CELL_H + 2;
     if (m->fps == 60) menu_text(img, x0 + 10, y, "60 FPS IS EXPERIMENTAL", ORANGE);
     y += CELL_H + 4;
-    menu_text(img, x0 + 10, y, "CIRCLE (KEY X): ACCEPT  CROSS (KEY Z): BACK", GREY);
+    menu_text(img, x0 + 10, y, m->swap_oc ? "CIRCLE (KEY Z): ACCEPT  CROSS (KEY X): BACK"
+                                          : "CIRCLE (KEY X): ACCEPT  CROSS (KEY Z): BACK", GREY);
     y += CELL_H + 2;
     if (m->sel == MENU_MODERN_SERVER && m->share[0]) {
         snprintf(line, sizeof line, "JOIN AT %.38s", m->share);   /* what the others type */

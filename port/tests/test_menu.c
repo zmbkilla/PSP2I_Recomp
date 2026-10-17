@@ -180,6 +180,16 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_LEFT, 0) == MFX_FONT && m.font == 2);
     menu_update(&m, 0, 0);
     m.font = 0; m.font_n = 0;
+    /* Circle/Cross: Right, Left and Confirm each flip it */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_SWAP_OC && !m.swap_oc);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_SWAP_OC && m.swap_oc);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_SWAP_OC && !m.swap_oc);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_SWAP_OC && m.swap_oc);
+    menu_update(&m, 0, 0);
+    m.swap_oc = 0;
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -273,7 +283,7 @@ static void test_buttons(void) {
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RENDERER);
     CHECK(STEP(0) == 0);
-    for (int k = MENU_MASTER_VOL; k <= MENU_FONT; k++) {
+    for (int k = MENU_MASTER_VOL; k <= MENU_SWAP_OC; k++) {
         CHECK(STEP(DOWN) == 0 && m.sel == k);
         CHECK(STEP(0) == 0);
     }

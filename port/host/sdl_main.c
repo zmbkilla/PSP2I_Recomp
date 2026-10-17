@@ -26,7 +26,8 @@
  *                      user picks, once)
  *   EBOOT.BIN          optional: a decrypted EBOOT, when the disc's is encrypted
  *   GameData/ms/       the memory stick (saves), created on first save
- *   psp2i.ini          optional: fps=60, touch=off, fps_counter=off; ad hoc multiplayer:
+ *   psp2i.ini          optional: fps=60, touch=off, fps_counter=off, swap_circle_cross=on
+ *                      (keys X/Z and controllers; the touch buttons keep their symbols); ad hoc multiplayer:
  *                      adhoc_mode=modern (default) | ppsspp_direct | ppsspp_relay,
  *                      modern_server=host (default) or the hosting player's
  *                      address (IPv4/IPv6), adhoc_server= (PPSSPP modes),
@@ -220,6 +221,7 @@ static void layout(int w, int h) {
 static struct { SDL_FingerID id; float x, y; int used, stick; } g_finger[MAX_FINGERS];
 static int g_touch_on = 1;               /* psp2i.ini touch=off hides them for good */
 static int g_fps_on = 1;                 /* psp2i.ini fps_counter=off hides the counter */
+static int g_swap_oc;                    /* psp2i.ini swap_circle_cross=on: Circle <-> Cross */
 static fps_meter g_fm;
 static int g_touch_shown = 1;            /* hidden while a controller is used */
 static uint32_t g_touch_bits;
@@ -295,7 +297,7 @@ static uint32_t pad_state(uint8_t *ax, uint8_t *ay, uint8_t *rx, uint8_t *ry) {
         static const struct { SDL_Scancode key; uint32_t bit; } keyboard[] = {
             {SDL_SCANCODE_UP, P_UP}, {SDL_SCANCODE_DOWN, P_DOWN},
             {SDL_SCANCODE_LEFT, P_LEFT}, {SDL_SCANCODE_RIGHT, P_RIGHT},
-            {SDL_SCANCODE_X, P_CROSS}, {SDL_SCANCODE_Z, P_CIRCLE},
+            {SDL_SCANCODE_X, P_CIRCLE}, {SDL_SCANCODE_Z, P_CROSS},     /* as the Windows build */
             {SDL_SCANCODE_A, P_SQUARE}, {SDL_SCANCODE_S, P_TRIANGLE},
             {SDL_SCANCODE_Q, P_L}, {SDL_SCANCODE_E, P_R},
             {SDL_SCANCODE_RETURN, P_START}, {SDL_SCANCODE_RSHIFT, P_SELECT}
@@ -319,6 +321,7 @@ static uint32_t pad_state(uint8_t *ax, uint8_t *ay, uint8_t *rx, uint8_t *ry) {
         if (abs(u) + abs(v) > rbest) { rbest = abs(u) + abs(v); *rx = stick_byte(u); *ry = stick_byte(v); }
     }
     if (bits || best > 6000 || rbest > 6000) g_touch_shown = 0;   /* a controller is in use */
+    if (g_swap_oc && ((bits & P_CIRCLE) != 0) != ((bits & P_CROSS) != 0)) bits ^= P_CIRCLE | P_CROSS;
     return bits;
 }
 
@@ -529,6 +532,7 @@ static int read_ini(int *fps) {
         if (!strncmp(line, "fps=", 4)) *fps = atoi(line + 4) >= 60 ? 60 : 30;
         else if (!strncmp(line, "touch=", 6)) g_touch_on = strncmp(line + 6, "off", 3) != 0;
         else if (!strncmp(line, "fps_counter=", 12)) g_fps_on = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "swap_circle_cross=", 18)) g_swap_oc = !strncmp(line + 18, "on", 2);
         else if (!strncmp(line, "iso=", 4)) snprintf(g_iso_path, sizeof g_iso_path, "%s", line + 4);
         else if (!strncmp(line, "adhoc_mode=", 11))
             g_adhoc_mode = !strcmp(line + 11, "ppsspp_direct") ? PSP_ADHOC_MODE_PPSSPP_DIRECT

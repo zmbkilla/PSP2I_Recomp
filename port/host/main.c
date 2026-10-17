@@ -354,7 +354,10 @@ static uint32_t host_key(WPARAM vk) {
     return 0;
 }
 
+static int g_swap_oc;                       /* Circle <-> Cross (menu CIRCLE/CROSS, swap_circle_cross=) */
+
 static uint32_t key_bit(WPARAM vk) {
+    if (g_swap_oc && (vk == 'X' || vk == 'Z')) vk = vk == 'X' ? 'Z' : 'X';
     switch (vk) {
     case VK_UP:     return 0x0010;
     case VK_RIGHT:  return 0x0020;
@@ -837,6 +840,7 @@ static int display_load(void) {
         else if (!strncmp(line, "sfx_volume=", 11))    g_vol_saved[VOL_SFX] = vol_parse(line + 11);
         else if (!strncmp(line, "attenuation=", 12))   g_att_saved = !strncmp(line + 12, "off", 3) ? ATT_OFF : menu_att_parse(atoi(line + 12));
         else if (!strncmp(line, "openh264=", 9))       g_openh264 = strncmp(line + 9, "off", 3) != 0;
+        else if (!strncmp(line, "swap_circle_cross=", 18)) g_swap_oc = !strncmp(line + 18, "on", 2);
         else if (!strncmp(line, "font=", 5)) {
             snprintf(g_font_key, sizeof g_font_key, "%s", line + 5);
             g_font_key[strcspn(g_font_key, "\r\n")] = '\0';
@@ -864,6 +868,8 @@ static void display_save(int res) {
     fprintf(f, "openh264=%s\n", g_openh264 ? "on" : "off");
     fprintf(f, "; the game's text font: system (Windows' font), psp (flash/font, if there), or a .ttf/.otf/.ttc in the fonts folder\n");
     fprintf(f, "font=%s\n", g_font_key);
+    fprintf(f, "; on = Circle and Cross exchanged (keys X/Z and controllers)\n");
+    fprintf(f, "swap_circle_cross=%s\n", g_swap_oc ? "on" : "off");
     fclose(f);
 }
 
@@ -977,6 +983,12 @@ static void menu_step(void) {
         g_ren_saved = g_menu.renderer;
         if (!g_headless) display_save(g_res_saved);
         fprintf(stderr, "menu: renderer %s (saved; used from the next start)\n", menu_ren_key(g_menu.renderer));
+    }
+    if (fx & MFX_SWAP_OC) {
+        g_swap_oc = g_menu.swap_oc;
+        input_sdl_set_swap_circle_cross(g_swap_oc);
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: Circle/Cross %s (saved)\n", g_swap_oc ? "swapped" : "normal");
     }
     if (fx & MFX_FONT) {
         g_menu.font = font_win_select(g_menu.font);
@@ -2199,6 +2211,8 @@ int main(int argc, char **argv) {
     g_menu.renderer_now = g_renderer;
     for (int k = 0; k < VOL_N; k++) g_menu.vol[k] = g_vol_saved[k];
     g_menu.att = g_att_saved;
+    g_menu.swap_oc = g_swap_oc;
+    input_sdl_set_swap_circle_cross(g_swap_oc);
     audio_apply();
     {   /* the game's text font: the saved choice, else Windows' own */
         char fonts_dir[700], pgf_dir[700];
