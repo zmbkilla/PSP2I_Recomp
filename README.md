@@ -24,7 +24,7 @@ This project is based on the output of the PSP recompilation toolchain and ongoi
 
 Current capabilities include:
 
-* Native PC executable
+* Native Windows, Android, Mac Os executable
 * Direct3D 11 rendering
 * SDL3 input support
 * Keyboard and controller input
@@ -33,6 +33,7 @@ Current capabilities include:
 * Optional 60 FPS mode
 * Original 30 FPS mode
 * Infrastructure handling (Head to [psp2i discord](https://discord.gg/FeGvdBkrGa) for more info)
+* Official website loading
 
 > This project is actively being developed. Capabilities and compatibility may change as development progresses.
 
@@ -41,10 +42,9 @@ Current capabilities include:
 
 Current issues include:
 
-- Unhandled logic when loading into some bosses causes softlock
 - 60 fps is not properly implemented
-- Adhoc not supported
-- Infrastructure online is host only
+- Adhoc not supported properly (relay has best support)
+- Infrastructure online is host only (Fix untested as fan sega server is offline)
 
 ## Building
 
