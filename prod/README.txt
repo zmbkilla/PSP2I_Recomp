@@ -19,8 +19,9 @@ decrypted (a plain ELF, not ~PSP). If you keep it elsewhere, put it next to
 psp2i.exe as EBOOT.BIN; that copy is used first. The revival server's patched
 EBOOT also works.
 
-Already included here: psp2i.exe, SDL3.dll (controllers and sound), and the
-FFmpeg DLLs (avcodec, avutil, swresample) for the game's music.
+Already included here: psp2i.exe, SDL3.dll (controllers and sound), and
+psp2i_atrac.dll for the game's music: FFmpeg's ATRAC3plus decoder as a separate
+DLL under the LGPL 2.1 (licenses\ has the licence and where its source is).
 
 Running
 -------
@@ -30,3 +31,7 @@ missing or unusable, it shows a message listing exactly what, then closes.
 Created on first run, next to psp2i.exe:
   GameData\ms\           the memory stick (saves go in GameData\ms\PSP\SAVEDATA)
   psp2i_online.ini       online settings
+
+Controls
+--------
+Engine Menu: Press F1 (keyboard) or right stick (controller) ingame [tested using PS5 controller]

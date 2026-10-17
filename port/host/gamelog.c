@@ -128,7 +128,7 @@ static void emit(const char *line, unsigned repeat) {
     if (!g_file) {
         char p[700];
         snprintf(p, sizeof p, "%s/game_log.txt", g_dir);
-        g_file = fopen(p, "a");
+        g_file = log_open_rotated(p);
         if (g_file) { time_t t = time(NULL); fprintf(g_file, "\n==== session %s", ctime(&t)); }
     }
     time_t t = time(NULL);
@@ -166,6 +166,15 @@ static void logf_line(const char *fmt, ...) {
     va_end(ap);
     emit(line, 1);
     online_log("game: %s", line);
+}
+
+void gamelog_note(const char *fmt, ...) {
+    char line[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    logf_line("%s", line);
 }
 
 /* The session server asks its quest data for a table by ID (0x1710 ->
@@ -230,9 +239,205 @@ static void hook_zone_player(void (*original)(void)) {
     original();
 }
 
+/* ---- lobby HP probe (the remote member's bar shows ~1/8 on our screen) ------
+ * 0x0117 carries each player's HP (session u32 @0x1C, HP u32 @0x2C). ~2 s
+ * after one arrives, find every place our own player object holds our HP
+ * (u32, u16 or float) and print what the other player's object holds at the
+ * same offsets next to the HP it should be: the field read wrongly shows up
+ * as the odd one out. Player objects: the latest the game asked "local?"
+ * about (hook_is_local). Once per HP update pair. */
+#define HP_SCAN_BYTES 0x3000
+static uint32_t g_pl_local, g_pl_remote;
+static uint32_t g_hp_session[4], g_hp_value[4];
+static int      g_hp_n;
+static uint64_t g_hp_check_at;
+
+static void hp_note(uint32_t session, uint32_t hp) {
+    int k = 0;
+    while (k < g_hp_n && g_hp_session[k] != session) k++;
+    if (k == g_hp_n) { if (g_hp_n == 4) return; g_hp_n++; }
+    g_hp_session[k] = session; g_hp_value[k] = hp;
+    g_hp_check_at = psp_sched_vblank_count() + 120;
+}
+
+static float f32_at(uint32_t a) { const uint32_t v = psp_read32(a); float f; memcpy(&f, &v, 4); return f; }
+
+static int is_ram_ptr(uint32_t p) { return p >= 0x08800000u && p < 0x0A000000u && !(p & 3); }
+
+/* The kind of `v` stored at a (u16 at any even address, u32/f32 aligned), or NULL. */
+static const char *holds(uint32_t a, uint32_t v) {
+    if (!(a & 3) && psp_read32(a) == v) return "u32";
+    if (v < 0x10000 && psp_read16(a) == v) return "u16";
+    if (!(a & 3) && f32_at(a) == (float)v) return "f32";
+    return NULL;
+}
+
+#define HP_CHILD_BYTES 0x1000
+
+/* Every place `obj` (or a block one of its pointers leads to) holds `v`:
+ * calls report(ptr_off or -1, off, kind). */
+static int hp_find(uint32_t obj, uint32_t v, void (*report)(int, uint32_t, const char *), int max) {
+    int hits = 0;
+    for (uint32_t o = 0; o < HP_SCAN_BYTES && hits < max; o += 2) {
+        const char *k = holds(obj + o, v);
+        if (k) { report(-1, o, k); hits++; }
+    }
+    for (uint32_t po = 0; po < HP_SCAN_BYTES && hits < max; po += 4) {
+        const uint32_t child = psp_read32(obj + po);
+        if (!is_ram_ptr(child) || (child >= obj && child < obj + HP_SCAN_BYTES)) continue;
+        for (uint32_t o = 0; o < HP_CHILD_BYTES && hits < max; o += 2) {
+            const char *k = holds(child + o, v);
+            if (k) { report((int)po, o, k); hits++; }
+        }
+    }
+    return hits;
+}
+
+static uint32_t g_hp_theirs;
+static void hp_report_ours(int po, uint32_t o, const char *kind) {
+    /* the same place in their object */
+    uint32_t a = g_pl_remote;
+    if (po >= 0) {
+        const uint32_t child = psp_read32(g_pl_remote + (uint32_t)po);
+        if (!is_ram_ptr(child)) {
+            logf_line("[hp]   ours: [+0x%04X]->+0x%04X %s; theirs has no pointer there (0x%08X)", po, o, kind, child);
+            return;
+        }
+        a = child;
+    }
+    char where[40];
+    if (po >= 0) snprintf(where, sizeof where, "[+0x%04X]->+0x%04X", po, o);
+    else snprintf(where, sizeof where, "+0x%04X", o);
+    logf_line("[hp]   ours: %s %s; theirs there: u32 %u / u16 %u / f32 %g (expected %u)", where, kind,
+              psp_read32(a + o), psp_read16(a + o), (double)f32_at(a + o), g_hp_theirs);
+}
+static void hp_report_theirs(int po, uint32_t o, const char *kind) {
+    if (po >= 0) logf_line("[hp]   theirs holds its HP at [+0x%04X]->+0x%04X (%s)", po, o, kind);
+    else logf_line("[hp]   theirs holds its HP at +0x%04X (%s)", o, kind);
+}
+
+static void hp_probe(void) {
+    if (!g_hp_check_at || psp_sched_vblank_count() < g_hp_check_at || !g_pl_local || !g_pl_remote || g_hp_n < 2) return;
+    g_hp_check_at = 0;
+    /* ours is the HP update that is not the remote player's; with two players,
+     * try each and keep the one found in our object */
+    uint32_t mine = 0, theirs = 0;
+    for (int k = 0; k < g_hp_n; k++) {
+        g_hp_theirs = 0;
+        for (int j = 0; j < g_hp_n; j++) if (j != k) g_hp_theirs = g_hp_value[j];
+        logf_line("[hp] probe: our object 0x%08X, theirs 0x%08X; trying ours = %u, theirs = %u",
+                  g_pl_local, g_pl_remote, g_hp_value[k], g_hp_theirs);
+        if (hp_find(g_pl_local, g_hp_value[k], hp_report_ours, 30)) { mine = g_hp_value[k]; theirs = g_hp_theirs; break; }
+        logf_line("[hp]   %u not in our object or the blocks it points to", g_hp_value[k]);
+    }
+    if (!mine) return;
+    /* where theirs holds its own HP, and anything near an eighth of it */
+    g_hp_theirs = theirs;
+    if (!hp_find(g_pl_remote, theirs, hp_report_theirs, 30)) logf_line("[hp]   theirs holds %u nowhere (object or blocks)", theirs);
+    for (uint32_t o = 0; o < HP_SCAN_BYTES; o += 2) {
+        const uint32_t v16 = psp_read16(g_pl_remote + o);
+        if (v16 && v16 + 3 >= theirs / 8 && v16 <= theirs / 8 + 3)
+            logf_line("[hp]   theirs holds %u (about 1/8 of %u) at +0x%04X", v16, theirs, o);
+    }
+    /* The party member table (0x1005: 116-byte entries, u32 session then the
+     * UTF-16 name, HP u32 pair 0x68 bytes after the session): every copy in
+     * RAM, for each session that sent an HP update. */
+    uint32_t entry_theirs = 0, entry_ours = 0;
+    for (int k = 0; k < g_hp_n; k++) {
+        const uint32_t sid = g_hp_session[k];
+        int found = 0;
+        for (uint32_t a = 0x08800000u; a < 0x0A000000u - 0x80 && found < 12; a += 4) {
+            if (psp_read32(a) != sid || psp_read16(a + 4) == 0 || psp_read16(a + 4) > 0x7F || psp_read8(a + 5) != 0)
+                continue;                                  /* session id, then a UTF-16 ASCII letter */
+            found++;
+            /* the live table entry: HP at +0x68 and a level (u16 at +0x44) in range */
+            const uint32_t lvl = psp_read16(a + 0x44);
+            if (lvl && lvl <= 200 && psp_read32(a + 0x68) == g_hp_value[k]) {
+                if (g_hp_value[k] == theirs) entry_theirs = a; else if (g_hp_value[k] == mine) entry_ours = a;
+            }
+            char line[400];
+            size_t n = (size_t)snprintf(line, sizeof line, "[hp] member entry session %u at 0x%08X: +0x68 %u +0x6C %u; words:",
+                                        sid, a, psp_read32(a + 0x68), psp_read32(a + 0x6C));
+            for (uint32_t o = 0x44; o < 0x78 && n < sizeof line - 12; o += 4)
+                n += (size_t)snprintf(line + n, sizeof line - n, " %08X", psp_read32(a + o));
+            logf_line("%s", line);
+        }
+        if (!found) logf_line("[hp] member entry for session %u: none in RAM", sid);
+    }
+    /* Who reads their HP while the lobby shows it: the bar's code (main.c
+     * read_watch_hit logs each distinct stack once). */
+    psp_mem_watch_read(0);
+    if (entry_theirs) { psp_mem_watch_read(entry_theirs + 0x68); psp_mem_watch_read(entry_theirs + 0x6C); }
+    psp_mem_watch_read(g_pl_remote + 0x6A8);
+    if (entry_ours) psp_mem_watch_read(entry_ours + 0x68);
+    logf_line("[hp] read watch: their table entry 0x%08X (+0x68, +0x6C), their object +0x6A8 (0x%08X), our entry 0x%08X (+0x68)",
+              entry_theirs, g_pl_remote + 0x6A8, entry_ours);
+    /* Both objects side by side where the 0x0201 stats block seems to land
+     * (+0x6A8 = packet +0x23C): u32 words, ours | theirs, differing ones marked. */
+    for (uint32_t o = 0x400; o < 0x760; o += 16) {
+        char line[200];
+        size_t n = (size_t)snprintf(line, sizeof line, "[hp]   +%03X", o);
+        for (uint32_t k = 0; k < 16; k += 4) {
+            const uint32_t a = psp_read32(g_pl_local + o + k), b = psp_read32(g_pl_remote + o + k);
+            n += (size_t)snprintf(line + n, sizeof line - n, " %08X|%08X%s", a, b, a != b ? "*" : " ");
+        }
+        logf_line("%s", line);
+    }
+}
+
+/* The status-block pointers ours has and theirs lacked (probe of 2026-10-17):
+ * after each dispatched packet, log when one changes in either object. */
+static const uint16_t HP_PTR_OFFS[] = { 0x0014, 0x0040, 0x09B0, 0x09B4, 0x09B8, 0x09CC, 0x09E8, 0x1338, 0x134C };
+#define HP_NPTR (int)(sizeof HP_PTR_OFFS / sizeof HP_PTR_OFFS[0])
+static uint32_t g_ptr_obj[2], g_ptr_last[2][HP_NPTR];
+
+static void hp_watch_ptrs(const char *after) {
+    const uint32_t objs[2] = { g_pl_local, g_pl_remote };
+    for (int w = 0; w < 2; w++) {
+        if (!objs[w]) continue;
+        if (objs[w] != g_ptr_obj[w]) {                 /* a new object: show its starting state */
+            g_ptr_obj[w] = objs[w];
+            char line[300];
+            size_t n = 0;
+            for (int i = 0; i < HP_NPTR; i++) {
+                g_ptr_last[w][i] = psp_read32(objs[w] + HP_PTR_OFFS[i]);
+                n += (size_t)snprintf(line + n, sizeof line - n, " +%X=%08X", HP_PTR_OFFS[i], g_ptr_last[w][i]);
+            }
+            logf_line("[hp] %s player object 0x%08X (vtable %08X, HP field +6A8 = %u), status links:%s",
+                      w ? "their" : "our", objs[w], psp_read32(objs[w]), psp_read32(objs[w] + 0x6A8), line);
+            if (w) {   /* who clears their +0x40 a frame later: main.c watch_backtrace logs each write */
+                psp_mem_watch_write(objs[w] + 0x40);
+                logf_line("[hp] watching writes to 0x%08X (their +0x40)", objs[w] + 0x40);
+            }
+            continue;
+        }
+        for (int i = 0; i < HP_NPTR; i++) {
+            const uint32_t v = psp_read32(objs[w] + HP_PTR_OFFS[i]);
+            if (v == g_ptr_last[w][i]) continue;
+            logf_line("[hp] %s object 0x%08X: status link +0x%X %08X -> %08X after %s", w ? "their" : "our",
+                      objs[w], HP_PTR_OFFS[i], g_ptr_last[w][i], v, after);
+            g_ptr_last[w][i] = v;
+        }
+    }
+}
+
 static void hook_is_local(void (*original)(void)) {
     const uint32_t pl = psp_cpu.r[4];
     original();
+    /* remote: player id 1, the other human in a 2-player test (NPCs are 2, 3) */
+    if (pl) { if (psp_cpu.r[2]) g_pl_local = pl; else if (psp_read32(pl + 40) == 1) g_pl_remote = pl; }
+    hp_watch_ptrs("a frame");
+    {   /* reads of unmapped memory (e.g. through a released block): log the
+         * count whenever it grows, at most every 5 s */
+        static uint64_t last_n, last_vb;
+        const uint64_t vb = psp_sched_vblank_count();
+        if (psp_mem_bad_access != last_n && vb - last_vb >= 300) {
+            logf_line("[hp] bad (unmapped) memory accesses so far: %llu (+%llu)", (unsigned long long)psp_mem_bad_access,
+                      (unsigned long long)(psp_mem_bad_access - last_n));
+            last_n = psp_mem_bad_access; last_vb = vb;
+        }
+    }
+    hp_probe();
     /* Per player, only when the answer changes: the game asks for every
      * player every frame, so "changed since the last call" logged ~900 lines
      * a second in a 4-player ad hoc lobby (each flushed to disk). */
@@ -447,6 +652,22 @@ static void hook_session_info_del(void (*original)(void)) {
     original();
 }
 
+/* Write trace of one HP-carrying packet's handler (0x0117, 0x0201). */
+static int      g_wt_all, g_wt_n;
+static uint32_t g_wt_hp[2];
+static char     g_wt_tag[32];
+static void wtrace_write(uint32_t addr, uint32_t width, uint32_t value) {
+    float f;
+    memcpy(&f, &value, 4);
+    const int hp_int = value && (value == g_wt_hp[0] || value == g_wt_hp[1]);
+    const int hp_flt = width == 4 && g_wt_hp[0] && (f == (float)g_wt_hp[0] || (g_wt_hp[1] && f == (float)g_wt_hp[1]));
+    const int ratio = width == 4 && f > 0.0f && f <= 1.0f && (value & 0x7F800000u) >= 0x3A800000u;   /* 0.001..1 */
+    if (!g_wt_all && !hp_int && !hp_flt && !ratio) return;
+    if (g_wt_n++ >= (g_wt_all ? 300 : 150)) return;
+    logf_line("[wtrace %s] write%u 0x%08X = 0x%08X (%u / %g)%s", g_wt_tag, width * 8, addr, value, value, (double)f,
+              hp_int ? " <- HP" : hp_flt ? " <- HP as float" : "");
+}
+
 /* Every session packet the client dispatches, from the items packet until
  * ~10 s after the field scene (item owner) exists: which ones arrive before
  * the scene can take them. */
@@ -462,7 +683,29 @@ static void hook_dispatch_packet(void (*original)(void)) {
                   (unsigned long long)vb, psp_read32(ITEM_OWNER) ? "ready" : "NOT READY",
                   psp_read32(SESSION_INFO) ? "ready" : "NOT READY", keep ? " -- kept for later" : "");
     if (keep) held_keep(pkt);
+    const int hp_pkt = (cmd == 0x01 && sub == 0x17) || (cmd == 0x02 && sub == 0x01);
+    if (cmd == 0x01 && sub == 0x17) {
+        hp_note(psp_read32(pkt + 0x1C), psp_read32(pkt + 0x2C));
+        logf_line("[hp] update 0117: session %u, HP %u", psp_read32(pkt + 0x1C), psp_read32(pkt + 0x2C));
+    }
+    if (hp_pkt) {
+        /* what the handler stores: all of 0117 (small), and for 0201 only
+         * HP-like values (where the bar's numbers go) */
+        g_wt_all = cmd == 0x01;
+        g_wt_n = 0;
+        g_wt_hp[0] = cmd == 0x01 ? psp_read32(pkt + 0x2C) : psp_read32(pkt + 0x274);
+        g_wt_hp[1] = cmd == 0x01 ? 0 : psp_read32(pkt + 0x23C);
+        snprintf(g_wt_tag, sizeof g_wt_tag, "%02X%02X s%u", cmd, sub, psp_read32(pkt + (cmd == 0x01 ? 0x1C : 0x10)));
+        psp_mem_trace_writes(wtrace_write);
+    }
     original();
+    if (hp_pkt) {
+        psp_mem_trace_writes(NULL);
+        logf_line("[wtrace %s] %d write(s) logged", g_wt_tag, g_wt_n);
+    }
+    char after[24];
+    snprintf(after, sizeof after, "packet %02X%02X", cmd, sub);
+    hp_watch_ptrs(after);
 }
 
 static void hook_items_owner_del(void (*original)(void)) {

@@ -165,6 +165,21 @@ static void test_values(void) {
     m.att = ATT_DEFAULT;
     CHECK(menu_att_parse(-12) == ATT_12DB && menu_att_parse(0) == ATT_OFF && menu_att_parse(-7) == ATT_6DB &&
           menu_att_parse(-30) == ATT_20DB);
+    /* font: under two choices nothing changes; with three, Right/Left cycle and wrap */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_FONT && m.font == 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0 && m.font == 0);
+    menu_update(&m, 0, 0);
+    m.font_n = 3;
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_FONT && m.font == 1);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_FONT && m.font == 2);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_FONT && m.font == 0);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_FONT && m.font == 2);
+    menu_update(&m, 0, 0);
+    m.font = 0; m.font_n = 0;
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -258,7 +273,7 @@ static void test_buttons(void) {
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RENDERER);
     CHECK(STEP(0) == 0);
-    for (int k = MENU_MASTER_VOL; k <= MENU_ATTENUATION; k++) {
+    for (int k = MENU_MASTER_VOL; k <= MENU_FONT; k++) {
         CHECK(STEP(DOWN) == 0 && m.sel == k);
         CHECK(STEP(0) == 0);
     }

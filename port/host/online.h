@@ -5,9 +5,13 @@
 
 #include "login.h"
 
+#include <stdio.h>
+
 void online_init(const char *exe_dir, login_state *login);
 void online_poll(void);                      /* once per vblank */
 void online_log(const char *fmt, ...);
+/* A log opened for appending, rotated to <path>.old once it is over 16 MB. */
+FILE *log_open_rotated(const char *path);
 
 /* From the sign-in screen's actions. */
 int  online_login_submit(void);
@@ -29,6 +33,8 @@ const char *online_adhoc_server(void);
 /* The modern connection's own server (psp2i_online.ini modern_server): "host"
  * runs it in this game; else the address of the player or machine hosting. */
 const char *online_modern_server(void);
+const char *online_website_url(void);       /* the game's "open website" page (website_url=) */
+const char *online_store_url(void);         /* its PS Store page (store_url=, "" = none) */
 void        online_set_modern_server(const char *server);
 int         online_adhoc_mode(void);
 void        online_set_adhoc_server(const char *server);

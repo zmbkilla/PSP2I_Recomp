@@ -3,5 +3,7 @@
 #define PSP2I_GAMELOG_H
 
 void gamelog_init(const char *exe_dir);
+/* A line of our own in game_log.txt (and online_log.txt). */
+void gamelog_note(const char *fmt, ...);
 
 #endif

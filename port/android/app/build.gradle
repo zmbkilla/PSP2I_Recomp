@@ -12,6 +12,8 @@ plugins {
 
 def sdlDir = project.hasProperty('sdlDir') ? file(project.property('sdlDir')) : file("${rootDir}/deps/SDL")
 def abiList = (project.findProperty('abis') ?: 'arm64-v8a').toString().split(',').collect { it.trim() }
+// compiles at once (the game code's parts take ~1-2 GB each); -Ppsp2iJobs=2 while the PC is also playing
+def psp2iJobs = (project.findProperty('psp2iJobs') ?: '4').toString()
 
 tasks.register('fetchSdl') {
     description = 'Downloads the newest SDL3 release source into deps/SDL'
@@ -48,9 +50,9 @@ android {
         ndk { abiFilters.addAll(abiList) }
         externalNativeBuild {
             cmake {
-                // at most 4 compiles at once: the game code's parts take ~1-2 GB each
+                // at most psp2iJobs compiles at once (default 4): the game code's parts take ~1-2 GB each
                 arguments "-DSDL_DIR=${sdlDir}", '-DANDROID_STL=c++_shared',
-                          '-DCMAKE_JOB_POOLS=compile=4', '-DCMAKE_JOB_POOL_COMPILE=compile'
+                          "-DCMAKE_JOB_POOLS=compile=${psp2iJobs}", '-DCMAKE_JOB_POOL_COMPILE=compile'
                 targets 'main', 'psp2i_atrac'          // not the recompiler or the standalone server
             }
         }

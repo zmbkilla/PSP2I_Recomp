@@ -474,9 +474,36 @@ static void bind_target(rt_entry *t, depth_entry *d) {
 
 /* ---- textures ----------------------------------------------------------------------------- */
 
+/* key -> slot index, so a lookup costs the same with 5 or 512 textures
+ * cached (the linear scan grew with play time as the cache filled). Open
+ * addressing; slots hold index + 1, 0 = empty; rebuilt when an entry is
+ * replaced (a miss with the cache full). */
+#define TEX_INDEX 2048
+static uint16_t g_tex_index[TEX_INDEX];
+
+static uint32_t tex_slot(uint64_t key) { return (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 53) & (TEX_INDEX - 1); }
+
+static void tex_index_add(int i) {
+    uint32_t s = tex_slot(g_tex[i].key);
+    while (g_tex_index[s]) s = (s + 1) & (TEX_INDEX - 1);
+    g_tex_index[s] = (uint16_t)(i + 1);
+}
+
+static void tex_index_rebuild(void) {
+    memset(g_tex_index, 0, sizeof g_tex_index);
+    for (int i = 0; i < MAX_TEX; i++) if (g_tex[i].used) tex_index_add(i);
+}
+
+static tex_entry *tex_find(uint64_t key) {
+    for (uint32_t s = tex_slot(key); g_tex_index[s]; s = (s + 1) & (TEX_INDEX - 1)) {
+        tex_entry *t = &g_tex[g_tex_index[s] - 1];
+        if (t->used && t->key == key) return t;
+    }
+    return NULL;
+}
+
 static tex_entry *tex_get(const psp_gpu_state *st) {
-    tex_entry *e = NULL;
-    for (int i = 0; i < MAX_TEX; i++) if (g_tex[i].used && g_tex[i].key == st->tex_key) { e = &g_tex[i]; break; }
+    tex_entry *e = tex_find(st->tex_key);
     uint64_t f = frame_no();
     if (e && e->check_frame == f) { e->last_use = ++g_use; return e; }
     uint64_t h = psp_gpu_texture_hash();
@@ -487,9 +514,11 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
             e = &g_tex[0];
             for (int i = 1; i < MAX_TEX; i++) if (g_tex[i].last_use < e->last_use) e = &g_tex[i];
         }
+        const int evicted = e->used;
         if (e->used && (e->w != st->tex_w || e->h != st->tex_h)) { glDeleteTextures(1, &e->tex); e->tex = 0; }
         if (!e->tex) e->tex = new_texture(st->tex_w, st->tex_h);
         e->key = st->tex_key; e->w = st->tex_w; e->h = st->tex_h; e->used = 1;
+        if (evicted) tex_index_rebuild(); else tex_index_add((int)(e - g_tex));
     }
     uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * st->tex_h * 4);
     if (!px) return NULL;
@@ -789,8 +818,26 @@ static int gl_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts)
         glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)VB_VERTS * (GLsizeiptr)sizeof(psp_gpu_vertex), NULL, GL_STREAM_DRAW);
         g_vb_pos = 0;
     }
+#ifdef PSP2I_GLES
+    /* Mobile drivers (Mali, Adreno) treat a sub-data upload into a buffer the
+     * GPU may still read as a hazard: they copy the whole buffer or wait. The
+     * ring never rewrites a region before the wrap orphans it, so an
+     * unsynchronised map is safe and costs only the copy. */
+    {
+        const GLsizeiptr n = (GLsizeiptr)nverts * (GLsizeiptr)sizeof(psp_gpu_vertex);
+        void *dst = glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)g_vb_pos * (GLintptr)sizeof(psp_gpu_vertex), n,
+                                     GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+        if (dst) {
+            memcpy(dst, v, (size_t)n);
+            glUnmapBuffer(GL_ARRAY_BUFFER);
+        } else {
+            glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)g_vb_pos * (GLintptr)sizeof(psp_gpu_vertex), n, v);
+        }
+    }
+#else
     glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)g_vb_pos * (GLintptr)sizeof(psp_gpu_vertex),
                     (GLsizeiptr)nverts * (GLsizeiptr)sizeof(psp_gpu_vertex), v);
+#endif
     first = (GLint)g_vb_pos;
     g_vb_pos += (uint32_t)nverts;
 
@@ -892,7 +939,7 @@ static size_t g_pbo_bytes[PRESENT_RING];
 static int g_present_fmt[PRESENT_RING], g_present_pending[PRESENT_RING], g_present_w[PRESENT_RING];
 static uint64_t g_present_seq[PRESENT_RING], g_present_next;
 static int g_present_head;
-static uint64_t n_present_async, n_present_vram, n_present_kept;
+static uint64_t n_present_async, n_present_vram, n_present_kept, n_present_direct;
 
 static void fence_drop(int k) {
     if (g_fence[k]) { glDeleteSync(g_fence[k]); g_fence[k] = NULL; }
@@ -984,14 +1031,15 @@ int gl_ge_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
 /* ---- the window: the composed frame scaled into the default framebuffer --------------------------- */
 
 static GLuint g_bprog, g_btex;
+static GLint u_bscale;
 static int g_btex_w, g_btex_h;
 
 static const char *BVS_SRC =
 GLSL_HEADER
-"out vec2 v_uv;\n"
+"uniform vec4 S; out vec2 v_uv;\n"                   /* S.xy: the frame's part of the texture */
 "void main() {\n"
 "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
-"  v_uv = vec2(p.x, 1.0 - p.y);\n"                    /* frame row 0 at the top of the window */
+"  v_uv = vec2(p.x, 1.0 - p.y) * S.xy;\n"             /* frame row 0 at the top of the window */
 "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
 "}\n";
 static const char *BFS_SRC =
@@ -999,12 +1047,84 @@ GLSL_HEADER
 "uniform sampler2D F; in vec2 v_uv; out vec4 o_c;\n"
 "void main() { o_c = vec4(texture(F, v_uv).rgb, 1.0); }\n";
 
-int gl_blit_frame(const uint32_t *px, int w, int h, int x, int y, int vw, int vh, int cw, int ch) {
-    if (!g_ok) return -1;
+static int blit_ready(void) {
+    if (!g_ok) return 0;
     if (!g_bprog) {
         g_bprog = gl_program("present", BVS_SRC, BFS_SRC);
-        if (!g_bprog) return -1;
+        if (!g_bprog) return 0;
+        u_bscale = glGetUniformLocation(g_bprog, "S");
     }
+    return 1;
+}
+
+/* The texture bound to unit 0, its top-left sx x sy part, into the window. */
+static void blit_draw(float sx, float sy, int x, int y, int vw, int vh, int cw, int ch) {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glColorMask(1, 1, 1, 1);
+    glViewport(0, 0, cw, ch);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(x, ch - y - vh, vw, vh);                   /* window y from the bottom */
+    glUseProgram(g_bprog);
+    glUniform4f(u_bscale, sx, sy, 0.0f, 0.0f);
+    glBindSampler(0, sampler(0, 1, 1));
+    glBindVertexArray(g_xvao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+/* The displayed frame straight from its render target, when the GPU's copy
+ * is the current one: no readback, no CPU conversion, no upload (on a phone
+ * that round trip cost more than the frame itself). 0: the CPU's copy is the
+ * current one (e.g. a video); use gl_ge_present + gl_blit_frame. */
+int gl_ge_present_direct(uint32_t addr, uint32_t stride, int fmt, int w, int h,
+                         int x, int y, int vw, int vh, int cw, int ch) {
+    if (!blit_ready() || (addr & 0x0F000000u) != 0x04000000u) return 0;
+    rt_entry *t = rt_find(vram_off(addr), stride, fmt);
+    if (!t || !t->dirty || t->w < (uint32_t)w || t->h < (uint32_t)h) return 0;
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, t->tex);
+    blit_draw((float)w / (float)t->w, (float)h / (float)t->h, x, y, vw, vh, cw, ch);
+    n_present_direct++;
+    return 1;
+}
+
+/* A small 0xAARRGGBB image drawn over the window at x, y (top-left origin),
+ * scaled to vw x vh, without clearing (the FPS counter). */
+int gl_draw_overlay(const uint32_t *px, int w, int h, int x, int y, int vw, int vh, int cw, int ch) {
+    static GLuint tex;
+    static int tw, th;
+    if (!blit_ready()) return -1;
+    if (!tex || tw != w || th != h) {
+        if (tex) glDeleteTextures(1, &tex);
+        tex = new_texture((uint32_t)w, (uint32_t)h);
+        tw = w; th = h;
+        glBindTexture(GL_TEXTURE_2D, tex);               /* bytes B, G, R, A read as R, G, B, A */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glColorMask(1, 1, 1, 1);
+    glViewport(x, ch - y - vh, vw, vh);
+    (void)cw;
+    glUseProgram(g_bprog);
+    glUniform4f(u_bscale, 1.0f, 1.0f, 0.0f, 0.0f);
+    glBindSampler(0, sampler(0, 1, 1));
+    glBindVertexArray(g_xvao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    return 0;
+}
+
+int gl_blit_frame(const uint32_t *px, int w, int h, int x, int y, int vw, int vh, int cw, int ch) {
+    if (!blit_ready()) return -1;
     if (!g_btex || g_btex_w != w || g_btex_h != h) {
         if (g_btex) glDeleteTextures(1, &g_btex);
         g_btex = new_texture((uint32_t)w, (uint32_t)h);
@@ -1022,19 +1142,7 @@ int gl_blit_frame(const uint32_t *px, int w, int h, int x, int y, int vw, int vh
 #else
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);   /* 0xAARRGGBB */
 #endif
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDisable(GL_SCISSOR_TEST);
-    glDisable(GL_BLEND);
-    glDisable(GL_DEPTH_TEST);
-    glColorMask(1, 1, 1, 1);
-    glViewport(0, 0, cw, ch);
-    glClearColor(0, 0, 0, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glViewport(x, ch - y - vh, vw, vh);                   /* window y from the bottom */
-    glUseProgram(g_bprog);
-    glBindSampler(0, sampler(0, 1, 1));
-    glBindVertexArray(g_xvao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    blit_draw(1.0f, 1.0f, x, y, vw, vh, cw, ch);
     return 0;
 }
 
@@ -1108,4 +1216,6 @@ void gl_ge_report(FILE *out) {
     fprintf(out, "  gl transfers        %llu GPU-side target-to-target transfers\n", (unsigned long long)n_xfer);
     fprintf(out, "  gl present          %llu frames from asynchronous copies, %llu from VRAM, %llu vblanks kept the last picture\n",
             (unsigned long long)n_present_async, (unsigned long long)n_present_vram, (unsigned long long)n_present_kept);
+    fprintf(out, "  gl present direct   %llu vblanks drawn straight from the render target\n",
+            (unsigned long long)n_present_direct);
 }

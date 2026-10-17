@@ -48,9 +48,12 @@ add_executable(psp2i
     host/rpcn_rooms.c
     host/savecrypt.c
     host/gamelog.c
+    host/functrace.c
     host/prod.c
     host/login.c
     host/textedit.c
+    host/font_win.c
+    host/web_overlay.cpp
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
     gen/recomp_funcs.c
     gen/recomp_imports.c
@@ -80,6 +83,25 @@ endif()
 add_subdirectory(atrac_dll)
 if(TARGET psp2i_atrac)
     add_dependencies(psp2i psp2i_atrac)
+endif()
+
+# "Open website": the page over the game window through webview (WebView2 on
+# Windows); fetched at configure time, see cmake/FetchWebView.cmake.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchWebView.cmake)
+psp2i_fetch_webview(PSP2I_WEBVIEW_INC)
+set_source_files_properties(host/web_overlay.cpp PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/std:c++17>")
+if(PSP2I_WEBVIEW_INC)
+    target_include_directories(psp2i PRIVATE ${PSP2I_WEBVIEW_INC})
+    target_compile_definitions(psp2i PRIVATE PSP2I_WEBVIEW)
+    if(WIN32)
+        target_link_libraries(psp2i PRIVATE advapi32 ole32 shell32 shlwapi user32 version)
+    endif()
+    add_custom_command(TARGET psp2i POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:psp2i>/licenses
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/_deps/webview/LICENSE $<TARGET_FILE_DIR:psp2i>/licenses/webview-LICENSE.txt
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/_deps/webview/WebView2-LICENSE.txt $<TARGET_FILE_DIR:psp2i>/licenses/WebView2-LICENSE.txt)
+elseif(WIN32)
+    target_link_libraries(psp2i PRIVATE shell32)
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchSDL3.cmake)

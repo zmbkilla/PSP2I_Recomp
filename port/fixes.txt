@@ -11,6 +11,28 @@
 # phase at 4x speed (2x per frame, 2x the frames), and at the game's own
 # 20 fps mode at 0.44x. The PPSSPP 60 FPS cheat swaps the operands the same way.
 0x08A937B4 0x46010043   # div.s $f1, $f0, $f1   (30 / fps)
-0x08A6E914 0x2404003C
+
+# 0x08A5C27C: NPC walk-to-point arrival check (0x08A5BBF0 walks an NPC to a
+# point: turn toward it, step forward, stop once arrived). "Arrived" is a
+# horizontal distance under 30/fps -- one frame's walk at the fast speed, so
+# the radius halves at 60 fps (1.0 -> 0.5). Walking (12/fps per frame) and
+# turning (0x24000/fps per frame) are both fps-scaled, so the NPC's turning
+# circle is 12 / 14.1 rad/s = 0.85 at any frame rate: inside the 30 fps
+# radius, outside the 60 fps one, and the NPC circles the point forever
+# instead of arriving -- Rapico spinning on the spot in his shop, Hyuga
+# turning past the player. Logged at 60 fps: the walk restarted its turn every
+# frame with the target held ~90 deg to the side (circling) for the whole
+# recording. The radius keeps its 30 fps size: both loads now take the 30.0
+# constant the next instructions already use (0x08E011D8), so 30 / 30 = 1.0.
+0x08A5C27C 0x3C0208E0   # lui $v0, 0x08EE  ->  lui $v0, 0x08E0
+0x08A5C280 0xC44011D8   # lwc1 $f0, fps    ->  lwc1 $f0, 30.0   (arrival radius 30/30)
+# REMOVED (2026-10-18; the lobby HP bars are right without it): this came from the 60 FPS cheat line
+# "_L 0x2016E914 0x2404003C", whose target is 0x0896E914 (a frame-rate request,
+# li $a0,30 -> 60), mistyped as 0x08A6E914. There it replaced the "slot flag
+# clear -> return 0" branch of the party-slot lookup 0x08A6E8E0 with li $a0,60,
+# so every call read *(60+156) = 0xD8 (unmapped, ~50/s in the lobby) and the
+# party HP bars went wrong. The frame-rate requests need no fix here: the
+# port's framerate.c already sets 30/60.
+#0x08A6E914 0x2404003C
 0x089E14CC 0x34020000
 0x089E1600 0x34020000

@@ -114,6 +114,12 @@ static int  g_adhoc_relay_port = 27313;
 static char g_adhoc_stun[256] = "stun.l.google.com:19302";
 static int  g_adhoc_modern_port = 27320;
 static char g_modern_server[256] = "host";
+/* "Open website" (the disc's browser.prx opened this in the PSP browser). */
+#define WEBSITE_DEFAULT "http://www.psp2infinity.jp/psp/"
+static char g_website_url[512] = WEBSITE_DEFAULT;
+/* The game's "PS Store" (the firmware's store, over the running game):
+ * a revived store page, or "" for none. {title} = the game's NP title ID. */
+static char g_store_url[512] = "";
 static int  g_modern_port = 27330;
 
 static const char *const ADHOC_MODE_KEY[3] = { "ppsspp_direct", "ppsspp_relay", "modern" };
@@ -170,6 +176,10 @@ static void cfg_save(void) {
     fprintf(f, "; Modern only, never a PPSSPP server: host = this game hosts (others type its address, shown in\n"
                "; the settings menu), else the hosting player's address (IPv4, IPv6 or name; [v6]:port, v4:port)\n");
     fprintf(f, "modern_server=%s\nmodern_port=%d\n", g_modern_server, g_modern_port);
+    fprintf(f, "; the game's \"open website\" page, shown over the game window (the original, " WEBSITE_DEFAULT ", is offline)\n");
+    fprintf(f, "website_url=%s\n", g_website_url);
+    fprintf(f, "; the game's PS Store, shown over the running game: a revived store page ({title} = the NP title ID); empty = none\n");
+    fprintf(f, "store_url=%s\n", g_store_url);
     fclose(f);
 }
 
@@ -201,6 +211,8 @@ static void cfg_load(void) {
         else if (!strcmp(line, "adhoc_stun")) snprintf(g_adhoc_stun, sizeof g_adhoc_stun, "%s", e);
         else if (!strcmp(line, "adhoc_modern_port")) g_adhoc_modern_port = atoi(e) > 0 && atoi(e) < 65536 ? atoi(e) : 27320;
         else if (!strcmp(line, "modern_server")) snprintf(g_modern_server, sizeof g_modern_server, "%s", e[0] ? e : "host");
+        else if (!strcmp(line, "website_url")) snprintf(g_website_url, sizeof g_website_url, "%s", e[0] ? e : WEBSITE_DEFAULT);
+        else if (!strcmp(line, "store_url")) snprintf(g_store_url, sizeof g_store_url, "%s", e);
         else if (!strcmp(line, "modern_port")) g_modern_port = atoi(e) > 0 && atoi(e) < 65535 ? atoi(e) : 27330;
         else continue;
         seen++;
@@ -215,6 +227,8 @@ static void cfg_load(void) {
 
 const char *online_adhoc_server(void) { return g_adhoc_server; }
 const char *online_modern_server(void) { return g_modern_server; }
+const char *online_website_url(void) { return g_website_url; }
+const char *online_store_url(void) { return g_store_url; }
 void online_set_modern_server(const char *s) {
     snprintf(g_modern_server, sizeof g_modern_server, "%s", s && s[0] ? s : "host");
     cfg_save();
@@ -237,6 +251,25 @@ void online_set_adhoc_mode(int mode) {
 
 /* ---- log --------------------------------------------------------------------------- */
 
+/* A log opened for appending; one over LOG_ROTATE_BYTES becomes <name>.old
+ * first (replacing the previous .old), so the logs stop growing without end
+ * (they reached 74 MB, written and rescanned all session). */
+#define LOG_ROTATE_BYTES (16L * 1024 * 1024)
+FILE *log_open_rotated(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        long size = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : 0;
+        fclose(f);
+        if (size > LOG_ROTATE_BYTES) {
+            char old[1024];
+            snprintf(old, sizeof old, "%s.old", path);
+            remove(old);
+            rename(path, old);
+        }
+    }
+    return fopen(path, "a");
+}
+
 void online_log(const char *fmt, ...) {
     char line[2048];
     va_list ap;
@@ -247,7 +280,7 @@ void online_log(const char *fmt, ...) {
     if (!g_log) {
         char p[700];
         snprintf(p, sizeof p, "%s/online_log.txt", g_dir);
-        g_log = fopen(p, "a");
+        g_log = log_open_rotated(p);
         if (g_log) {
             time_t t = time(NULL);
             fprintf(g_log, "\n==== session %s", ctime(&t));
@@ -950,20 +983,27 @@ static void http_line(const char *line) {
     online_log("http: %s", line);
 }
 
+/* The first LOG_BODY_MAX bytes as hex, written in one go: the dump runs on
+ * the request's worker thread, and line-by-line flushed writes held the log
+ * (which the game thread writes too) for the whole dump every few seconds. */
+#define LOG_BODY_MAX 512
 static void log_body(const char *what, const uint8_t *p, uint32_t n) {
     if (!n) { online_log("http:   %s: (empty)", what); return; }
-    online_log("http:   %s: %u bytes", what, n);
-    char hex[16 * 3 + 1], asc[17];
-    for (uint32_t i = 0; i < n && i < 4096; i += 16) {
+    char block[(LOG_BODY_MAX / 16) * 96 + 64];
+    size_t at = 0;
+    for (uint32_t i = 0; i < n && i < LOG_BODY_MAX; i += 16) {
+        char hex[16 * 3 + 1], asc[17];
         int k = 0;
         for (uint32_t j = 0; j < 16; j++) {
             if (i + j < n) { snprintf(hex + 3 * j, 4, "%02x ", p[i + j]); asc[k++] = p[i + j] >= 32 && p[i + j] < 127 ? (char)p[i + j] : '.'; }
             else memcpy(hex + 3 * j, "   ", 4);
         }
         asc[k] = '\0';
-        online_log("http:     %04x  %s %s", i, hex, asc);
+        at += (size_t)snprintf(block + at, sizeof block - at, "\n           http:     %04x  %s %s", i, hex, asc);
+        if (at >= sizeof block) { at = sizeof block - 1; break; }
     }
-    if (n > 4096) online_log("http:     ... (%u more bytes)", n - 4096);
+    block[at] = '\0';
+    online_log("http:   %s: %u bytes%s%s", what, n, block, n > LOG_BODY_MAX ? "\n           http:     ..." : "");
 }
 
 static int stub_answer(const psp_http_request *q, psp_http_response *r) {
@@ -985,6 +1025,26 @@ static int stub_answer(const psp_http_request *q, psp_http_response *r) {
 }
 
 #ifdef _WIN32
+/* One WinHTTP session for every request (its handles are thread-safe): the
+ * session keeps connections alive, so the game's polling (a POST every few
+ * seconds) reuses one TLS connection instead of a new handshake each time. */
+static HINTERNET http_session(const wchar_t *ua) {
+    static HINTERNET s;
+    static wchar_t s_ua[256];
+    static SRWLOCK lock = SRWLOCK_INIT;
+    AcquireSRWLockExclusive(&lock);
+    if (!s || wcscmp(s_ua, ua) != 0) {                   /* (the game always sends the same agent) */
+        if (s) WinHttpCloseHandle(s);
+        s = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (s) WinHttpSetTimeouts(s, 10000, 10000, 15000, 30000);   /* resolve, connect, send, receive (ms) */
+        wcsncpy(s_ua, ua, 255);
+        s_ua[255] = 0;
+    }
+    HINTERNET r = s;
+    ReleaseSRWLockExclusive(&lock);
+    return r;
+}
+
 static int live_send(const psp_http_request *q, psp_http_response *r) {
     wchar_t host[256], path[1024], ua[256], verb[8];
     MultiByteToWideChar(CP_UTF8, 0, q->host, -1, host, 256);
@@ -992,7 +1052,8 @@ static int live_send(const psp_http_request *q, psp_http_response *r) {
     MultiByteToWideChar(CP_UTF8, 0, q->user_agent, -1, ua, 256);
     MultiByteToWideChar(CP_UTF8, 0, q->method, -1, verb, 8);
     const int https = !strcmp(q->scheme, "https");
-    HINTERNET s = WinHttpOpen(ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    const ULONGLONG t0 = GetTickCount64();
+    HINTERNET s = http_session(ua);
     HINTERNET c = s ? WinHttpConnect(s, host, (INTERNET_PORT)q->port, 0) : NULL;
     HINTERNET h = c ? WinHttpOpenRequest(c, verb, path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, https ? WINHTTP_FLAG_SECURE : 0) : NULL;
     int rc = (int)0x80431063u;
@@ -1015,12 +1076,12 @@ static int live_send(const psp_http_request *q, psp_http_response *r) {
             r->len += got;
         }
         rc = 0;
+        online_log("http:   answered in %llu ms", (unsigned long long)(GetTickCount64() - t0));
     } else {
         online_log("http:   live request failed (WinHTTP error %lu)", (unsigned long)GetLastError());
     }
     if (h) WinHttpCloseHandle(h);
-    if (c) WinHttpCloseHandle(c);
-    if (s) WinHttpCloseHandle(s);
+    if (c) WinHttpCloseHandle(c);                       /* the session (and its pooled connection) stays */
     return rc;
 }
 #endif

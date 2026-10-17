@@ -24,7 +24,7 @@ enum {
 /* Menu items, top to bottom. */
 enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
        MENU_MODERN_SERVER, MENU_RESOLUTION, MENU_RENDERER, MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION,
-       MENU_CLOSE, MENU_ITEMS };
+       MENU_FONT, MENU_CLOSE, MENU_ITEMS };
 
 /* Volumes in tenths (0..10 = 0..100%); attenuation while other programs play
  * sound: ATT_* (OFF, -6 dB, -12 dB, -20 dB). */
@@ -66,6 +66,7 @@ enum {
     MFX_RENDERER    = 1 << 9,   /* renderer changed: save it (used from the next start) */
     MFX_AUDIO       = 1 << 10,  /* a volume or the attenuation changed: apply and save */
     MFX_EDIT_MODERN = 1 << 11,  /* Circle on MODERN SERVER: the caller opens its text editor */
+    MFX_FONT        = 1 << 12,  /* font changed: the caller applies it and sets font_name */
 };
 
 typedef struct {
@@ -84,6 +85,9 @@ typedef struct {
     int      renderer_now; /* REN_*: the renderer running now (set by the caller) */
     int      vol[VOL_N];   /* 0..VOL_STEPS, tenths */
     int      att;          /* ATT_* */
+    int      font;         /* the game's text font, 0..font_n-1; the caller's list (system, PSP, fonts/) */
+    int      font_n;       /* choices; under 2 the item only shows font_name */
+    char     font_name[40];/* the chosen font, shown; set by the caller */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */
     uint32_t game_mask;    /* PSP buttons held through a close, kept from the game until released */

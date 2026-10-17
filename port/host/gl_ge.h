@@ -14,6 +14,13 @@ int  gl_ge_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w
 /* Draw the composed frame (0xAARRGGBB, w x h) into the default framebuffer:
  * cleared to black (cw x ch), the frame in the rect x, y, vw, vh (top-left
  * origin). The platform swaps buffers afterwards. 0 on success. */
+/* The displayed frame drawn into the window as gl_blit_frame does, but
+ * straight from its render target (no readback); 0 when the CPU's copy is the
+ * current one (then gl_ge_present + gl_blit_frame). */
+int  gl_ge_present_direct(uint32_t addr, uint32_t stride, int fmt, int w, int h,
+                          int x, int y, int vw, int vh, int cw, int ch);
+/* A small 0xAARRGGBB image over the window, scaled to vw x vh at x, y. */
+int  gl_draw_overlay(const uint32_t *px, int w, int h, int x, int y, int vw, int vh, int cw, int ch);
 int  gl_blit_frame(const uint32_t *px, int w, int h, int x, int y, int vw, int vh, int cw, int ch);
 void gl_ge_report(FILE *out);
 

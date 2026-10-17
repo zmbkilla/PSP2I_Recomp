@@ -512,9 +512,36 @@ static depth_entry *depth_get(uint32_t off, uint32_t w, uint32_t h) {
 
 /* ---- textures ------------------------------------------------------------------------ */
 
+/* key -> slot index, so a lookup costs the same with 5 or 512 textures
+ * cached (the linear scan grew with play time as the cache filled). Open
+ * addressing; slots hold index + 1, 0 = empty; rebuilt when an entry is
+ * replaced (a miss with the cache full). */
+#define TEX_INDEX 2048
+static uint16_t g_tex_index[TEX_INDEX];
+
+static uint32_t tex_slot(uint64_t key) { return (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 53) & (TEX_INDEX - 1); }
+
+static void tex_index_add(int i) {
+    uint32_t s = tex_slot(g_tex[i].key);
+    while (g_tex_index[s]) s = (s + 1) & (TEX_INDEX - 1);
+    g_tex_index[s] = (uint16_t)(i + 1);
+}
+
+static void tex_index_rebuild(void) {
+    memset(g_tex_index, 0, sizeof g_tex_index);
+    for (int i = 0; i < MAX_TEX; i++) if (g_tex[i].used) tex_index_add(i);
+}
+
+static tex_entry *tex_find(uint64_t key) {
+    for (uint32_t s = tex_slot(key); g_tex_index[s]; s = (s + 1) & (TEX_INDEX - 1)) {
+        tex_entry *t = &g_tex[g_tex_index[s] - 1];
+        if (t->used && t->key == key) return t;
+    }
+    return NULL;
+}
+
 static tex_entry *tex_get(const psp_gpu_state *st) {
-    tex_entry *e = NULL;
-    for (int i = 0; i < MAX_TEX; i++) if (g_tex[i].used && g_tex[i].key == st->tex_key) { e = &g_tex[i]; break; }
+    tex_entry *e = tex_find(st->tex_key);
     uint64_t f = frame_no();
     if (e && e->check_frame == f) { e->last_use = ++g_use; return e; }
     uint64_t h = psp_gpu_texture_hash();
@@ -525,6 +552,7 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
             e = &g_tex[0];
             for (int i = 1; i < MAX_TEX; i++) if (g_tex[i].last_use < e->last_use) e = &g_tex[i];
         }
+        const int evicted = e->used;
         if (e->used && (e->w != st->tex_w || e->h != st->tex_h)) {
             ID3D11ShaderResourceView_Release(e->srv); ID3D11Texture2D_Release(e->tex);
             e->srv = NULL; e->tex = NULL;
@@ -539,6 +567,7 @@ static tex_entry *tex_get(const psp_gpu_state *st) {
             ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)e->tex, NULL, &e->srv);
         }
         e->key = st->tex_key; e->w = st->tex_w; e->h = st->tex_h; e->used = 1;
+        if (evicted) tex_index_rebuild(); else tex_index_add((int)(e - g_tex));
     }
     uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * st->tex_h * 4);
     if (!px) return NULL;

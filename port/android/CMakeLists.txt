@@ -29,7 +29,8 @@ add_subdirectory(${PORT}/atrac_dll atrac_dll)
 if(EXISTS ${PORT}/gen/recomp_funcs.c)
     # ~200 MB of C in one file is more than clang can hold while optimising
     # (it ran out of memory with 32 GB): split_gen.py cuts it into parts that
-    # compile alone, without debug information (-g0), at -O1.
+    # compile alone, without debug information (-g0). -O2: the parts are small
+    # enough for it, and the game's CPU work is most of a frame on a phone.
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(SPLIT_DIR ${CMAKE_BINARY_DIR}/gen_split)
     execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/split_gen.py
@@ -41,7 +42,7 @@ if(EXISTS ${PORT}/gen/recomp_funcs.c)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PORT}/gen/recomp_funcs.c)
     file(GLOB GEN_PARTS ${SPLIT_DIR}/recomp_part_*.c)
     set(GAME_SOURCES ${GEN_PARTS} ${PORT}/gen/recomp_imports.c)
-    set_source_files_properties(${GEN_PARTS} PROPERTIES COMPILE_OPTIONS "-O1;-g0")
+    set_source_files_properties(${GEN_PARTS} PROPERTIES COMPILE_OPTIONS "-O2;-g0")
     set(HAVE_GAME_CODE ON)
     message(STATUS "PSP2i: building with the game code in port/gen")
 else()
@@ -57,6 +58,7 @@ add_library(main SHARED
     ${PORT}/host/atrac_at3.c
     ${PORT}/host/camera.c
     ${PORT}/host/framerate.c
+    ${PORT}/host/menu.c
     ${GAME_SOURCES})
 target_include_directories(main PRIVATE ${PORT}/host ${PORT}/gen ${CMAKE_BINARY_DIR}/gen_split)
 target_compile_definitions(main PRIVATE PSP2I_GLES)

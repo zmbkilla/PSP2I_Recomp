@@ -13,9 +13,11 @@
  *     through libpsp2i_atrac.so;
  *   - frame rate (framerate.c): 30 as the game ships, or 60.
  *
- * Files, on Android in the app's external files folder
- * (Android/data/<package>/files, reachable over USB or with a file manager;
- * elsewhere next to the executable or in $PSP2I_DATA):
+ * Files, on Android in PSP2i/ at the top of the shared storage, where any
+ * file manager and USB reach them (PSP2iActivity.dataFolder: asks for storage
+ * access once and copies over what an older version kept in the private
+ * Android/data/<package>/files, which is used only if access is refused);
+ * elsewhere next to the executable or in $PSP2I_DATA:
  *
  *   the game           an ISO: on Android picked on first start (remembered),
  *                      elsewhere psp2i.ini iso=<path>; or the extracted files
@@ -24,7 +26,7 @@
  *                      user picks, once)
  *   EBOOT.BIN          optional: a decrypted EBOOT, when the disc's is encrypted
  *   GameData/ms/       the memory stick (saves), created on first save
- *   psp2i.ini          optional: fps=60, touch=off; ad hoc multiplayer:
+ *   psp2i.ini          optional: fps=60, touch=off, fps_counter=off; ad hoc multiplayer:
  *                      adhoc_mode=modern (default) | ppsspp_direct | ppsspp_relay,
  *                      modern_server=host (default) or the hosting player's
  *                      address (IPv4/IPv6), adhoc_server= (PPSSPP modes),
@@ -49,6 +51,7 @@
 #include "framerate.h"
 #include "gl_ge.h"
 #include "gl_load.h"
+#include "menu.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -212,6 +215,8 @@ static void layout(int w, int h) {
 #define MAX_FINGERS 10
 static struct { SDL_FingerID id; float x, y; int used, stick; } g_finger[MAX_FINGERS];
 static int g_touch_on = 1;               /* psp2i.ini touch=off hides them for good */
+static int g_fps_on = 1;                 /* psp2i.ini fps_counter=off hides the counter */
+static fps_meter g_fm;
 static int g_touch_shown = 1;            /* hidden while a controller is used */
 static uint32_t g_touch_bits;
 static float g_knob_x, g_knob_y;         /* -1..1 */
@@ -354,6 +359,24 @@ static void draw_shape(int cw, int ch, int shape, float cx, float cy, float rx, 
     glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
+/* "FPS nn.n" (frames the game completed, on the host clock) in the corner of
+ * the picture, in the settings menu's 5x7 font, scaled with the picture. */
+static void draw_fps(int x, int y, int vw, int cw, int ch) {
+    if (!g_fps_on) return;
+    fps_meter_sample(&g_fm, SDL_GetTicksNS() / 1000u, psp_display_flips());
+    enum { W = 64, H = 11 };
+    static uint32_t px[W * H];
+    char line[16];
+    const double v = fps_meter_value(&g_fm);
+    if (v < 0) snprintf(line, sizeof line, "FPS --.-");
+    else       snprintf(line, sizeof line, "FPS %4.1f", v);
+    for (int i = 0; i < W * H; i++) px[i] = 0xFF000000u;
+    menu_image img = { px, W, H };
+    menu_text(&img, 2, 2, line, 0xFFFFFF);
+    const int s = vw / 480 > 1 ? vw / 480 : 1;           /* whole multiples of the PSP's pixels */
+    gl_draw_overlay(px, W, H, x + s * 2, y + s * 2, W * s, H * s, cw, ch);
+}
+
 static void draw_controls(int cw, int ch) {
     if (!g_touch_on || !g_touch_shown) return;
     if (!g_oprog) {
@@ -412,9 +435,6 @@ static int grab_frame(uint32_t addr, uint32_t stride, uint32_t fmt) {
 static void present(void) {
     uint32_t addr, stride, fmt;
     psp_display_get(&addr, &stride, &fmt);
-    const int p = addr ? gl_ge_present(addr, stride, (int)fmt, g_frame, SCREEN_W, SCREEN_H) : 0;
-    if (p == 1) g_have_frame = 1;
-    else if (p == 0 && addr) g_have_frame = grab_frame(addr, stride, fmt);
     int cw = 0, ch = 0;
     SDL_GetWindowSizeInPixels(g_win, &cw, &ch);
     if (cw <= 0 || ch <= 0) return;
@@ -422,8 +442,17 @@ static void present(void) {
     /* the largest 480:272 rectangle that fits, centred */
     int vw = cw, vh = cw * SCREEN_H / SCREEN_W;
     if (vh > ch) { vh = ch; vw = ch * SCREEN_W / SCREEN_H; }
-    if (!g_have_frame) memset(g_frame, 0, sizeof g_frame);
-    gl_blit_frame(g_frame, SCREEN_W, SCREEN_H, (cw - vw) / 2, (ch - vh) / 2, vw, vh, cw, ch);
+    /* the GPU's frame straight to the window when it is the current one (no
+     * readback and re-upload: that round trip dominated the frame on phones) */
+    if (!(addr && gl_ge_present_direct(addr, stride, (int)fmt, SCREEN_W, SCREEN_H,
+                                       (cw - vw) / 2, (ch - vh) / 2, vw, vh, cw, ch))) {
+        const int p = addr ? gl_ge_present(addr, stride, (int)fmt, g_frame, SCREEN_W, SCREEN_H) : 0;
+        if (p == 1) g_have_frame = 1;
+        else if (p == 0 && addr) g_have_frame = grab_frame(addr, stride, fmt);
+        if (!g_have_frame) memset(g_frame, 0, sizeof g_frame);
+        gl_blit_frame(g_frame, SCREEN_W, SCREEN_H, (cw - vw) / 2, (ch - vh) / 2, vw, vh, cw, ch);
+    }
+    draw_fps((cw - vw) / 2, (ch - vh) / 2, vw, cw, ch);
     draw_controls(cw, ch);
     SDL_GL_SwapWindow(g_win);
 }
@@ -444,10 +473,16 @@ static void on_vblank(void) {
 
 static void *gl_get(const char *name) { return (void *)SDL_GL_GetProcAddress(name); }
 
+#ifdef SDL_PLATFORM_ANDROID
+static int android_data_folder(char *out, size_t cap);
+#endif
+
 static void find_base(void) {
     const char *env = getenv("PSP2I_DATA");
 #ifdef SDL_PLATFORM_ANDROID
-    const char *p = env && *env ? env : SDL_GetAndroidExternalStoragePath();
+    char folder[1024];
+    const char *p = env && *env ? env
+                  : android_data_folder(folder, sizeof folder) ? folder : SDL_GetAndroidExternalStoragePath();
 #else
     const char *p = env && *env ? env : SDL_GetBasePath();
 #endif
@@ -472,6 +507,7 @@ static int read_ini(int *fps) {
         line[strcspn(line, "\r\n")] = '\0';
         if (!strncmp(line, "fps=", 4)) *fps = atoi(line + 4) >= 60 ? 60 : 30;
         else if (!strncmp(line, "touch=", 6)) g_touch_on = strncmp(line + 6, "off", 3) != 0;
+        else if (!strncmp(line, "fps_counter=", 12)) g_fps_on = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "iso=", 4)) snprintf(g_iso_path, sizeof g_iso_path, "%s", line + 4);
         else if (!strncmp(line, "adhoc_mode=", 11))
             g_adhoc_mode = !strcmp(line + 11, "ppsspp_direct") ? PSP_ADHOC_MODE_PPSSPP_DIRECT
@@ -485,6 +521,9 @@ static int read_ini(int *fps) {
 }
 
 static int path_exists(const char *p) { return SDL_GetPathInfo(p, NULL); }
+
+/* ad hoc / server messages, into psp2i_log.txt */
+static void net_line(const char *line) { fprintf(stderr, "net: %s\n", line); }
 
 #ifdef SDL_PLATFORM_ANDROID
 #include <jni.h>
@@ -517,8 +556,14 @@ static void android_ask_modern_server(char *out, size_t cap) {
     JNIEnv *env;
     jclass c = activity_class(&env);
     if (!c) return;
-    jmethodID m = (*env)->GetStaticMethodID(env, c, "askModernServer", "()Ljava/lang/String;");
-    jstring s = m ? (jstring)(*env)->CallStaticObjectMethod(env, c, m) : NULL;
+    /* this device's addresses, for the players who join it */
+    char v4[64] = "", v6[128] = "", here[256];
+    psp_adhoc_host_addresses(v4, sizeof v4, v6, sizeof v6);
+    snprintf(here, sizeof here, "%s%s%s", v4, v4[0] && v6[0] ? "  or  " : "", v6);
+    jstring jhere = (*env)->NewStringUTF(env, here);
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "askModernServer", "(Ljava/lang/String;)Ljava/lang/String;");
+    jstring s = m ? (jstring)(*env)->CallStaticObjectMethod(env, c, m, jhere) : NULL;
+    if (jhere) (*env)->DeleteLocalRef(env, jhere);
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     if (s) {
         const char *t = (*env)->GetStringUTFChars(env, s, NULL);
@@ -537,6 +582,29 @@ static int android_copy_fonts(void) {
     jmethodID m = (*env)->GetStaticMethodID(env, c, "copyFonts", "()Z");
     const int ok = m ? (*env)->CallStaticBooleanMethod(env, c, m) : 0;
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, c);
+    return ok;
+}
+
+/* PSP2iActivity.dataFolder(): the folder the player can open (asks for
+ * storage access the first time). 0 if there is none to report. */
+static int android_data_folder(char *out, size_t cap) {
+    JNIEnv *env;
+    jclass c = activity_class(&env);
+    if (!c) return 0;
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "dataFolder", "()Ljava/lang/String;");
+    jstring s = m ? (jstring)(*env)->CallStaticObjectMethod(env, c, m) : NULL;
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); s = NULL; }
+    int ok = 0;
+    if (s) {
+        const char *u = (*env)->GetStringUTFChars(env, s, NULL);
+        if (u) {
+            snprintf(out, cap, "%s", u);
+            ok = out[0] != '\0';
+            (*env)->ReleaseStringUTFChars(env, s, u);
+        }
+        (*env)->DeleteLocalRef(env, s);
+    }
     (*env)->DeleteLocalRef(env, c);
     return ok;
 }
@@ -665,6 +733,7 @@ int main(int argc, char **argv) {
 
     psp_hle_init();
     psp_io_set_root(root);
+    psp_net_set_log(net_line);
     {   /* ad hoc multiplayer, from psp2i.ini (the Windows build has its settings menu) */
 #ifdef SDL_PLATFORM_ANDROID
         android_ask_modern_server(g_modern_server, sizeof g_modern_server);
@@ -690,6 +759,7 @@ int main(int argc, char **argv) {
     psp_audio_set_sink(audio_sink);
     atrac_at3_init(NULL);
     framerate_init(fps);
+    fps_meter_init(&g_fm);
     camera_init(1.0f);
     psp_sched_set_vblank_hook(on_vblank);
 

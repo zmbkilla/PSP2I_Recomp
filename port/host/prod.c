@@ -7,7 +7,9 @@
  *   <root>\GameData\disc\PSP_GAME\PARAM.SFO, USRDIR\   the extracted disc
  *   <root>\EBOOT.BIN                                  a decrypted game EBOOT, or else the
  *                                                     disc's PSP_GAME\SYSDIR\EBOOT.BIN
- *   <root>\GameData\flash\font\*.pgf                  the PSP firmware fonts
+ *   <root>\GameData\flash\font\*.pgf                  optional: the PSP firmware fonts (without
+ *                                                     them the game's text uses a Windows font;
+ *                                                     font_win.c)
  *   <root>\SDL3.dll                                   controllers, sound
  *   <root>\psp2i_atrac.dll                            the ATRAC music decoder
  *
@@ -34,12 +36,6 @@
 #define CODE_LO   0x08804040u
 #define CODE_HI   0x08DFC170u
 #define CODE_HASH 0xE94D5451B49E4AB4ull
-
-static const char *const FONTS[] = {
-    "jpn0.pgf", "kr0.pgf",
-    "ltn0.pgf", "ltn1.pgf", "ltn2.pgf", "ltn3.pgf", "ltn4.pgf", "ltn5.pgf", "ltn6.pgf", "ltn7.pgf",
-    "ltn8.pgf", "ltn9.pgf", "ltn10.pgf", "ltn11.pgf", "ltn12.pgf", "ltn13.pgf", "ltn14.pgf", "ltn15.pgf",
-};
 
 static int file_exists(const char *p) {
     FILE *f = fopen(p, "rb");
@@ -167,11 +163,6 @@ int prod_check(const char *dir, char *root, size_t root_cap, char *eboot, size_t
         add(missing, sizeof missing, "%s", line);
     }
 
-    for (size_t i = 0; i < sizeof FONTS / sizeof FONTS[0]; i++) {
-        snprintf(p, sizeof p, "%s\\flash\\font\\%s", root, FONTS[i]);
-        if (!file_exists(p)) add(missing, sizeof missing, "  - a PSP firmware font: %s\n", p);
-    }
-
     snprintf(p, sizeof p, "%s\\SDL3.dll", dir);
     if (!file_exists(p)) add(missing, sizeof missing, "  - %s\n", p);
     if (!glob_exists(dir, "psp2i_atrac.dll")) add(missing, sizeof missing, "  - the music decoder: psp2i_atrac.dll next to psp2i.exe%s\n", "");
@@ -182,7 +173,6 @@ int prod_check(const char *dir, char *root, size_t root_cap, char *eboot, size_t
              "PSP2i cannot start. These are missing or unusable:\n\n%s\n"
              "Folder layout (next to psp2i.exe):\n"
              "  <game>.iso                    the game disc image (or GameData\\disc\\PSP_GAME\\...)\n"
-             "  GameData\\flash\\font\\*.pgf    the PSP firmware fonts\n"
              "See README.txt.", missing);
     fprintf(stderr, "%s\n", msg);
 #ifdef _WIN32

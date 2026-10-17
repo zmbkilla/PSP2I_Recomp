@@ -76,11 +76,14 @@
 #include "h264_openh264.h"
 #include "framerate.h"
 #include "menu.h"
+#include "font_win.h"
+#include "web_overlay.h"
 #include "camera.h"
 #include "login.h"
 #include "online.h"
 #include "savecrypt.h"
 #include "gamelog.h"
+#include "functrace.h"
 #include "prod.h"
 #include "textedit.h"
 #include "present.h"
@@ -91,6 +94,7 @@
 #  include <direct.h>
 #  include <dbghelp.h>
 #  include <mmsystem.h>
+#  include <psapi.h>
 #  define host_mkdir(p) _mkdir(p)
 #else
 #  include <sys/stat.h>
@@ -341,6 +345,7 @@ static HWND g_wnd;
 static int g_alt_enter;                     /* Alt+Enter pressed; handled with the menu */
 static uint32_t g_keys;
 static WPARAM g_menu_vk = VK_F1;
+static ULONGLONG g_close_at;       /* when the window was closed (GetTickCount64); 0 = not closed */
 
 /* Keys for the menu only: the hotkey, and Escape/Backspace as Back. */
 static uint32_t host_key(WPARAM vk) {
@@ -377,6 +382,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN: {
         const int first = !(lp & (1 << 30));                     /* not an auto-repeat */
         if (wp == VK_F12 && first) g_dump_key = 1;
+        if (wp == VK_F9 && first && g_menu_vk != VK_F9) { functrace_toggle(); return 0; }   /* function-activity recorder */
         if (text_ui_open() && wp != g_menu_vk) {
             uint32_t k = 0;
             switch (wp) {
@@ -417,9 +423,17 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SYSCHAR:
         if (wp == '\r') return 0;                                 /* no beep for Alt+Enter */
         break;
-    case WM_SIZE:    present_resized(); InvalidateRect(h, NULL, FALSE); return 0;
+    case WM_SIZE:    present_resized(); web_overlay_resize(); InvalidateRect(h, NULL, FALSE); return 0;
     case WM_ERASEBKGND: return 1;                                 /* WM_PAINT covers it all */
-    case WM_CLOSE:   psp_request_exit(); return 0;
+    case WM_CLOSE:
+        /* Gone at once: the game stops at its next check and the clean-up
+         * (report, devices, libraries) runs after, out of sight and silent. */
+        web_overlay_close();                   /* a web page open over the game (LoadExec, below) */
+        g_close_at = GetTickCount64();
+        ShowWindow(h, SW_HIDE);
+        audio_set_master(0.0f);
+        psp_request_exit();
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
@@ -772,9 +786,10 @@ static void ctrl_commit(void) {
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     if (g_rep_on) { bits |= g_rep_bits; ax = g_rep_ax; ay = g_rep_ay; }
     /* The settings menu takes all input while open (menu_filter_game). */
-    if (g_login.state != LOGIN_CLOSED) {
-        /* The sign-in screen has the input; buttons still held when it
-         * closes stay hidden from the game until released. */
+    if (g_login.state != LOGIN_CLOSED || web_overlay_active()) {
+        /* The sign-in screen (or a web page over the game: the PS Store)
+         * has the input; buttons still held when it closes stay hidden from
+         * the game until released. */
         g_menu.game_mask |= bits & ~PRESS_MENU;
         bits = 0;
         ax = ay = 128;
@@ -801,6 +816,7 @@ static int g_ren_saved = REN_D3D11;
 static int g_vol_saved[VOL_N] = { VOL_STEPS, VOL_STEPS, VOL_STEPS };
 static int g_att_saved = ATT_DEFAULT;
 static int g_openh264 = 1;                  /* fetch Cisco's OpenH264 for movies (h264_openh264.c) */
+static char g_font_key[260] = "system";     /* the game's text font (font_win.h): system, psp, or a file in fonts/ */
 
 /* "80" -> 8 tenths (0..100, rounded to 10%). */
 static int vol_parse(const char *s) {
@@ -821,6 +837,10 @@ static int display_load(void) {
         else if (!strncmp(line, "sfx_volume=", 11))    g_vol_saved[VOL_SFX] = vol_parse(line + 11);
         else if (!strncmp(line, "attenuation=", 12))   g_att_saved = !strncmp(line + 12, "off", 3) ? ATT_OFF : menu_att_parse(atoi(line + 12));
         else if (!strncmp(line, "openh264=", 9))       g_openh264 = strncmp(line + 9, "off", 3) != 0;
+        else if (!strncmp(line, "font=", 5)) {
+            snprintf(g_font_key, sizeof g_font_key, "%s", line + 5);
+            g_font_key[strcspn(g_font_key, "\r\n")] = '\0';
+        }
     }
     fclose(f);
     if (res >= 0) g_res_saved = res;
@@ -842,6 +862,8 @@ static void display_save(int res) {
     else fprintf(f, "attenuation=%ddb\n", menu_att_db(g_att_saved));
     fprintf(f, "; movies: on = download Cisco's OpenH264 decoder on first start (licenses/OpenH264-NOTICE.txt), off = black movies\n");
     fprintf(f, "openh264=%s\n", g_openh264 ? "on" : "off");
+    fprintf(f, "; the game's text font: system (Windows' font), psp (flash/font, if there), or a .ttf/.otf/.ttc in the fonts folder\n");
+    fprintf(f, "font=%s\n", g_font_key);
     fclose(f);
 }
 
@@ -956,6 +978,13 @@ static void menu_step(void) {
         if (!g_headless) display_save(g_res_saved);
         fprintf(stderr, "menu: renderer %s (saved; used from the next start)\n", menu_ren_key(g_menu.renderer));
     }
+    if (fx & MFX_FONT) {
+        g_menu.font = font_win_select(g_menu.font);
+        snprintf(g_menu.font_name, sizeof g_menu.font_name, "%s", font_win_name(g_menu.font));
+        snprintf(g_font_key, sizeof g_font_key, "%s", font_win_key(g_menu.font));
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: font %s (saved; text drawn from now on)\n", g_font_key);
+    }
     if (fx & MFX_SHOW_FPS) fprintf(stderr, "menu: FPS counter %s\n", g_menu.show_fps ? "on" : "off");
     if (fx & MFX_RS_SPEED) {
         camera_set_speed(menu_rs_speed(&g_menu));
@@ -1000,15 +1029,48 @@ static int      g_fps_n;
 static uint64_t g_fps_last_flips, g_fps_last_us;
 static int      g_fps_log = -1;
 
+/* Once a minute, one "perf:" line in online_log.txt: frame rate, frame busy
+ * times, GE and idle share and the process's memory over that minute -- so
+ * slowdowns that only come in long sessions show what grew with them. */
+static void perf_minute(double fps) {
+    static double sum, mn = 1e9;
+    static int n;
+    static uint64_t last_fb[6], last_ge, last_idle, last_us;
+    sum += fps; n++;
+    if (fps < mn) mn = fps;
+    if (n < 60) return;
+    const uint64_t now = psp_sched_now_us(), ge = psp_ge_host_us(), idle = psp_sched_idle_us();
+    uint64_t fb[6];
+    psp_display_frame_busy(fb);
+    const double span = last_us ? (double)(now - last_us) : (double)now;
+    double mb = 0;
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) mb = (double)pmc.PagefileUsage / (1024.0 * 1024.0);
+#endif
+    online_log("perf: %.1f min, fps avg %.1f min %.1f; frames <16.7ms %llu, <25 %llu, <33 %llu, <50 %llu, 50+ %llu; "
+               "GE %.1f%%, idle %.1f%%; memory %.0f MB",
+               now / 60e6, sum / n, mn,
+               (unsigned long long)(fb[0] + fb[1] - last_fb[0] - last_fb[1]), (unsigned long long)(fb[2] - last_fb[2]),
+               (unsigned long long)(fb[3] - last_fb[3]), (unsigned long long)(fb[4] - last_fb[4]),
+               (unsigned long long)(fb[5] - last_fb[5]),
+               span > 0 ? 100.0 * (double)(ge - last_ge) / span : 0.0,
+               span > 0 ? 100.0 * (double)(idle - last_idle) / span : 0.0, mb);
+    memcpy(last_fb, fb, sizeof fb);
+    last_ge = ge; last_idle = idle; last_us = now;
+    sum = 0; n = 0; mn = 1e9;
+}
+
 static void sample_fps(uint64_t vb) {
     if (vb % 60) return;
     uint64_t now = psp_sched_now_us(), flips = psp_display_flips();
-    if (g_fps_last_us && g_fps_n < FPS_MAX_WIN) {
+    if (g_fps_last_us) {
         double fps = (double)(flips - g_fps_last_flips) * 1e6 / (double)(now - g_fps_last_us);
-        g_fps_win[g_fps_n++] = fps;
+        if (g_fps_n < FPS_MAX_WIN) g_fps_win[g_fps_n++] = fps;
         if (g_fps_log < 0) g_fps_log = getenv("PSP2I_FPS_LOG") != NULL;
         if (g_fps_log) fprintf(stderr, "fps: %5.1f at vblank %llu (counter shows %.1f)\n", fps,
                                (unsigned long long)vb, fps_meter_value(&g_fpsm));
+        if (!g_headless) perf_minute(fps);
     }
     g_fps_last_flips = flips;
     g_fps_last_us = now;
@@ -1548,14 +1610,13 @@ int game_stack(char *out, size_t cap, int max_frames) {
 
 /* --watch hits in a release build: name the recompiled functions on the host
  * stack (the host stack is the game's call stack), innermost first. */
-static void watch_backtrace(uint32_t addr, uint32_t value) {
-    (void)addr; (void)value;
+/* The recompiled functions among `frames`, innermost first, as " name name ...". */
+static void stack_names(void *const *frames, USHORT n, char *line, size_t cap) {
     static int sym_ready;
     HANDLE proc = GetCurrentProcess();
     if (!sym_ready) { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS); SymInitialize(proc, NULL, TRUE); sym_ready = 1; }
-    void *frames[24];
-    const USHORT n = CaptureStackBackTrace(1, 24, frames, NULL);
-    fprintf(stderr, "    stack:");
+    size_t len = 0;
+    line[0] = '\0';
     for (USHORT i = 0; i < n; i++) {
         char buf[sizeof(SYMBOL_INFO) + 256];
         SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
@@ -1563,12 +1624,74 @@ static void watch_backtrace(uint32_t addr, uint32_t value) {
         si->MaxNameLen = 255;
         DWORD64 d = 0;
         if (SymFromAddr(proc, (DWORD64)(uintptr_t)frames[i], &d, si)) {
-            if (!strncmp(si->Name, "psp_", 4) && strcmp(si->Name, "psp_write_f32") && strcmp(si->Name, "psp_write32"))
-                fprintf(stderr, " %s", si->Name);
+            if (!strncmp(si->Name, "psp_", 4) && strncmp(si->Name, "psp_write", 9) && strncmp(si->Name, "psp_read", 8) &&
+                len + strlen(si->Name) + 2 < cap)
+                len += (size_t)snprintf(line + len, cap - len, " %s", si->Name);
             if (!strcmp(si->Name, "thread_body")) break;
         }
     }
-    fprintf(stderr, "\n");
+}
+
+/* Read-watch hits (psp_mem_watch_read): each distinct call stack once, with a
+ * count every 600th repeat, so a reader that runs every frame stays readable. */
+static void read_watch_hit(uint32_t watched, uint32_t addr) {
+    static struct { uint64_t key; uint32_t hits; } seen[64];
+    static int nseen, busy;
+    if (busy) return;                      /* our own psp_read32 below reads the watched word */
+    void *frames[16];
+    const USHORT n = CaptureStackBackTrace(1, 16, frames, NULL);
+    uint64_t key = watched;
+    for (USHORT i = 0; i < n; i++) key = key * 1000003u ^ (uint64_t)(uintptr_t)frames[i];
+    int k = 0;
+    while (k < nseen && seen[k].key != key) k++;
+    if (k < nseen) {
+        if (++seen[k].hits % 600 == 0)
+            gamelog_note("[rwatch] 0x%08X: stack #%d read %u times", watched, k, seen[k].hits);
+        return;
+    }
+    if (nseen == 64) return;
+    seen[k].key = key; seen[k].hits = 1; nseen++;
+    busy = 1;
+    char line[900];
+    stack_names(frames, n, line, sizeof line);
+    gamelog_note("[rwatch] 0x%08X read (at 0x%08X, value %u) at vblank %llu, stack #%d:%s", watched, addr,
+                 psp_read32(watched), (unsigned long long)psp_sched_vblank_count(), k, line);
+    busy = 0;
+}
+
+/* Unmapped accesses (psp_mem_set_bad_hook): each distinct call stack once in
+ * game_log.txt, with the address, so a null-pointer read in game code shows
+ * which code does it. */
+static void bad_access_hit(uint32_t addr, int write, int width) {
+    static struct { uint64_t key; uint32_t hits; } seen[48];
+    static int nseen;
+    void *frames[16];
+    const USHORT n = CaptureStackBackTrace(1, 16, frames, NULL);
+    uint64_t key = (uint64_t)write;
+    for (USHORT i = 0; i < n; i++) key = key * 1000003u ^ (uint64_t)(uintptr_t)frames[i];
+    int k = 0;
+    while (k < nseen && seen[k].key != key) k++;
+    if (k < nseen) {
+        if (++seen[k].hits % 1000 == 0) gamelog_note("[bad] stack #%d: %u accesses", k, seen[k].hits);
+        return;
+    }
+    if (nseen == 48) return;
+    seen[k].key = key; seen[k].hits = 1; nseen++;
+    char line[900];
+    stack_names(frames, n, line, sizeof line);
+    gamelog_note("[bad] %s%d at 0x%08X at vblank %llu, stack #%d:%s", write ? "write" : "read", width * 8, addr,
+                 (unsigned long long)psp_sched_vblank_count(), k, line);
+}
+
+static void watch_backtrace(uint32_t addr, uint32_t value) {
+    void *frames[24];
+    const USHORT n = CaptureStackBackTrace(1, 24, frames, NULL);
+    char line[900];
+    stack_names(frames, n, line, sizeof line);
+    fprintf(stderr, "    stack:%s\n", line);
+    /* also in the logs the user sends back */
+    gamelog_note("[watch] write 0x%08X to 0x%08X at vblank %llu; stack:%s", value, addr,
+                 (unsigned long long)psp_sched_vblank_count(), line);
 }
 #endif
 
@@ -1734,6 +1857,55 @@ static void crash_handlers_install(void) {
 }
 #endif
 
+/* ---- sceKernelLoadExec: "open website" ------------------------------------------
+ * The game replaces itself with another program. PSP2i does it for one thing:
+ * disc0:/PSP_GAME/USRDIR/module/browser.prx, which opened its website in the
+ * PSP browser and then loaded the game again. Here the one window shows
+ * whatever runs: the page (web_overlay.cpp; website_url= in
+ * psp2i_online.ini) while it is open, then the game booting again in place
+ * (main's reboot loop) -- as the PSP did. The game has already torn itself
+ * down when it calls this, so there is nothing to return to. */
+static int g_reboot;                  /* the run ended in LoadExec: boot the game again */
+
+static void loadexec_host(const char *path, uint32_t argsize, uint32_t argp) {
+    (void)argp;
+    online_log("game: sceKernelLoadExec(%s, %u argument bytes)", path, argsize);
+#ifdef _WIN32
+    if (g_headless || !g_wnd) return;                   /* nothing to show; the game ends */
+    const size_t n = strlen(path);
+    if (n >= 11 && !_stricmp(path + n - 11, "browser.prx")) {
+        audio_set_master(0.0f);                         /* the game is gone; no stuck sound under the page */
+        web_overlay_show(g_wnd, online_website_url(), NULL);
+        if (psp_exit_requested()) return;               /* the window was closed while the page was up */
+    }
+    /* browser.prx's own last step (and any other program): the game again */
+    g_reboot = 1;
+#else
+    (void)path;
+#endif
+}
+
+/* The game's PS Store (psp_np_set_store): on a PSP the firmware's store, drawn
+ * over the game while it stays in the PSN lobby. Here: store_url= of
+ * psp2i_online.ini ({title} = the NP title ID) over the running game
+ * (web_overlay_open), the game's input held back meanwhile (ctrl path). */
+static int store_open(const char *title_id) {
+#ifdef _WIN32
+    const char *url = online_store_url();
+    if (!url[0] || g_headless || !g_wnd) return -1;     /* none configured: the dialog just finishes */
+    char full[1024];
+    const char *t = strstr(url, "{title}");
+    if (t) snprintf(full, sizeof full, "%.*s%s%s", (int)(t - url), url, title_id, t + 7);
+    else snprintf(full, sizeof full, "%s", url);
+    online_log("game: PS Store -> %s (over the game)", full);
+    return web_overlay_open(g_wnd, full);
+#else
+    (void)title_id;
+    return -1;
+#endif
+}
+static int store_showing(void) { return web_overlay_poll(); }
+
 /* ---- main ------------------------------------------------------------------ */
 
 static void exe_dir(char *out, size_t cap) {
@@ -1750,6 +1922,51 @@ static int exists(const char *p) {
     FILE *f = fopen(p, "rb");
     if (f) fclose(f);
     return f != NULL;
+}
+
+/* The guest side of a boot: fresh memory and CPU, the EBOOT (eboot, else the
+ * opened disc image's), the firmware state, the recompiled functions, and the
+ * boot path module_start receives (*argp, its length *arglen). Run at start
+ * and again when the game reboots in place (g_reboot); the window, renderer,
+ * sound, menu and online state are the host's and stay. 0 on success. */
+static const char BOOT_PATH[] = "disc0:/PSP_GAME/SYSDIR/EBOOT.BIN";
+
+static int boot_guest(const char *eboot, const char *iso, const char *root, const char *ms_dir,
+                      module_info *mi, uint32_t *argp) {
+    if (!psp_mem.ram) {
+        if (psp_mem_init() != 0) { fprintf(stderr, "psp2i: psp_mem_init failed\n"); return 1; }
+    } else {                                  /* a reboot: the same buffers (the host may hold pointers), cleared */
+        memset(psp_mem.ram, 0, PSP_RAM_SIZE);
+        memset(psp_mem.vram, 0, PSP_VRAM_SIZE);
+        memset(psp_mem.scratch, 0, PSP_SCRATCH_SIZE);
+    }
+    psp_cpu_reset();
+    if (eboot[0]) {
+        if (load_elf(eboot, mi) != 0) return 1;
+    } else {
+        uint32_t len = 0;
+        uint8_t *b = psp_io_disc_file("PSP_GAME/SYSDIR/EBOOT.BIN", &len);
+        if (!b) { fprintf(stderr, "psp2i: %s has no PSP_GAME/SYSDIR/EBOOT.BIN\n", iso); return 1; }
+        if (load_elf_buf(b, len, "the disc image's EBOOT.BIN", mi) != 0) return 1;
+    }
+    printf("module '%s': entry 0x%08X, gp 0x%08X, image 0x%08X..0x%08X\n",
+           mi->name, mi->entry, mi->gp, mi->load_lo, mi->load_hi);
+
+    psp_hle_init();
+    psp_io_set_root(root);
+    {
+        const char *e = getenv("PSP2I_VFPU_NOINLINE");     /* A/B: runtime VFPU calls only */
+        if (e && *e == '1') { psp_vfpu_force_runtime(1); printf("vfpu: inline operations disabled (PSP2I_VFPU_NOINLINE=1)\n"); }
+    }
+    if (ms_dir[0]) { psp_io_set_ms_root(ms_dir); printf("ms:    %s\n", ms_dir); }
+    psp_sysmem_set_heap(mi->load_hi, USER_PARTITION_TOP);
+    psp_recomp_register();
+
+    /* argv[0]: the path the kernel booted the module from, copied into guest
+     * memory; module_start receives (length including NUL, pointer). */
+    *argp = psp_sysmem_alloc(0x100, 1);
+    psp_mem_write_block(*argp, BOOT_PATH, (uint32_t)sizeof BOOT_PATH);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -1910,38 +2127,21 @@ int main(int argc, char **argv) {
      * before, which is why profiled runs looked faster. */
     timeBeginPeriod(1);
     psp_mem_set_watch_hook(watch_backtrace);
+    psp_mem_set_read_watch_hook(read_watch_hit);
+    psp_mem_set_bad_hook(bad_access_hit);
+    psp_set_loadexec_hook(loadexec_host);
+    psp_np_set_store(store_open, store_showing);
 #endif
     printf("root:  %s\ndisc:  %s\neboot: %s\n", root, iso[0] ? iso : "extracted (root/disc)",
            eboot[0] ? eboot : "from the disc image");
-
-    if (psp_mem_init() != 0) { fprintf(stderr, "psp2i: psp_mem_init failed\n"); return 1; }
-    psp_cpu_reset();
 
     module_info mi;
     if (iso[0] && psp_io_open_disc_image(iso) != 0) {
         fprintf(stderr, "psp2i: %s is not a PSP disc image (.iso)\n", iso);
         return 1;
     }
-    if (eboot[0]) {
-        if (load_elf(eboot, &mi) != 0) return 1;
-    } else {
-        uint32_t len = 0;
-        uint8_t *b = psp_io_disc_file("PSP_GAME/SYSDIR/EBOOT.BIN", &len);
-        if (!b) { fprintf(stderr, "psp2i: %s has no PSP_GAME/SYSDIR/EBOOT.BIN\n", iso); return 1; }
-        if (load_elf_buf(b, len, "the disc image's EBOOT.BIN", &mi) != 0) return 1;
-    }
-    printf("module '%s': entry 0x%08X, gp 0x%08X, image 0x%08X..0x%08X\n",
-           mi.name, mi.entry, mi.gp, mi.load_lo, mi.load_hi);
-
-    psp_hle_init();
-    psp_io_set_root(root);
-    {
-        const char *e = getenv("PSP2I_VFPU_NOINLINE");     /* A/B: runtime VFPU calls only */
-        if (e && *e == '1') { psp_vfpu_force_runtime(1); printf("vfpu: inline operations disabled (PSP2I_VFPU_NOINLINE=1)\n"); }
-    }
-    if (ms_dir[0]) { psp_io_set_ms_root(ms_dir); printf("ms:    %s\n", ms_dir); }
-    psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
-    psp_recomp_register();
+    uint32_t argp = 0;
+    if (boot_guest(eboot, iso, root, ms_dir, &mi, &argp) != 0) return 1;
     if (dump_addr) dump_arm(dump_addr, dump_path);
     if (args_addr) args_arm(args_addr, args_flip);   /* entry hooks fire in trace builds only */
     if (oracle_addr || oracle_all) {
@@ -1952,12 +2152,6 @@ int main(int argc, char **argv) {
         if (oracle_all)  oracle_arm_sweep(mi.stub_lo, mi.stub_hi);
 #endif
     }
-
-    /* argv[0]: the path the kernel booted the module from, copied into guest
-     * memory; module_start receives (length including NUL, pointer). */
-    static const char boot_path[] = "disc0:/PSP_GAME/SYSDIR/EBOOT.BIN";
-    uint32_t argp = psp_sysmem_alloc(0x100, 1);
-    psp_mem_write_block(argp, boot_path, (uint32_t)sizeof boot_path);
 
     snprintf(g_display_ini, sizeof g_display_ini, "%s/psp2i_display.ini", dir);
     int res = display_load();
@@ -2006,6 +2200,19 @@ int main(int argc, char **argv) {
     for (int k = 0; k < VOL_N; k++) g_menu.vol[k] = g_vol_saved[k];
     g_menu.att = g_att_saved;
     audio_apply();
+    {   /* the game's text font: the saved choice, else Windows' own */
+        char fonts_dir[700], pgf_dir[700];
+        snprintf(fonts_dir, sizeof fonts_dir, "%s/fonts", dir);
+        snprintf(pgf_dir, sizeof pgf_dir, "%s/flash/font", root);
+#ifdef _WIN32
+        CreateDirectoryA(fonts_dir, NULL);     /* where extra fonts go */
+#endif
+        g_menu.font_n = font_win_init(fonts_dir, pgf_dir);
+        int fi = font_win_find(g_font_key);
+        if (fi < 0) { fprintf(stderr, "font: \"%s\" not found; using the system font\n", g_font_key); fi = 0; }
+        g_menu.font = font_win_select(fi);
+        snprintf(g_menu.font_name, sizeof g_menu.font_name, "%s", font_win_name(g_menu.font));
+    }
     fps_meter_init(&g_fpsm);
     framerate_init(fps);
     menu_set_rs_speed(&g_menu, rs_speed);
@@ -2015,18 +2222,50 @@ int main(int argc, char **argv) {
     psp_savedata_set_crypto(&SAVE_CRYPTO);
     online_init(dir, &g_login);
     gamelog_init(dir);
+    functrace_init(dir);
     psp_sched_set_vblank_hook(on_vblank);
 
-    printf("starting module_start at 0x%08X\n", mi.entry);
-    fflush(stdout);
-    int rc = psp_sched_run(mi.entry, (uint32_t)sizeof boot_path, argp, 0x20, 0x40000, mi.gp);
+    int rc;
+    for (;;) {
+        printf("starting module_start at 0x%08X\n", mi.entry);
+        fflush(stdout);
+        rc = psp_sched_run(mi.entry, (uint32_t)sizeof BOOT_PATH, argp, 0x20, 0x40000, mi.gp);
+        if (!g_reboot || g_close_at) break;
+        /* LoadExec (the website): the game again, in the same window */
+        g_reboot = 0;
+        online_log("game: booting the game again (after the website)");
+        if (boot_guest(eboot, iso, root, ms_dir, &mi, &argp) != 0) { rc = 1; break; }
+        audio_apply();                          /* the volume muted while the page was up */
+    }
 
+#ifdef _WIN32
+    /* Closing: how long each step took (a slow one shows in online_log.txt). */
+    const ULONGLONG t_stop = GetTickCount64();
+    if (g_close_at) online_log("exit: window closed; the game stopped after %llu ms", t_stop - g_close_at);
+#endif
     report();
 #ifdef _WIN32
     timeEndPeriod(1);
+    const ULONGLONG t_report = GetTickCount64();
 #endif
-    if (g_sdl_on) input_sdl_shutdown();
+    /* Sound first: input_sdl_shutdown ends with SDL_Quit, which frees the
+     * audio streams too; destroying them after that freed them twice
+     * (heap corruption 0xC0000374 on nearly every exit, and the crash
+     * dump it wrote was the pause after closing the window). */
     audio_shutdown();
+    if (g_sdl_on) input_sdl_shutdown();
+#ifdef _WIN32
+    const ULONGLONG t_devices = GetTickCount64();
+#endif
     psp_mem_free();
+#ifdef _WIN32
+    if (g_close_at)
+        online_log("exit: report %llu ms, controllers and sound %llu ms, memory %llu ms",
+                   t_report - t_stop, t_devices - t_report, GetTickCount64() - t_devices);
+    /* What is left (Windows unloading the libraries, their threads) only
+     * delays the process ending; the logs are written, so end it here. */
+    fflush(NULL);
+    if (g_close_at) TerminateProcess(GetCurrentProcess(), (UINT)rc);
+#endif
     return rc;
 }
