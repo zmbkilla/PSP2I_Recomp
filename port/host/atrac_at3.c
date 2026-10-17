@@ -22,14 +22,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(_WIN32) || defined(__unix__)
+#if defined(_WIN32) || defined(__unix__) || defined(__APPLE__)
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #define AT3_LIB "psp2i_atrac.dll"
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#define AT3_LIB "libpsp2i_atrac.dylib"
+#else
 #define AT3_LIB "libpsp2i_atrac.so"
+#endif
 #endif
 
 static struct {

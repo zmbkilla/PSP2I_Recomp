@@ -132,3 +132,10 @@ Audio functionality makes use of **FFmpeg**. pmf is not handled yet
 ### PSP2i Community
 
 Thanks to the **Phantasy Star Portable 2 Infinity community** for research and documentation of the game and providing mods like the fan translated patch.
+
+## Experimental Apple Silicon macOS build
+
+A native SDL3/OpenGL build with FFmpeg movie decoding is available. See
+[the macOS build instructions](port/macos/README.md) for dependencies, game-file
+setup, controls, limitations, and decoder validation. Run `./build_macos.sh`
+to build, then `./Launch-PSP2i.command` to play.

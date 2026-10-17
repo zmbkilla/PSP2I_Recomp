@@ -33,8 +33,9 @@
  *                      nickname=
  *   psp2i_log.txt      the log of the last run
  *
- * Not here yet: online play, the settings menu, movie video (movies play
- * black with sound) and save encryption (saves are written unencrypted, so
+ * Optional PSP2I_LIBAV supplies FFmpeg movie video on desktop builds.
+ * Not here yet: online play, the settings menu, movie video without that
+ * backend (movies play black with sound), and save encryption (saves are written unencrypted, so
  * they do not move to and from a PSP or the Windows build). */
 
 #include <SDL3/SDL.h>
@@ -47,6 +48,9 @@
 #include <psprecomp/net.h>
 
 #include "atrac_at3.h"
+#ifdef PSP2I_LIBAV
+#include "h264_libav.h"
+#endif
 #include "camera.h"
 #include "framerate.h"
 #include "gl_ge.h"
@@ -285,6 +289,23 @@ static uint32_t pad_state(uint8_t *ax, uint8_t *ay, uint8_t *rx, uint8_t *ry) {
         { SDL_GAMEPAD_BUTTON_DPAD_LEFT, P_LEFT }, { SDL_GAMEPAD_BUTTON_DPAD_RIGHT, P_RIGHT },
     };
     uint32_t bits = 0;
+#ifndef SDL_PLATFORM_ANDROID
+    const bool *keys = SDL_GetKeyboardState(NULL);
+    if (SDL_GetKeyboardFocus() == g_win) {
+        static const struct { SDL_Scancode key; uint32_t bit; } keyboard[] = {
+            {SDL_SCANCODE_UP, P_UP}, {SDL_SCANCODE_DOWN, P_DOWN},
+            {SDL_SCANCODE_LEFT, P_LEFT}, {SDL_SCANCODE_RIGHT, P_RIGHT},
+            {SDL_SCANCODE_X, P_CROSS}, {SDL_SCANCODE_Z, P_CIRCLE},
+            {SDL_SCANCODE_A, P_SQUARE}, {SDL_SCANCODE_S, P_TRIANGLE},
+            {SDL_SCANCODE_Q, P_L}, {SDL_SCANCODE_E, P_R},
+            {SDL_SCANCODE_RETURN, P_START}, {SDL_SCANCODE_RSHIFT, P_SELECT}
+        };
+        for (size_t k = 0; k < sizeof keyboard / sizeof keyboard[0]; ++k)
+            if (keys[keyboard[k].key]) bits |= keyboard[k].bit;
+        *ax = 128 + 127 * (keys[SDL_SCANCODE_L] - keys[SDL_SCANCODE_J]);
+        *ay = 128 + 127 * (keys[SDL_SCANCODE_K] - keys[SDL_SCANCODE_I]);
+    }
+#endif
     int best = 6000, rbest = 6000;          /* a dead zone */
     for (int i = 0; i < MAX_PADS; i++) {
         SDL_Gamepad *p = g_pad[i];
@@ -697,8 +718,14 @@ int main(int argc, char **argv) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#ifdef __APPLE__
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+#endif
 #endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
@@ -757,7 +784,10 @@ int main(int argc, char **argv) {
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
     psp_audio_set_sink(audio_sink);
-    atrac_at3_init(NULL);
+    atrac_at3_init(SDL_GetBasePath());
+#ifdef PSP2I_LIBAV
+    if (h264_libav_init() != 0) fprintf(stderr, "video: FFmpeg H.264 unavailable; movies will be black\n");
+#endif
     framerate_init(fps);
     fps_meter_init(&g_fm);
     camera_init(1.0f);
