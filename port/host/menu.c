@@ -13,11 +13,27 @@
 
 void menu_init(menu_state *m, int fps, int show_fps) {
     memset(m, 0, sizeof *m);
-    m->fps = fps == 60 ? 60 : 30;
+    m->fps = fps >= 120 ? 120 : fps == 60 ? 60 : 30;
     m->show_fps = show_fps != 0;
     m->res = RES_DEFAULT;
     for (int k = 0; k < VOL_N; k++) m->vol[k] = VOL_STEPS;   /* 100% */
     m->att = ATT_DEFAULT;
+    m->touch_alpha = TOUCH_ALPHA_DEFAULT;
+    m->rs_on = 1;
+    m->hidden = MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA);   /* the touch host shows them */
+}
+
+static const char *const TOUCH_NAMES[TOUCH_COLORS] = { "DEFAULT", "WHITE", "BLACK", "YELLOW", "CYAN", "PINK" };
+
+const char *menu_touch_color_name(int c) { return c >= 0 && c < TOUCH_COLORS ? TOUCH_NAMES[c] : "?"; }
+
+int menu_touch_color_parse(const char *s) {
+    for (int i = 0; i < TOUCH_COLORS; i++) {
+        const char *a = TOUCH_NAMES[i], *b = s;
+        while (*a && *b && (*a == *b || *a + 32 == *b)) { a++; b++; }
+        if (!*a && (!*b || *b == '\r' || *b == '\n' || *b == ' ')) return i;
+    }
+    return -1;
 }
 
 static const struct { const char *name; int w, h; } RES[RES_MODES] = {
@@ -90,7 +106,9 @@ void menu_set_rs_speed(menu_state *m, float speed) {
  * (stopping at the ends) and Confirm cycles it. */
 static int change(menu_state *m, int dir) {
     switch (m->sel) {
-    case MENU_FRAME_RATE:  m->fps = m->fps == 60 ? 30 : 60; return MFX_FPS_CHANGED;
+    case MENU_FRAME_RATE:                       /* 30 -> 60 -> 120 (Left: the other way) */
+        m->fps = dir < 0 ? (m->fps == 30 ? 120 : m->fps == 120 ? 60 : 30) : (m->fps == 30 ? 60 : m->fps == 60 ? 120 : 30);
+        return MFX_FPS_CHANGED;
     case MENU_FPS_COUNTER: m->show_fps = !m->show_fps;      return MFX_SHOW_FPS;
     case MENU_SEGA_SERVER: return dir == 0 ? MFX_EDIT_SEGA : 0;
     case MENU_ADHOC_SERVER: return dir == 0 ? MFX_EDIT_ADHOC : 0;
@@ -109,6 +127,19 @@ static int change(menu_state *m, int dir) {
         m->att = (m->att + (dir < 0 ? ATT_MODES - 1 : 1)) % ATT_MODES;
         return MFX_AUDIO;
     case MENU_SWAP_OC:     m->swap_oc = !m->swap_oc; return MFX_SWAP_OC;
+    case MENU_RS_ON:       m->rs_on = !m->rs_on; return MFX_RS_ON;
+    case MENU_TEST_TICKS:  m->test_ticks = !m->test_ticks; return MFX_TESTS;
+    case MENU_TEST_LOGIC:  m->test_logic = !m->test_logic; return MFX_TESTS;
+    case MENU_TOUCH_COLOR:
+        m->touch_color = (m->touch_color + (dir < 0 ? TOUCH_COLORS - 1 : 1)) % TOUCH_COLORS;
+        return MFX_TOUCH;
+    case MENU_TOUCH_ALPHA: {
+        const int old = m->touch_alpha;
+        if (dir < 0)      { if (m->touch_alpha > TOUCH_ALPHA_MIN) m->touch_alpha--; }
+        else if (dir > 0) { if (m->touch_alpha < 10) m->touch_alpha++; }
+        else              m->touch_alpha = m->touch_alpha >= 10 ? TOUCH_ALPHA_MIN : m->touch_alpha + 1;
+        return m->touch_alpha != old ? MFX_TOUCH : 0;
+    }
     case MENU_FONT:
         if (m->font_n < 2) return 0;
         m->font = (m->font + (dir < 0 ? m->font_n - 1 : 1)) % m->font_n;
@@ -127,16 +158,42 @@ static int change(menu_state *m, int dir) {
     }
 }
 
+int menu_page_of(int item) {
+    return item >= MENU_TEST_TICKS ? MENU_PAGE_TESTS : item >= MENU_RS_ON ? MENU_PAGE_CONTROLS : MENU_PAGE_MAIN;
+}
+
+/* The main page's item that opens a sub-page (where BACK returns to). */
+static int page_item(int page) { return page == MENU_PAGE_TESTS ? MENU_TESTS : MENU_CONTROLS; }
+
+/* On the page shown, and not left out by this host. */
+static int shown(const menu_state *m, int item) {
+    return !(m->hidden & MENU_BIT(item)) && menu_page_of(item) == m->page;
+}
+
+/* Show a page, with `sel` selected (-1: its first item). */
+static void go_page(menu_state *m, int page, int sel) {
+    m->page = page;
+    m->hold = 0;
+    if (sel >= 0) { m->sel = sel; return; }
+    m->sel = 0;
+    while (m->sel < MENU_ITEMS - 1 && !shown(m, m->sel)) m->sel++;
+}
+
 int menu_update(menu_state *m, uint32_t held, uint32_t latched) {
     const uint32_t press = (held & ~m->prev) | latched;
     m->prev = held;
     int fx = 0;
 
     if (!m->open) {
-        if (press & MI_TOGGLE) { m->open = 1; m->sel = MENU_FRAME_RATE; m->hold = 0; fx |= MFX_OPENED; }
+        if (press & MI_TOGGLE) { m->open = 1; go_page(m, MENU_PAGE_MAIN, -1); fx |= MFX_OPENED; }
         return fx;
     }
-    if (press & (MI_TOGGLE | MI_BACK)) { m->open = 0; return fx | MFX_CLOSED; }
+    if (press & MI_TOGGLE) { m->open = 0; return fx | MFX_CLOSED; }
+    if (press & MI_BACK) {                      /* a sub-page backs out to the main page */
+        if (m->page != MENU_PAGE_MAIN) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return fx; }
+        m->open = 0;
+        return fx | MFX_CLOSED;
+    }
 
     /* Up/Down: once per press, then auto-repeat while held. */
     int step = 0;
@@ -148,11 +205,17 @@ int menu_update(menu_state *m, uint32_t held, uint32_t latched) {
     } else {
         m->hold = 0;
     }
-    if (step) m->sel = (m->sel + step + MENU_ITEMS) % MENU_ITEMS;
+    if (step)
+        do m->sel = (m->sel + step + MENU_ITEMS) % MENU_ITEMS;
+        while (!shown(m, m->sel));
 
     if (press & (MI_LEFT | MI_RIGHT | MI_CONFIRM)) {
         if (m->sel == MENU_CLOSE) {
             if (press & MI_CONFIRM) { m->open = 0; fx |= MFX_CLOSED; }
+        } else if (m->sel == MENU_CONTROLS || m->sel == MENU_TESTS) {
+            if (press & (MI_CONFIRM | MI_RIGHT)) go_page(m, m->sel == MENU_TESTS ? MENU_PAGE_TESTS : MENU_PAGE_CONTROLS, -1);
+        } else if (m->sel == MENU_CONTROLS_BACK || m->sel == MENU_TESTS_BACK) {
+            if (press & (MI_CONFIRM | MI_LEFT)) go_page(m, MENU_PAGE_MAIN, page_item(m->page));
         } else {
             fx |= change(m, (press & MI_LEFT) ? -1 : (press & MI_RIGHT) ? 1 : 0);
         }
@@ -228,10 +291,26 @@ static const struct { char c; uint8_t r[7]; } FONT[] = {
     { '@', { 0x0E,0x11,0x17,0x15,0x17,0x10,0x0E } }, { '!', { 0x04,0x04,0x04,0x04,0x04,0x00,0x04 } },
     { '?', { 0x0E,0x11,0x01,0x02,0x04,0x00,0x04 } }, { '#', { 0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A } },
     { '[', { 0x0E,0x08,0x08,0x08,0x08,0x08,0x0E } }, { ']', { 0x0E,0x02,0x02,0x02,0x02,0x02,0x0E } },
+    /* Lowercase, for typed text (the sign-in keyboard's Shift); other text
+     * keeps drawing in capitals when written that way. */
+    { 'a', { 0x00,0x00,0x0E,0x01,0x0F,0x11,0x0F } }, { 'b', { 0x10,0x10,0x16,0x19,0x11,0x11,0x1E } },
+    { 'c', { 0x00,0x00,0x0E,0x10,0x10,0x11,0x0E } }, { 'd', { 0x01,0x01,0x0D,0x13,0x11,0x11,0x0F } },
+    { 'e', { 0x00,0x00,0x0E,0x11,0x1F,0x10,0x0E } }, { 'f', { 0x06,0x09,0x08,0x1C,0x08,0x08,0x08 } },
+    { 'g', { 0x00,0x0F,0x11,0x11,0x0F,0x01,0x0E } }, { 'h', { 0x10,0x10,0x16,0x19,0x11,0x11,0x11 } },
+    { 'i', { 0x04,0x00,0x0C,0x04,0x04,0x04,0x0E } }, { 'j', { 0x02,0x00,0x06,0x02,0x02,0x12,0x0C } },
+    { 'k', { 0x10,0x10,0x12,0x14,0x18,0x14,0x12 } }, { 'l', { 0x0C,0x04,0x04,0x04,0x04,0x04,0x0E } },
+    { 'm', { 0x00,0x00,0x1A,0x15,0x15,0x11,0x11 } }, { 'n', { 0x00,0x00,0x16,0x19,0x11,0x11,0x11 } },
+    { 'o', { 0x00,0x00,0x0E,0x11,0x11,0x11,0x0E } }, { 'p', { 0x00,0x00,0x1E,0x11,0x1E,0x10,0x10 } },
+    { 'q', { 0x00,0x00,0x0D,0x13,0x0F,0x01,0x01 } }, { 'r', { 0x00,0x00,0x16,0x19,0x10,0x10,0x10 } },
+    { 's', { 0x00,0x00,0x0E,0x10,0x0E,0x01,0x1E } }, { 't', { 0x08,0x08,0x1C,0x08,0x08,0x09,0x06 } },
+    { 'u', { 0x00,0x00,0x11,0x11,0x11,0x13,0x0D } }, { 'v', { 0x00,0x00,0x11,0x11,0x11,0x0A,0x04 } },
+    { 'w', { 0x00,0x00,0x11,0x11,0x15,0x15,0x0A } }, { 'x', { 0x00,0x00,0x11,0x0A,0x04,0x0A,0x11 } },
+    { 'y', { 0x00,0x00,0x11,0x11,0x0F,0x01,0x0E } }, { 'z', { 0x00,0x00,0x1F,0x02,0x04,0x08,0x1F } },
+    { '$', { 0x04,0x0F,0x14,0x0E,0x05,0x1E,0x04 } }, { '&', { 0x0C,0x12,0x14,0x08,0x15,0x12,0x0D } },
+    { '~', { 0x00,0x00,0x08,0x15,0x02,0x00,0x00 } },
 };
 
 static const uint8_t *glyph(char c) {
-    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
     for (size_t i = 0; i < sizeof FONT / sizeof FONT[0]; i++)
         if (FONT[i].c == c) return FONT[i].r;
     return NULL;
@@ -278,22 +357,73 @@ static void frame(menu_image *img, int x, int y, int w, int h, uint32_t rgb) {
 #define YELLOW 0xFFD040u
 #define ORANGE 0xFF9040u
 
+/* The box: 261 pixels tall with 16 items shown, one row more or less per
+ * item on the page. */
+static int shown_items(const menu_state *m) {
+    int n = 0;
+    for (int i = 0; i < MENU_ITEMS; i++) n += shown(m, i);
+    return n;
+}
+#define BOX_W 288
+#define ROW_H (CELL_H + 2)
+#define ROWS_Y (8 + CELL_H + 8)     /* the first item's row, from the box's top */
+#define VALUE_X 130                 /* the values' column, from the box's left */
+
+void menu_box(const menu_state *m, int w, int h, int *x, int *y, int *bw, int *bh) {
+    *bw = BOX_W;
+    *bh = 261 + ROW_H * (shown_items(m) - 16);
+    *x = (w - *bw) / 2;
+    *y = (h - *bh) / 2;
+}
+
+static int is_editor(int item) {
+    return item == MENU_SEGA_SERVER || item == MENU_ADHOC_SERVER || item == MENU_MODERN_SERVER;
+}
+
+int menu_touch(menu_state *m, int w, int h, int x, int y) {
+    if (!m->open) return 0;
+    int x0, y0, bw, bh;
+    menu_box(m, w, h, &x0, &y0, &bw, &bh);
+    if (x < x0 || x >= x0 + bw || y < y0 || y >= y0 + bh) {    /* outside: back a page, or close */
+        if (m->page != MENU_PAGE_MAIN) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
+        m->open = 0;
+        return MFX_CLOSED;
+    }
+    const int row = (y - (y0 + ROWS_Y - 1)) / ROW_H;
+    if (y < y0 + ROWS_Y - 1 || row < 0) return 0;
+    int item = -1;
+    for (int i = 0, r = 0; i < MENU_ITEMS; i++) {
+        if (!shown(m, i)) continue;
+        if (r++ == row) { item = i; break; }
+    }
+    if (item < 0) return 0;
+    m->sel = item;
+    if (item == MENU_CLOSE) { m->open = 0; return MFX_CLOSED; }
+    if (item == MENU_CONTROLS) { go_page(m, MENU_PAGE_CONTROLS, -1); return 0; }
+    if (item == MENU_TESTS) { go_page(m, MENU_PAGE_TESTS, -1); return 0; }
+    if (item == MENU_CONTROLS_BACK || item == MENU_TESTS_BACK) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
+    if (is_editor(item)) return change(m, 0);
+    return change(m, x < x0 + VALUE_X + 30 ? -1 : 1);
+}
+
 void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *hotkey) {
     if (!m->open) return;
     char line[96];
-    const int bw = 288, bh = 261;
-    const int x0 = (img->w - bw) / 2, y0 = (img->h - bh) / 2;
+    int x0, y0, bw, bh;
+    menu_box(m, img->w, img->h, &x0, &y0, &bw, &bh);
     shade(img, x0, y0, bw, bh);
     frame(img, x0, y0, bw, bh, GREY);
 
     int y = y0 + 8;
-    menu_text(img, x0 + 10, y, "SETTINGS", WHITE);
+    menu_text(img, x0 + 10, y, m->page == MENU_PAGE_CONTROLS ? "SETTINGS > CONTROLS"
+                             : m->page == MENU_PAGE_TESTS ? "SETTINGS > TESTS (60 / 120 FPS)" : "SETTINGS", WHITE);
     y += CELL_H + 8;
 
-    static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "RIGHT STICK", "SEGA SERVER", "ADHOC SERVER",
+    static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "SEGA SERVER", "ADHOC SERVER",
                                                    "ADHOC MODE", "MODERN SERVER", "RESOLUTION", "RENDERER", "MASTER VOLUME",
-                                                   "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "FONT", "CIRCLE/CROSS",
-                                                   "CLOSE" };
+                                                   "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "FONT", "CONTROLS", "TESTS",
+                                                   "CLOSE", "RIGHT STICK", "SENSITIVITY", "CIRCLE/CROSS", "TOUCH COLOR",
+                                                   "TOUCH OPACITY", "BACK", "TICK PACING", "30 HZ LOGIC", "BACK" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
@@ -316,28 +446,39 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     char font[32];
     if (m->font_n > 1) snprintf(font, sizeof font, "< %.18s >", m->font_name);
     else snprintf(font, sizeof font, "%.24s", m->font_name[0] ? m->font_name : "NONE");
+    char tcol[24], talpha[24];
+    snprintf(tcol, sizeof tcol, "< %s >", menu_touch_color_name(m->touch_color));
+    snprintf(talpha, sizeof talpha, "< %d%% >", m->touch_alpha * 10);
     for (int i = 0; i < MENU_ITEMS; i++) {
+        if (!shown(m, i)) continue;
         const uint32_t col = i == m->sel ? YELLOW : WHITE;
         if (i == m->sel) menu_text(img, x0 + 10, y, ">", col);
         menu_text(img, x0 + 22, y, NAMES[i], col);
-        const char *v = i == MENU_FRAME_RATE ? (m->fps == 60 ? "< 60 FPS >" : "< 30 FPS >")
+        const char *v = i == MENU_FRAME_RATE ? (m->fps == 120 ? "< 120 FPS >" : m->fps == 60 ? "< 60 FPS >" : "< 30 FPS >")
                       : i == MENU_FPS_COUNTER ? (m->show_fps ? "< ON >" : "< OFF >")
+                      : i == MENU_TEST_TICKS ? (m->test_ticks ? "< ON >" : "< OFF >")
+                      : i == MENU_TEST_LOGIC ? (m->test_logic ? "< ON >" : "< OFF >")
+                      : i == MENU_RS_ON ? (m->rs_on ? "< ON >" : "< OFF >") : i == MENU_CONTROLS || i == MENU_TESTS ? ">"
                       : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega : i == MENU_ADHOC_SERVER ? adhoc
                       : i == MENU_ADHOC_MODE ? ADHOC_MODES[m->adhoc_mode % 3]
                       : i == MENU_MODERN_SERVER ? modern
                       : i == MENU_RESOLUTION ? res : i == MENU_RENDERER ? ren
                       : i >= MENU_MASTER_VOL && i <= MENU_SFX_VOL ? vol[i - MENU_MASTER_VOL]
                       : i == MENU_ATTENUATION ? att : i == MENU_FONT ? font
-                      : i == MENU_SWAP_OC ? (m->swap_oc ? "< SWAPPED >" : "< NORMAL >") : "";
-        menu_text(img, x0 + 130, y, v, col);
-        y += CELL_H + 2;
+                      : i == MENU_SWAP_OC ? (m->swap_oc ? "< SWAPPED >" : "< NORMAL >")
+                      : i == MENU_TOUCH_COLOR ? tcol : i == MENU_TOUCH_ALPHA ? talpha : "";
+        menu_text(img, x0 + VALUE_X, y, v, col);
+        y += ROW_H;
     }
     y += 4;
     if (game_fps > 0) snprintf(line, sizeof line, "GAME TIMING NOW: %d FPS", game_fps);
     else              snprintf(line, sizeof line, "GAME TIMING NOW: NOT SET YET");
     menu_text(img, x0 + 10, y, line, GREY);
     y += CELL_H + 2;
-    if (m->fps == 60) menu_text(img, x0 + 10, y, "60 FPS IS EXPERIMENTAL", ORANGE);
+    if (m->fps >= 60) {
+        snprintf(line, sizeof line, "%d FPS IS EXPERIMENTAL", m->fps);
+        menu_text(img, x0 + 10, y, line, ORANGE);
+    }
     y += CELL_H + 4;
     menu_text(img, x0 + 10, y, m->swap_oc ? "CIRCLE (KEY Z): ACCEPT  CROSS (KEY X): BACK"
                                           : "CIRCLE (KEY X): ACCEPT  CROSS (KEY Z): BACK", GREY);

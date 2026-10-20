@@ -29,6 +29,7 @@ typedef struct {
     int      error;                       /* status is an error */
     int      osk;                         /* the on-screen keyboard is open */
     int      osk_x, osk_y;
+    int      osk_shift;                   /* Triangle: capitals and symbols */
     uint32_t prev;
     int      done_timer;                  /* frames to show the result before closing */
 } login_state;
@@ -53,6 +54,6 @@ void login_finish(login_state *l, int ok, const char *msg);
 void login_draw(const login_state *l, menu_image *img);
 
 /* Characters the on-screen keyboard offers (row-major). */
-char login_osk_char(int x, int y);
+char login_osk_char(int x, int y, int shift);
 
 #endif /* PSP2I_LOGIN_H */

@@ -87,6 +87,8 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
+#else
+#include <sys/stat.h>
 #endif
 
 /* ---- configuration ---------------------------------------------------------------- */
@@ -270,6 +272,18 @@ FILE *log_open_rotated(const char *path) {
     return fopen(path, "a");
 }
 
+/* <base>/logs/<name>: every log goes in the logs folder next to the exe (on
+ * Android, in the data folder), made on first use. */
+void log_path(char *out, size_t cap, const char *base, const char *name) {
+    snprintf(out, cap, "%s/logs", base);
+#ifdef _WIN32
+    CreateDirectoryA(out, NULL);
+#else
+    mkdir(out, 0777);
+#endif
+    snprintf(out, cap, "%s/logs/%s", base, name);
+}
+
 void online_log(const char *fmt, ...) {
     char line[2048];
     va_list ap;
@@ -279,7 +293,7 @@ void online_log(const char *fmt, ...) {
     fprintf(stderr, "online: %s\n", line);
     if (!g_log) {
         char p[700];
-        snprintf(p, sizeof p, "%s/online_log.txt", g_dir);
+        log_path(p, sizeof p, g_dir, "online_log.txt");
         g_log = log_open_rotated(p);
         if (g_log) {
             time_t t = time(NULL);
@@ -975,7 +989,11 @@ static const char *resolve_redirect(const char *host) {
  * from: the chain of game functions (PSP addresses, innermost first). */
 static void http_line(const char *line) {
 #ifdef _WIN32
-    if (!strncmp(line, "request ", 8) || !strncmp(line, "connection ", 11)) {
+    /* The game's call stack on the line that starts a request (and new
+     * connections) only: once per request says where it comes from; on every
+     * status / length / read line it cost the game thread ~20 lookups per reply. */
+    if ((!strncmp(line, "request ", 8) && (strstr(line, ": POST ") || strstr(line, ": GET ") || strstr(line, ": HEAD ")))
+        || !strncmp(line, "connection ", 11)) {
         char where[512];
         if (game_stack(where, sizeof where, 16) > 0) { online_log("http: %s   [game: %s]", line, where); return; }
     }

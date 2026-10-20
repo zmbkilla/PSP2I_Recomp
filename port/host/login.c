@@ -4,8 +4,8 @@
  * move, Enter on Sign In submits, Escape cancels (letter keys type, they do
  * not act as PSP buttons while this screen is open).
  * Controller: D-pad moves, Circle on a text field opens an on-screen
- * keyboard (D-pad picks a character, Circle types it, Square deletes, Start
- * or Cross closes it), Circle on Sign In submits, Cross cancels.
+ * keyboard (D-pad picks a character, Circle types it, Triangle is Shift --
+ * capitals and symbols --, Square deletes, Start or Cross closes it), Circle on Sign In submits, Cross cancels.
  * The password is shown as asterisks and never leaves this struct except to
  * be sent, by online.c, to the configured server. */
 
@@ -14,16 +14,14 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char OSK[OSK_ROWS][OSK_COLS + 1] = {
-    "1234567890",
-    "abcdefghij",
-    "klmnopqrst",
-    "uvwxyz-_.@",
+static const char OSK[2][OSK_ROWS][OSK_COLS + 1] = {
+    { "1234567890", "abcdefghij", "klmnopqrst", "uvwxyz-_.@" },
+    { "!#$%&*+=?~", "ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ()/:" },   /* Shift */
 };
 
-char login_osk_char(int x, int y) {
+char login_osk_char(int x, int y, int shift) {
     if (x < 0 || y < 0 || x >= OSK_COLS || y >= OSK_ROWS) return 0;
-    return OSK[y][x];
+    return OSK[shift ? 1 : 0][y][x];
 }
 
 void login_open(login_state *l, const char *server, const char *user) {
@@ -88,9 +86,10 @@ int login_update(login_state *l, uint32_t held, uint32_t psp) {
         if (press & MI_LEFT)  l->osk_x = (l->osk_x + OSK_COLS - 1) % OSK_COLS;
         if (press & MI_RIGHT) l->osk_x = (l->osk_x + 1) % OSK_COLS;
         if (ppress & 0x8000) login_backspace(l);                         /* Square */
+        if (ppress & 0x1000) l->osk_shift = !l->osk_shift;               /* Triangle: Shift */
         if (ppress & 0x0008) { l->osk = 0; return LOGIN_ACT_NONE; }      /* Start: done */
         if (press & MI_BACK) { l->osk = 0; return LOGIN_ACT_NONE; }      /* Cross: close the keyboard */
-        if ((press & MI_CONFIRM) && !(ppress & 0x0008)) login_type(l, login_osk_char(l->osk_x, l->osk_y));
+        if ((press & MI_CONFIRM) && !(ppress & 0x0008)) login_type(l, login_osk_char(l->osk_x, l->osk_y, l->osk_shift));
         return LOGIN_ACT_NONE;
     }
 
@@ -190,10 +189,13 @@ void login_draw(const login_state *l, menu_image *img) {
         for (int r = 0; r < OSK_ROWS; r++)
             for (int c = 0; c < OSK_COLS; c++) {
                 const int sel = r == l->osk_y && c == l->osk_x;
-                char ch[2] = { login_osk_char(c, r), 0 };
+                char ch[2] = { login_osk_char(c, r, l->osk_shift), 0 };
                 if (sel) frame(img, kx + c * 26 - 3, ky + r * 11 - 2, 13, 11, YELLOW);
                 menu_text(img, kx + c * 26, ky + r * 11, ch, sel ? YELLOW : WHITE);
             }
+        menu_text(img, x0 + 8, ky + OSK_ROWS * 11 + 1,
+                  l->osk_shift ? "TRIANGLE: SHIFT (ON)  SQUARE: DELETE  START: DONE"
+                               : "TRIANGLE: SHIFT  SQUARE: DELETE  START: DONE", GREY);
     } else {
         menu_text(img, x0 + 8, y0 + 150, "CIRCLE / ENTER: ACCEPT   CROSS / ESC: BACK", GREY);
         menu_text(img, x0 + 8, y0 + 160, "KEYBOARD: TYPE INTO THE FIELD, TAB / ARROWS MOVE", GREY);

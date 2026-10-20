@@ -21,10 +21,23 @@ enum {
     MI_BACK    = 1 << 6,   /* cancel: closes */
 };
 
-/* Menu items, top to bottom. */
-enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RS_SPEED, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
+/* Menu items, top to bottom: the main page, then the CONTROLS and TESTS
+ * pages (opened from their items; BACK, or Cross, returns to the main page). */
+enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
        MENU_MODERN_SERVER, MENU_RESOLUTION, MENU_RENDERER, MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION,
-       MENU_FONT, MENU_SWAP_OC, MENU_CLOSE, MENU_ITEMS };
+       MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_CLOSE,
+       MENU_RS_ON, MENU_RS_SPEED, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
+       MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK, MENU_ITEMS };
+enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS };
+int menu_page_of(int item);                      /* MENU_PAGE_* */
+#define MENU_BIT(i) (1u << (i))
+
+/* Touch controls (the SDL host): colour presets and opacity in tenths. */
+enum { TOUCH_DEFAULT, TOUCH_WHITE, TOUCH_BLACK, TOUCH_YELLOW, TOUCH_CYAN, TOUCH_PINK, TOUCH_COLORS };
+#define TOUCH_ALPHA_MIN     2
+#define TOUCH_ALPHA_DEFAULT 3
+const char *menu_touch_color_name(int c);        /* "DEFAULT", "WHITE", ... */
+int  menu_touch_color_parse(const char *s);      /* name (any case) -> TOUCH_*, -1 if unknown */
 
 /* Volumes in tenths (0..10 = 0..100%); attenuation while other programs play
  * sound: ATT_* (OFF, -6 dB, -12 dB, -20 dB). */
@@ -68,14 +81,21 @@ enum {
     MFX_EDIT_MODERN = 1 << 11,  /* Circle on MODERN SERVER: the caller opens its text editor */
     MFX_FONT        = 1 << 12,  /* font changed: the caller applies it and sets font_name */
     MFX_SWAP_OC     = 1 << 13,  /* swap_oc changed: Circle and Cross exchanged (keys and controllers) */
+    MFX_TOUCH       = 1 << 14,  /* touch_color or touch_alpha changed */
+    MFX_RS_ON       = 1 << 15,  /* rs_on changed: the right stick turns the camera, or nothing */
+    MFX_TESTS       = 1 << 16,  /* test_ticks or test_logic changed (framerate_set_tests) */
 };
 
 typedef struct {
     int      open;
     int      sel;          /* MENU_* */
-    int      fps;          /* 30 or 60 */
+    int      page;         /* MENU_PAGE_*: the page shown */
+    int      fps;          /* 30, 60 or 120 */
     int      show_fps;     /* the FPS counter */
     int      rs_step;      /* right-stick sensitivity, 0..MENU_RS_STEPS-1 (1.00x + 0.25x each) */
+    int      rs_on;        /* the right stick turns the camera (off: it does nothing) */
+    int      test_ticks;   /* TESTS > TICK PACING: the game's 1/60 s ticks paced as at 30 at 60 too (always above 60) */
+    int      test_logic;   /* TESTS > 30 HZ LOGIC: frame-counted functions on 30 Hz frames only */
     int      res;          /* RES_*: output resolution */
     char     sega[64];     /* the SEGA server redirect, shown ("" = off); set by the caller */
     char     adhoc[64];    /* the ad hoc server host[:port], shown; set by the caller */
@@ -90,6 +110,10 @@ typedef struct {
     int      font_n;       /* choices; under 2 the item only shows font_name */
     char     font_name[40];/* the chosen font, shown; set by the caller */
     int      swap_oc;      /* Circle and Cross exchanged (the help line follows) */
+    int      touch_color;  /* TOUCH_*: the touch controls' colour */
+    int      touch_alpha;  /* their opacity in tenths, TOUCH_ALPHA_MIN..10 */
+    uint32_t hidden;       /* MENU_BIT(item)s this host leaves out (not drawn, skipped);
+                              menu_init hides the touch items */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */
     uint32_t game_mask;    /* PSP buttons held through a close, kept from the game until released */
@@ -146,10 +170,19 @@ typedef struct { uint32_t *px; int w, h; } menu_image;
 /* game_fps: the frame rate the game's own timing state holds (what the
  * setting reached), 0 if unknown. hotkey: the keyboard hotkey's name. */
 void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *hotkey);
+
+/* Where menu_draw puts the box in an image of w x h (to copy just that part). */
+void menu_box(const menu_state *m, int w, int h, int *x, int *y, int *bw, int *bh);
+
+/* A tap at (x, y) in the image coordinates menu_draw used: on an item, it is
+ * selected and changed (left of the value's middle steps down, right steps
+ * up; the server items open their editor); on CLOSE or outside the box, the
+ * menu closes. Returns MFX_* flags. */
+int menu_touch(menu_state *m, int w, int h, int x, int y);
 void fps_draw(const fps_meter *fm, menu_image *img);
 
-/* Text in the built-in 5x7 font (ASCII; lower case drawn as upper case;
- * unknown characters as blanks), one image pixel per font pixel, 6x9 cells. */
+/* Text in the built-in 5x7 font (ASCII, both cases; unknown characters as
+ * blanks), one image pixel per font pixel, 6x9 cells. */
 void menu_text(menu_image *img, int x, int y, const char *s, uint32_t rgb);
 int  menu_text_width(const char *s);
 

@@ -49,6 +49,7 @@ add_executable(psp2i
     host/savecrypt.c
     host/gamelog.c
     host/functrace.c
+    host/rateaudit.c
     host/prod.c
     host/login.c
     host/textedit.c
@@ -170,6 +171,11 @@ endif()
 
 if(PSP2I_PROD)
     target_compile_definitions(psp2i PRIVATE PSP2I_PROD)
+    # A window-only program: no console window unless started with --console
+    # (main.c opens one then). main() stays the entry point.
+    if(MSVC)
+        target_link_options(psp2i PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+    endif()
     # The exe's icon: <project>/asset/icon.ico, through a generated resource script.
     set(PSP2I_ICON ${CMAKE_CURRENT_SOURCE_DIR}/../asset/icon.ico CACHE FILEPATH "Icon for the community build")
     if(WIN32 AND EXISTS ${PSP2I_ICON})

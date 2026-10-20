@@ -126,7 +126,9 @@ static void stop_and_write(void) {
     for (uint32_t i = 0; i < FT_SLOTS && list; i++) if (g_slots[i].addr) list[n++] = g_slots[i];
     if (list) qsort(list, n, sizeof *list, by_count);
     char path[800];
-    snprintf(path, sizeof path, "%s/func_counts_%d.txt", g_dir, ++g_files);
+    char name[40];
+    snprintf(name, sizeof name, "func_counts_%d.txt", ++g_files);
+    log_path(path, sizeof path, g_dir, name);
     FILE *f = fopen(path, "w");
     if (f) {
         fprintf(f, "# function activity: %.1f s, %llu vblanks, %llu frames (%.1f fps), %u functions, %llu calls\n",
@@ -156,7 +158,9 @@ void functrace_toggle(void) {
     g_vb0 = psp_sched_vblank_count();
     g_flips0 = psp_display_flips();
     char path[800];
-    snprintf(path, sizeof path, "%s/lookat_%d.txt", g_dir, g_files + 1);
+    char name[40];
+    snprintf(name, sizeof name, "lookat_%d.txt", g_files + 1);
+    log_path(path, sizeof path, g_dir, name);
     g_la = fopen(path, "w");
     g_la_lines = 0;
     if (g_la) {

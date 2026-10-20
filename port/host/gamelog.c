@@ -127,7 +127,7 @@ static int is_online_line(const char *s) {
 static void emit(const char *line, unsigned repeat) {
     if (!g_file) {
         char p[700];
-        snprintf(p, sizeof p, "%s/game_log.txt", g_dir);
+        log_path(p, sizeof p, g_dir, "game_log.txt");
         g_file = log_open_rotated(p);
         if (g_file) { time_t t = time(NULL); fprintf(g_file, "\n==== session %s", ctime(&t)); }
     }
@@ -239,6 +239,9 @@ static void hook_zone_player(void (*original)(void)) {
     original();
 }
 
+/* The lobby HP probe, the status-link watch and the write trace below are
+ * test code for the HP bar bug: left out of the community build. */
+#ifndef PSP2I_PROD
 /* ---- lobby HP probe (the remote member's bar shows ~1/8 on our screen) ------
  * 0x0117 carries each player's HP (session u32 @0x1C, HP u32 @0x2C). ~2 s
  * after one arrives, find every place our own player object holds our HP
@@ -420,11 +423,13 @@ static void hp_watch_ptrs(const char *after) {
         }
     }
 }
+#endif
 
 static void hook_is_local(void (*original)(void)) {
     const uint32_t pl = psp_cpu.r[4];
     original();
     /* remote: player id 1, the other human in a 2-player test (NPCs are 2, 3) */
+#ifndef PSP2I_PROD
     if (pl) { if (psp_cpu.r[2]) g_pl_local = pl; else if (psp_read32(pl + 40) == 1) g_pl_remote = pl; }
     hp_watch_ptrs("a frame");
     {   /* reads of unmapped memory (e.g. through a released block): log the
@@ -438,6 +443,7 @@ static void hook_is_local(void (*original)(void)) {
         }
     }
     hp_probe();
+#endif
     /* Per player, only when the answer changes: the game asks for every
      * player every frame, so "changed since the last call" logged ~900 lines
      * a second in a 4-player ad hoc lobby (each flushed to disk). */
@@ -652,6 +658,7 @@ static void hook_session_info_del(void (*original)(void)) {
     original();
 }
 
+#ifndef PSP2I_PROD
 /* Write trace of one HP-carrying packet's handler (0x0117, 0x0201). */
 static int      g_wt_all, g_wt_n;
 static uint32_t g_wt_hp[2];
@@ -667,6 +674,7 @@ static void wtrace_write(uint32_t addr, uint32_t width, uint32_t value) {
     logf_line("[wtrace %s] write%u 0x%08X = 0x%08X (%u / %g)%s", g_wt_tag, width * 8, addr, value, value, (double)f,
               hp_int ? " <- HP" : hp_flt ? " <- HP as float" : "");
 }
+#endif
 
 /* Every session packet the client dispatches, from the items packet until
  * ~10 s after the field scene (item owner) exists: which ones arrive before
@@ -683,6 +691,9 @@ static void hook_dispatch_packet(void (*original)(void)) {
                   (unsigned long long)vb, psp_read32(ITEM_OWNER) ? "ready" : "NOT READY",
                   psp_read32(SESSION_INFO) ? "ready" : "NOT READY", keep ? " -- kept for later" : "");
     if (keep) held_keep(pkt);
+#ifdef PSP2I_PROD
+    original();
+#else
     const int hp_pkt = (cmd == 0x01 && sub == 0x17) || (cmd == 0x02 && sub == 0x01);
     if (cmd == 0x01 && sub == 0x17) {
         hp_note(psp_read32(pkt + 0x1C), psp_read32(pkt + 0x2C));
@@ -706,6 +717,7 @@ static void hook_dispatch_packet(void (*original)(void)) {
     char after[24];
     snprintf(after, sizeof after, "packet %02X%02X", cmd, sub);
     hp_watch_ptrs(after);
+#endif
 }
 
 static void hook_items_owner_del(void (*original)(void)) {

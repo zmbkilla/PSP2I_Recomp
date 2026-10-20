@@ -32,10 +32,11 @@ import org.libsdl.app.SDLActivity;
  *                  remembered (a persistable read grant: no storage permission)
  *   copyFonts      the PSP fonts, copied once from the flash/ folder of a
  *                  GameData folder the user picks, into the data folder
- *   dataFolder     where psp2i.ini, GameData (saves, fonts) and the log live:
- *                  PSP2i at the top of the shared storage, so the player can
- *                  open them with any file manager or over USB (not the
- *                  app-private Android/data folder, which Android 11+ hides)
+ *   dataFolder     where psp2i.ini, GameData (saves, fonts) and logs/ live: a
+ *                  folder the player chooses at the first start (and can move
+ *                  with the multiplayer dialog's "Data folder" button), so they
+ *                  can open the files with any file manager or over USB (not
+ *                  the app-private Android/data folder, which Android 11+ hides)
  *
  * Both show their dialog on the UI thread and wait for the answer. */
 public class PSP2iActivity extends SDLActivity {
@@ -123,16 +124,15 @@ public class PSP2iActivity extends SDLActivity {
     /* Explain, ask for the storage permission (Android 11+: the "All files
      * access" screen; before: the runtime permission), wait, and say whether
      * it is now granted. */
-    private static boolean askStorage(final PSP2iActivity a, final String folder) {
+    private static boolean askStorage(final PSP2iActivity a) {
         final CountDownLatch latch = new CountDownLatch(1);
         sLatch = latch;
         a.runOnUiThread(() -> new AlertDialog.Builder(a)
             .setTitle("Storage")
-            .setMessage("PSP2i keeps its settings (psp2i.ini), saves, fonts and log in\n\n" + folder
-                        + "\n\nso you can open them with a file manager or over USB. Android needs "
+            .setMessage("PSP2i keeps its settings (psp2i.ini), saves, fonts and logs in a folder you choose, "
+                        + "so you can open them with a file manager or over USB. Android needs "
                         + (Build.VERSION.SDK_INT >= 30 ? "\"All files access\" for this; turn it on for PSP2i on the next screen."
-                                                       : "the storage permission for this.")
-                        + "\n\nWithout it the files stay in the app's private folder, which most file managers cannot open.")
+                                                       : "the storage permission for this."))
             .setCancelable(false)
             .setPositiveButton("Allow", (d, w) -> {
                 try {
@@ -178,47 +178,182 @@ public class PSP2iActivity extends SDLActivity {
         }
     }
 
-    /* The data folder (see the top). The first time: the permission, and the
-     * files of the old private folder copied over. Declined: the private
-     * folder, and the player is told where it is. */
+    /* A message with one button; waits until it is closed. */
+    private static void tell(final PSP2iActivity a, final String title, final String message) {
+        final CountDownLatch latch = new CountDownLatch(1);
+        a.runOnUiThread(() -> new AlertDialog.Builder(a)
+            .setTitle(title)
+            .setMessage(message)
+            .setCancelable(false)
+            .setPositiveButton("OK", (d, w) -> latch.countDown())
+            .show());
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            // go on
+        }
+    }
+
+    /* The file path of a folder from the folder picker: internal storage
+     * ("primary:<path>"), an SD card ("<volume id>:<path>") or a raw path. */
+    private static String treePath(Uri tree) {
+        final String id;
+        try {
+            id = DocumentsContract.getTreeDocumentId(tree);
+        } catch (Exception e) {
+            return null;
+        }
+        final int colon = id.indexOf(':');
+        if (colon < 0) return null;
+        final String vol = id.substring(0, colon), rel = id.substring(colon + 1);
+        if ("raw".equalsIgnoreCase(vol)) return rel;
+        final File root = "primary".equalsIgnoreCase(vol) ? Environment.getExternalStorageDirectory() : new File("/storage/" + vol);
+        return rel.isEmpty() ? root.getAbsolutePath() : new File(root, rel).getAbsolutePath();
+    }
+
+    /* Whether the game can make and write files in this folder itself (the
+     * native code opens them by path). */
+    private static boolean writable(String path) {
+        final File dir = new File(path);
+        if (!dir.isDirectory() && !dir.mkdirs()) return false;
+        final File probe = new File(dir, ".psp2i_write_test");
+        try (OutputStream o = new FileOutputStream(probe)) {
+            o.write(1);
+        } catch (Exception e) {
+            return false;
+        }
+        probe.delete();
+        return true;
+    }
+
+    /* The player picks the data folder: storage access first (Android 11+:
+     * "All files access", which the game needs to use a folder of its own
+     * choosing), then the folder. Asked until a usable one is picked; null
+     * if the player quits. */
+    private static String chooseDataFolder(final PSP2iActivity a, final String why) {
+        for (;;) {
+            if (!haveStorage(a) && !askStorage(a)) {
+                if (!askRetry(a, "Storage", "PSP2i needs storage access to keep its files in a folder you choose. "
+                                            + "Without it, it cannot start.")) return null;
+                continue;
+            }
+            final Uri tree = ask("Data folder", why + "\n\nPSP2i keeps its settings (psp2i.ini), saves, fonts and "
+                                 + "logs there, where you can open them with a file manager or over USB. Make or pick "
+                                 + "a folder of its own, e.g. PSP2i in your internal storage.", true);
+            if (tree == null) return null;
+            final String path = treePath(tree);
+            if (path != null && writable(path)) return path;
+            if (!askRetry(a, "Data folder", "PSP2i cannot write to that folder" + (path != null ? " (" + path + ")" : "")
+                                            + ". Pick a folder in your internal storage or on an SD card "
+                                            + "(not the top of the storage or Downloads itself).")) return null;
+        }
+    }
+
+    /* A message with Retry / Quit; true for Retry. */
+    private static boolean askRetry(final PSP2iActivity a, final String title, final String message) {
+        final boolean[] retry = { false };
+        final CountDownLatch latch = new CountDownLatch(1);
+        a.runOnUiThread(() -> new AlertDialog.Builder(a)
+            .setTitle(title)
+            .setMessage(message)
+            .setCancelable(false)
+            .setPositiveButton("Retry", (d, w) -> { retry[0] = true; latch.countDown(); })
+            .setNegativeButton("Quit", (d, w) -> latch.countDown())
+            .show());
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            return false;
+        }
+        return retry[0];
+    }
+
+    /* Files the earlier data folders hold, copied into `to` where it lacks
+     * them (the originals stay): the app-private folder of the first
+     * versions and the fixed PSP2i/ folder of the last one. */
+    private static void copyOld(final PSP2iActivity a, final File to, final String also) {
+        final File priv = a.getExternalFilesDir(null);
+        final File[] old = { priv, new File(Environment.getExternalStorageDirectory(), "PSP2i"),
+                             also != null ? new File(also) : null };
+        for (File f : old) copyFolder(f, to);
+    }
+
+    /* copyMissing, unless the two are the same folder or one is inside the
+     * other (the copy would then copy itself). */
+    private static void copyFolder(File from, File to) {
+        if (from == null || !from.isDirectory()) return;
+        final String f = from.getAbsolutePath() + "/", t = to.getAbsolutePath() + "/";
+        if (f.startsWith(t) || t.startsWith(f)) return;
+        copyMissing(from, to);
+    }
+
+    private static final String PREF_DATA = "data_folder";
+
+    /* The data folder (see the top): the one the player chose. The first
+     * time -- or when it is gone or access was taken away -- the player
+     * chooses it, and the files of the earlier folders are copied in. Null if
+     * the player quits; the app then closes. */
     public static String dataFolder() {
         if (sData != null) return sData;
         final PSP2iActivity a = sSelf;
         if (a == null) return null;
-        final File priv = a.getExternalFilesDir(null);
-        final File pub = new File(Environment.getExternalStorageDirectory(), "PSP2i");
-        if ((haveStorage(a) || askStorage(a, pub.getAbsolutePath())) && (pub.isDirectory() || pub.mkdirs())) {
-            if (priv != null) copyMissing(priv, pub);
-            sData = pub.getAbsolutePath();
+        final SharedPreferences prefs = a.getSharedPreferences("psp2i", MODE_PRIVATE);
+        final String saved = prefs.getString(PREF_DATA, null);
+        if (saved != null && haveStorage(a) && new File(saved).isDirectory()) {
+            sData = saved;
             return sData;
         }
-        sData = priv != null ? priv.getAbsolutePath() : null;
-        if (sData != null) {
-            final CountDownLatch latch = new CountDownLatch(1);
-            final String where = sData;
-            a.runOnUiThread(() -> new AlertDialog.Builder(a)
-                .setTitle("Storage")
-                .setMessage("PSP2i's files are in\n\n" + where + "\n\n(reachable over USB). To keep them in "
-                            + pub.getAbsolutePath() + " instead, give PSP2i storage access in Android's settings "
-                            + "and start it again; they are copied over then.")
-                .setCancelable(false)
-                .setPositiveButton("OK", (d, w) -> latch.countDown())
-                .show());
-            try {
-                latch.await();
-            } catch (InterruptedException e) {
-                // go on
-            }
+        final String path = chooseDataFolder(a, saved == null
+            ? "Choose where PSP2i keeps its files."
+            : "PSP2i's data folder (" + saved + ") cannot be used any more. Choose it again, or another one.");
+        if (path == null) {
+            a.runOnUiThread(a::finishAndRemoveTask);
+            return null;
         }
+        copyOld(a, new File(path), saved);
+        prefs.edit().putString(PREF_DATA, path).apply();
+        sData = path;
         return sData;
+    }
+
+    /* Move the data folder: the player picks the new one, the files are copied
+     * there (the old folder is left as it was) and it is used from the next
+     * start. PSP2i then closes, before the game has started. */
+    private static void moveDataFolder(final PSP2iActivity a) {
+        final String path = chooseDataFolder(a, "Choose the new folder for PSP2i's files"
+                                                + (sData != null ? " (now " + sData + ")" : "") + ".");
+        if (path == null || path.equals(sData)) return;
+        if (sData != null && ((path + "/").startsWith(sData + "/") || (sData + "/").startsWith(path + "/"))) {
+            tell(a, "Data folder", "The new folder cannot be inside the current one (" + sData + ") or contain it. "
+                                   + "Nothing was moved.");
+            return;
+        }
+        if (sData != null) copyMissing(new File(sData), new File(path));
+        copyOld(a, new File(path), null);
+        a.getSharedPreferences("psp2i", MODE_PRIVATE).edit().putString(PREF_DATA, path).commit();
+        tell(a, "Data folder", "PSP2i's files are now in\n\n" + path + "\n\nThe old folder"
+                               + (sData != null ? " (" + sData + ")" : "") + " was left as it was; delete it once "
+                               + "you have checked the new one. PSP2i closes now: start it again to use the new folder.");
+        a.runOnUiThread(a::finishAndRemoveTask);
+        System.exit(0);
     }
 
     /* The modern multiplayer server: "host" (this phone hosts) or the hosting
      * player's address. Asked at every start, prefilled with the last answer;
-     * `here` is this device's address, for the players who join it. */
+     * `here` is this device's address, for the players who join it. The
+     * dialog's "Data folder" button moves PSP2i's files (moveDataFolder). */
     public static String askModernServer(final String here) {
         final PSP2iActivity a = sSelf;
         if (a == null) return null;
+        for (;;) {
+            final boolean[] move = { false };
+            final String server = askModernServerOnce(a, here, move);
+            if (!move[0]) return server;
+            moveDataFolder(a);                    // closes the app when it moved; else ask again
+        }
+    }
+
+    private static String askModernServerOnce(final PSP2iActivity a, final String here, final boolean[] move) {
         final SharedPreferences prefs = a.getSharedPreferences("psp2i", MODE_PRIVATE);
         final String last = prefs.getString("modern_server", "host");
         final String[] answer = { last };
@@ -244,12 +379,42 @@ public class PSP2iActivity extends SDLActivity {
                     prefs.edit().putString("modern_server", answer[0]).apply();
                     latch.countDown();
                 })
+                .setNeutralButton("Data folder", (d, w) -> { move[0] = true; latch.countDown(); })
                 .show();
         });
         try {
             latch.await();
         } catch (InterruptedException e) {
             return last;
+        }
+        return answer[0];
+    }
+
+    /* A one-line text dialog for the settings menu's server items: the text
+     * typed (OK), or null (Cancel). Called from the game's thread. */
+    public static String askText(final String title, final String message, final String value) {
+        final PSP2iActivity a = sSelf;
+        if (a == null) return null;
+        final String[] answer = { null };
+        final CountDownLatch latch = new CountDownLatch(1);
+        a.runOnUiThread(() -> {
+            final android.widget.EditText edit = new android.widget.EditText(a);
+            edit.setSingleLine(true);
+            edit.setText(value != null ? value : "");
+            edit.setSelection(edit.getText().length());
+            new AlertDialog.Builder(a)
+                .setTitle(title)
+                .setMessage(message)
+                .setView(edit)
+                .setCancelable(false)
+                .setPositiveButton("OK", (d, w) -> { answer[0] = edit.getText().toString().trim(); latch.countDown(); })
+                .setNegativeButton("Cancel", (d, w) -> latch.countDown())
+                .show();
+        });
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            return null;
         }
         return answer[0];
     }

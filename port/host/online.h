@@ -12,6 +12,8 @@ void online_poll(void);                      /* once per vblank */
 void online_log(const char *fmt, ...);
 /* A log opened for appending, rotated to <path>.old once it is over 16 MB. */
 FILE *log_open_rotated(const char *path);
+/* out = <base>/logs/<name>, the logs folder made if missing. */
+void log_path(char *out, size_t cap, const char *base, const char *name);
 
 /* From the sign-in screen's actions. */
 int  online_login_submit(void);

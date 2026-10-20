@@ -29,7 +29,9 @@
  *   --headless  no window
  *   --seconds   stop after N seconds of game time and print the report
  *   --capture-every / --capture-dir  dump the framebuffer as PPM every N vblanks
- *   --fps 30|60  initial frame rate through the game's own frame-rate API
+ *   --fps 30|60|120  initial frame rate through the game's own frame-rate API
+ *               (120: the emulated display refreshes at 120 Hz; F7 runs the
+ *               frame-rate audit, F6 the press audit, rateaudit.c)
  *               (framerate.c); changeable at run time in the settings menu
  *   --menu-key F1..F9|F11  the keyboard key that opens/closes the settings
  *               menu (default F1; the controller's Guide or R3 also do)
@@ -84,6 +86,7 @@
 #include "savecrypt.h"
 #include "gamelog.h"
 #include "functrace.h"
+#include "rateaudit.h"
 #include "prod.h"
 #include "textedit.h"
 #include "present.h"
@@ -320,6 +323,12 @@ static int text_ui_open(void) { return g_login.state != LOGIN_CLOSED || g_sega_e
 static void draw_overlay(void) {
     menu_image img = { g_rgba, SCREEN_W, SCREEN_H };
     if (g_menu.show_fps) fps_draw(&g_fpsm, &img);
+#ifndef PSP2I_PROD
+    {   /* F7's frame-rate audit, while it runs */
+        const char *ra = rateaudit_status();
+        if (ra[0]) menu_text(&img, 4, SCREEN_H - 22, ra, 0xFFD040u);
+    }
+#endif
     const char *st = online_status_line();
     if (st) {
         char line[96];
@@ -355,6 +364,9 @@ static uint32_t host_key(WPARAM vk) {
 }
 
 static int g_swap_oc;                       /* Circle <-> Cross (menu CIRCLE/CROSS, swap_circle_cross=) */
+static float g_rs_saved;                    /* menu CONTROLS > SENSITIVITY (rs_speed=; 0: not saved yet) */
+static int g_rs_on = 1;                     /* menu CONTROLS > RIGHT STICK (right_stick=on/off) */
+static int g_test_ticks, g_test_logic;      /* menu TESTS (test_tick_pacing= / test_30hz_logic=; framerate.c) */
 
 static uint32_t key_bit(WPARAM vk) {
     if (g_swap_oc && (vk == 'X' || vk == 'Z')) vk = vk == 'X' ? 'Z' : 'X';
@@ -384,8 +396,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_KEYDOWN: {
         const int first = !(lp & (1 << 30));                     /* not an auto-repeat */
+#ifndef PSP2I_PROD                                     /* test keys: not in the community build */
         if (wp == VK_F12 && first) g_dump_key = 1;
         if (wp == VK_F9 && first && g_menu_vk != VK_F9) { functrace_toggle(); return 0; }   /* function-activity recorder */
+        if (wp == VK_F7 && first && g_menu_vk != VK_F7) { rateaudit_start(); return 0; }    /* frame-rate audit */
+        if (wp == VK_F6 && first && g_menu_vk != VK_F6) { rateaudit_start_press(); return 0; }   /* press audit */
+#endif
         if (text_ui_open() && wp != g_menu_vk) {
             uint32_t k = 0;
             switch (wp) {
@@ -841,6 +857,10 @@ static int display_load(void) {
         else if (!strncmp(line, "attenuation=", 12))   g_att_saved = !strncmp(line + 12, "off", 3) ? ATT_OFF : menu_att_parse(atoi(line + 12));
         else if (!strncmp(line, "openh264=", 9))       g_openh264 = strncmp(line + 9, "off", 3) != 0;
         else if (!strncmp(line, "swap_circle_cross=", 18)) g_swap_oc = !strncmp(line + 18, "on", 2);
+        else if (!strncmp(line, "rs_speed=", 9))       g_rs_saved = (float)atof(line + 9);
+        else if (!strncmp(line, "right_stick=", 12))   g_rs_on = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "test_tick_pacing=", 17)) g_test_ticks = !strncmp(line + 17, "on", 2);
+        else if (!strncmp(line, "test_30hz_logic=", 16))  g_test_logic = !strncmp(line + 16, "on", 2);
         else if (!strncmp(line, "font=", 5)) {
             snprintf(g_font_key, sizeof g_font_key, "%s", line + 5);
             g_font_key[strcspn(g_font_key, "\r\n")] = '\0';
@@ -870,6 +890,10 @@ static void display_save(int res) {
     fprintf(f, "font=%s\n", g_font_key);
     fprintf(f, "; on = Circle and Cross exchanged (keys X/Z and controllers)\n");
     fprintf(f, "swap_circle_cross=%s\n", g_swap_oc ? "on" : "off");
+    fprintf(f, "; the right stick: on = it turns the camera, off = it does nothing; rs_speed 1.00..2.00\n");
+    fprintf(f, "right_stick=%s\nrs_speed=%.2f\n", g_rs_on ? "on" : "off", (double)menu_rs_speed(&g_menu));
+    fprintf(f, "; menu TESTS at 60 / 120 fps (off by default): the game's tick counters paced as at 30; frame-counted logic at 30 Hz\n");
+    fprintf(f, "test_tick_pacing=%s\ntest_30hz_logic=%s\n", g_test_ticks ? "on" : "off", g_test_logic ? "on" : "off");
     fclose(f);
 }
 
@@ -998,8 +1022,20 @@ static void menu_step(void) {
         fprintf(stderr, "menu: font %s (saved; text drawn from now on)\n", g_font_key);
     }
     if (fx & MFX_SHOW_FPS) fprintf(stderr, "menu: FPS counter %s\n", g_menu.show_fps ? "on" : "off");
+    if (fx & MFX_TESTS) {
+        g_test_ticks = g_menu.test_ticks;
+        g_test_logic = g_menu.test_logic;
+        framerate_set_tests(g_test_ticks, g_test_logic);
+        if (!g_headless) display_save(g_res_saved);
+    }
+    if (fx & MFX_RS_ON) {
+        g_rs_on = g_menu.rs_on;
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: right stick %s (saved)\n", g_rs_on ? "turns the camera" : "off");
+    }
     if (fx & MFX_RS_SPEED) {
         camera_set_speed(menu_rs_speed(&g_menu));
+        if (!g_headless) display_save(g_res_saved);
         fprintf(stderr, "menu: right-stick sensitivity %.2fx\n", (double)menu_rs_speed(&g_menu));
     }
     if (fx & (MFX_OPENED | MFX_CLOSED)) {
@@ -1010,14 +1046,14 @@ static void menu_step(void) {
 }
 
 /* The right stick for the camera (camera.c): SDL, or --rstick in scripts;
- * centred while the settings menu is open. */
+ * centred while the settings menu is open or the stick is turned off there. */
 static void update_camera_stick(uint64_t vb) {
     uint8_t rx = 128, ry = 128;
     if (g_sdl_on) input_sdl_right_stick(&rx, &ry);
     for (int i = 0; i < g_nrstick; i++)
         if (vb >= g_rstick[i].at && vb < g_rstick[i].at + g_rstick[i].len) { rx = g_rstick[i].x; ry = g_rstick[i].y; }
     if (g_rep_on) { rx = g_rep_rx; ry = g_rep_ry; }
-    if (g_menu.open) rx = ry = 128;
+    if (g_menu.open || !g_menu.rs_on) rx = ry = 128;      /* the menu's RIGHT STICK off: no camera */
     if (!g_rep_on) rec_cam(rx, ry);
     camera_set_stick(rx, ry);
 }
@@ -1199,6 +1235,9 @@ static void on_vblank(void) {
     uint64_t vb = psp_sched_vblank_count();
     g_prof_on = vb >= g_prof_from && (!g_prof_to || vb < g_prof_to);
     if (g_dump_key) { g_dump_key = 0; take_dump(vb); }
+#ifndef PSP2I_PROD
+    rateaudit_vblank();
+#endif
     if (g_find_vblank && vb == g_find_vblank) find_word();
     if (g_watch_late_addr && psp_display_flips() >= g_watch_late_flip) {
         /* --watch-from-flip: arm the write watch only once the game is there. */
@@ -1586,26 +1625,85 @@ static void prof_report(void) {
  * the game's call stack. "08B35014 < 08A88584 < ...". For logs that say
  * where in the game something happens (online.c's HTTP log). */
 #ifdef _WIN32
-int game_stack(char *out, size_t cap, int max_frames) {
-    static int sym_ready;
+/* Symbols for these logs, without stalling the game: DbgHelp is initialised
+ * and the exe's 100 MB PDB loaded on a background thread at start
+ * (sym_preload); until then stacks are simply left out. Each return address
+ * is symbolized once and remembered (the same few repeat endlessly), and
+ * DbgHelp, which is single-threaded, is only used under g_sym_lock. Looking
+ * up every frame of every HTTP / NP log line -- the PDB loading on the first
+ * -- was the game-thread stutter on SEGA server traffic. */
+static volatile LONG     g_sym_ready;
+static CRITICAL_SECTION  g_sym_lock;
+
+static DWORD WINAPI sym_preload(LPVOID arg) {
+    (void)arg;
+    EnterCriticalSection(&g_sym_lock);
     HANDLE proc = GetCurrentProcess();
-    if (!sym_ready) { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS); SymInitialize(proc, NULL, TRUE); sym_ready = 1; }
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(proc, NULL, TRUE);
+    char buf[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
+    si->SizeOfStruct = sizeof(SYMBOL_INFO);
+    si->MaxNameLen = 255;
+    DWORD64 d = 0;
+    SymFromAddr(proc, (DWORD64)(uintptr_t)&sym_preload, &d, si);   /* loads the exe's PDB now */
+    LeaveCriticalSection(&g_sym_lock);
+    InterlockedExchange(&g_sym_ready, 1);
+    return 0;
+}
+
+static void sym_start(void) {
+    InitializeCriticalSection(&g_sym_lock);
+    HANDLE t = CreateThread(NULL, 0, sym_preload, NULL, 0, NULL);
+    if (t) CloseHandle(t);
+}
+
+/* A return address -> 1 and *fn (a recompiled game function), 2 (the guest
+ * thread's bottom: stop), 0 (anything else). Remembered per address. */
+#define SYM_CACHE 8192
+static struct { uintptr_t pc; uint32_t fn; uint8_t kind, used; } g_sym_cache[SYM_CACHE];
+
+static int sym_kind(HANDLE proc, uintptr_t pc, uint32_t *fn) {
+    uint32_t h = (uint32_t)((pc >> 2) * 2654435761u) & (SYM_CACHE - 1);
+    for (int probe = 0; probe < 16; probe++, h = (h + 1) & (SYM_CACHE - 1)) {
+        if (!g_sym_cache[h].used) break;
+        if (g_sym_cache[h].pc == pc) { *fn = g_sym_cache[h].fn; return g_sym_cache[h].kind; }
+    }
+    char buf[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
+    si->SizeOfStruct = sizeof(SYMBOL_INFO);
+    si->MaxNameLen = 255;
+    DWORD64 d = 0;
+    int kind = 0;
+    unsigned a = 0;
+    if (SymFromAddr(proc, (DWORD64)pc, &d, si)) {
+        if (!strcmp(si->Name, "thread_body")) kind = 2;
+        else if (sscanf(si->Name, "psp_body_%8X", &a) == 1 || sscanf(si->Name, "psp_func_%8X", &a) == 1) kind = 1;
+    }
+    for (int probe = 0; probe < 16; probe++, h = (h + 1) & (SYM_CACHE - 1))
+        if (!g_sym_cache[h].used) {
+            g_sym_cache[h].pc = pc; g_sym_cache[h].fn = a; g_sym_cache[h].kind = (uint8_t)kind; g_sym_cache[h].used = 1;
+            break;
+        }
+    *fn = a;
+    return kind;
+}
+
+int game_stack(char *out, size_t cap, int max_frames) {
+    out[0] = '\0';
+    if (!InterlockedCompareExchange(&g_sym_ready, 0, 0)) return 0;   /* symbols still loading: no stack */
+    HANDLE proc = GetCurrentProcess();
     void *frames[48];
     const USHORT n = CaptureStackBackTrace(1, 48, frames, NULL);
     size_t used = 0;
     int k = 0;
     uint32_t last = 0, seen[48];
-    out[0] = '\0';
+    EnterCriticalSection(&g_sym_lock);
     for (USHORT i = 0; i < n && k < max_frames; i++) {
-        char buf[sizeof(SYMBOL_INFO) + 256];
-        SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
-        si->SizeOfStruct = sizeof(SYMBOL_INFO);
-        si->MaxNameLen = 255;
-        DWORD64 d = 0;
-        if (!SymFromAddr(proc, (DWORD64)(uintptr_t)frames[i], &d, si)) continue;
-        if (!strcmp(si->Name, "thread_body")) break;
-        unsigned a;
-        if ((sscanf(si->Name, "psp_body_%8X", &a) == 1 || sscanf(si->Name, "psp_func_%8X", &a) == 1) && a != last) {
+        uint32_t a;
+        const int kind = sym_kind(proc, (uintptr_t)frames[i], &a);
+        if (kind == 2) break;
+        if (kind == 1 && a != last) {
             /* each function once: a state machine re-entering itself would
              * otherwise fill the chain and hide its callers */
             int dup = 0;
@@ -1617,6 +1715,7 @@ int game_stack(char *out, size_t cap, int max_frames) {
             k++;
         }
     }
+    LeaveCriticalSection(&g_sym_lock);
     return k;
 }
 
@@ -1624,11 +1723,11 @@ int game_stack(char *out, size_t cap, int max_frames) {
  * stack (the host stack is the game's call stack), innermost first. */
 /* The recompiled functions among `frames`, innermost first, as " name name ...". */
 static void stack_names(void *const *frames, USHORT n, char *line, size_t cap) {
-    static int sym_ready;
     HANDLE proc = GetCurrentProcess();
-    if (!sym_ready) { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS); SymInitialize(proc, NULL, TRUE); sym_ready = 1; }
     size_t len = 0;
     line[0] = '\0';
+    if (!InterlockedCompareExchange(&g_sym_ready, 0, 0)) { snprintf(line, cap, " (symbols still loading)"); return; }
+    EnterCriticalSection(&g_sym_lock);
     for (USHORT i = 0; i < n; i++) {
         char buf[sizeof(SYMBOL_INFO) + 256];
         SYMBOL_INFO *si = (SYMBOL_INFO *)buf;
@@ -1642,6 +1741,7 @@ static void stack_names(void *const *frames, USHORT n, char *line, size_t cap) {
             if (!strcmp(si->Name, "thread_body")) break;
         }
     }
+    LeaveCriticalSection(&g_sym_lock);
 }
 
 /* Read-watch hits (psp_mem_watch_read): each distinct call stack once, with a
@@ -1715,7 +1815,7 @@ static void watch_backtrace(uint32_t addr, uint32_t value) {
 /* A host-side fault (access violation, stack overflow) is a bug in the
  * runtime or the generated code. Report where -- host function, PSP state,
  * thread table -- before the process dies, so it can be found. */
-static char g_crash_path[700];          /* crash_log.txt next to the exe */
+static char g_crash_path[700];          /* logs/crash_log.txt next to the exe */
 static DWORD g_crash_tid;               /* the faulting thread */
 
 /* The faulting thread's own call stack, innermost first: for a stack overflow
@@ -1796,7 +1896,7 @@ static void crash_minidump(EXCEPTION_POINTERS *ep) {
     if (!g_crash_path[0]) return;
     char path[720];
     snprintf(path, sizeof path, "%s", g_crash_path);
-    char *s = strrchr(path, '\\');
+    char *s = strrchr(path, '/');
     snprintf(s ? s + 1 : path, sizeof path - (size_t)(s ? s + 1 - path : 0), "crash_dump.dmp");
     HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return;
@@ -1995,15 +2095,25 @@ int main(int argc, char **argv) {
     const char *replay_path = NULL;
     int show_fps = 1;                      /* the FPS counter: shown unless --hide-fps */
     float rs_speed = 1.0f;                 /* right-stick camera sensitivity */
+    int rs_arg = 0;                        /* --rs-speed given: it wins over the saved one */
     uint32_t dump_addr = 0, args_addr = 0;
     uint64_t args_flip = 0;
     const char *dump_path = NULL;
     exe_dir(dir, sizeof dir);
 #ifdef _WIN32
-    snprintf(g_crash_path, sizeof g_crash_path, "%s\\crash_log.txt", dir);
+    log_path(g_crash_path, sizeof g_crash_path, dir, "crash_log.txt");   /* logs/crash_log.txt; the dump goes beside it */
 #endif
 #ifdef PSP2I_PROD
-    argc = 1;                              /* community build: no command line, see prod.c */
+    /* Community build: no command line (see prod.c) except --console, which
+     * shows the console window with the engine's messages. The exe is a
+     * window-only program there, so without it no console appears. */
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--console") && AllocConsole()) {
+            freopen("CONOUT$", "w", stdout);
+            freopen("CONOUT$", "w", stderr);
+            SetConsoleTitleA(WINDOW_TITLE " - console");
+        }
+    argc = 1;
 #endif
 
     for (int i = 1; i < argc; i++) {
@@ -2018,7 +2128,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--fps") && i + 1 < argc)           { fps = atoi(argv[++i]); fps_arg = 1; }
         else if (!strcmp(argv[i], "--replay-input") && i + 1 < argc)  replay_path = argv[++i];
         else if (!strcmp(argv[i], "--show-fps"))                      show_fps = 1;
-        else if (!strcmp(argv[i], "--rs-speed") && i + 1 < argc)      rs_speed = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--rs-speed") && i + 1 < argc)      { rs_speed = (float)atof(argv[++i]); rs_arg = 1; }
         else if (!strcmp(argv[i], "--rstick") && i + 1 < argc && g_nrstick < MAX_STICK) {
             unsigned x, y; unsigned long long at = 0, len = 6;
             if (sscanf(argv[++i], "%u,%u@%llu+%llu", &x, &y, &at, &len) < 3 || x > 255 || y > 255) {
@@ -2138,9 +2248,12 @@ int main(int argc, char **argv) {
      * costing about 20 fps in the lobby at 60 fps. Only --profile set this
      * before, which is why profiled runs looked faster. */
     timeBeginPeriod(1);
+    sym_start();                          /* symbols for the logs' game stacks, loaded in the background */
+#ifndef PSP2I_PROD                        /* test hooks (--watch, the HP probe's read watch, bad accesses) */
     psp_mem_set_watch_hook(watch_backtrace);
     psp_mem_set_read_watch_hook(read_watch_hit);
     psp_mem_set_bad_hook(bad_access_hit);
+#endif
     psp_set_loadexec_hook(loadexec_host);
     psp_np_set_store(store_open, store_showing);
 #endif
@@ -2229,7 +2342,15 @@ int main(int argc, char **argv) {
     }
     fps_meter_init(&g_fpsm);
     framerate_init(fps);
-    menu_set_rs_speed(&g_menu, rs_speed);
+    menu_set_rs_speed(&g_menu, !rs_arg && g_rs_saved > 0.0f ? g_rs_saved : rs_speed);
+    g_menu.rs_on = g_rs_on;
+    g_menu.test_ticks = g_test_ticks;
+    g_menu.test_logic = g_test_logic;
+#ifdef PSP2I_PROD
+    g_menu.hidden |= MENU_BIT(MENU_TESTS);              /* the frame-rate tests are for development builds */
+    g_test_ticks = g_test_logic = 0;
+#endif
+    framerate_set_tests(g_test_ticks, g_test_logic);
     camera_init(menu_rs_speed(&g_menu));
     /* PSP savedata encryption: saves interchangeable with a PSP / PPSSPP */
     static const psp_savedata_crypto SAVE_CRYPTO = { savecrypt_decrypt, savecrypt_encrypt, savecrypt_sfo_hash };
@@ -2237,6 +2358,9 @@ int main(int argc, char **argv) {
     online_init(dir, &g_login);
     gamelog_init(dir);
     functrace_init(dir);
+#ifndef PSP2I_PROD
+    rateaudit_init(dir);                  /* the vblank-use census, and F7's frame-rate audit */
+#endif
     psp_sched_set_vblank_hook(on_vblank);
 
     int rc;

@@ -7,6 +7,7 @@
 
 #include "menu.h"
 #include "framerate.h"
+#include <psprecomp/hle.h>
 #include "camera.h"
 #include "login.h"
 #include "textedit.h"
@@ -59,7 +60,11 @@ static void test_values(void) {
 
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_FPS_CHANGED && m.fps == 60);
     menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_FPS_CHANGED && m.fps == 30);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_FPS_CHANGED && m.fps == 120);  /* 30 -> 60 -> 120 */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_FPS_CHANGED && m.fps == 30);    /* wraps */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_FPS_CHANGED && m.fps == 120);    /* Left: the other way */
     menu_update(&m, 0, 0);
     CHECK(menu_update(&m, MI_LEFT, 0) == MFX_FPS_CHANGED && m.fps == 60);
     menu_update(&m, 0, 0);
@@ -71,8 +76,6 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_SHOW_FPS && m.show_fps == 1);
     menu_update(&m, 0, 0);
 
-    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_RS_SPEED);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_SEGA_SERVER);
     CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_EDIT_SEGA && m.open);   /* Circle opens the editor */
@@ -180,6 +183,18 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_LEFT, 0) == MFX_FONT && m.font == 2);
     menu_update(&m, 0, 0);
     m.font = 0; m.font_n = 0;
+    /* CONTROLS opens its page (Circle or Right), at its first item */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_CONTROLS && m.page == MENU_PAGE_MAIN);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == 0 && m.page == MENU_PAGE_CONTROLS && m.sel == MENU_RS_ON && m.open);
+    menu_update(&m, 0, 0);
+    /* RIGHT STICK: on by default; Right, Left and Confirm each flip it */
+    CHECK(m.rs_on && menu_update(&m, MI_RIGHT, 0) == MFX_RS_ON && !m.rs_on);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_RS_ON && m.rs_on);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_RS_SPEED);
     /* Circle/Cross: Right, Left and Confirm each flip it */
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_SWAP_OC && !m.swap_oc);
@@ -190,6 +205,34 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_SWAP_OC && m.swap_oc);
     menu_update(&m, 0, 0);
     m.swap_oc = 0;
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_CONTROLS_BACK);                 /* the touch items are hidden by default */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_RS_ON);                         /* wraps within the page */
+    CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.open && m.page == MENU_PAGE_MAIN && m.sel == MENU_CONTROLS);  /* Cross: back */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0 && m.page == MENU_PAGE_CONTROLS);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_CONTROLS_BACK);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_CONTROLS);  /* BACK */
+    menu_update(&m, 0, 0);
+    /* TESTS: its page, both switches off by default, BACK returns to it */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_TESTS);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == 0 && m.page == MENU_PAGE_TESTS && m.sel == MENU_TEST_TICKS);
+    menu_update(&m, 0, 0);
+    CHECK(!m.test_ticks && !m.test_logic);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_TESTS && m.test_ticks);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_TEST_LOGIC && menu_update(&m, MI_CONFIRM, 0) == MFX_TESTS && m.test_logic);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_TESTS_BACK);
+    CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_TESTS);   /* Cross: back */
+    menu_update(&m, 0, 0);
+    m.test_ticks = m.test_logic = 0;
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -202,8 +245,10 @@ static void test_values(void) {
     CHECK(m.open && m.sel == MENU_FRAME_RATE && m.fps == 60 && m.show_fps == 1);
 
     menu_state d;
-    menu_init(&d, 45, 0);                               /* anything but 60 is 30 */
+    menu_init(&d, 45, 0);                               /* anything but 60 or 120 is 30 */
     CHECK(d.fps == 30 && d.show_fps == 0);
+    menu_init(&d, 120, 0);
+    CHECK(d.fps == 120);
 }
 
 static void test_repeat(void) {
@@ -269,8 +314,6 @@ static void test_buttons(void) {
     CHECK(STEP(0) == 0);
     CHECK(STEP(CIRCLE) == MFX_SHOW_FPS && m.show_fps == 0);
     CHECK(STEP(0) == 0);
-    CHECK(STEP(DOWN) == 0 && m.sel == MENU_RS_SPEED);
-    CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_SEGA_SERVER);
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_ADHOC_SERVER);
@@ -283,7 +326,7 @@ static void test_buttons(void) {
     CHECK(STEP(0) == 0);
     CHECK(STEP(DOWN) == 0 && m.sel == MENU_RENDERER);
     CHECK(STEP(0) == 0);
-    for (int k = MENU_MASTER_VOL; k <= MENU_SWAP_OC; k++) {
+    for (int k = MENU_MASTER_VOL; k <= MENU_TESTS; k++) {
         CHECK(STEP(DOWN) == 0 && m.sel == k);
         CHECK(STEP(0) == 0);
     }
@@ -315,9 +358,12 @@ static void test_rs_speed(void) {
     menu_init(&m, 30, 1);
     CHECK(menu_rs_speed(&m) == 1.0f);                   /* default 1.00x */
     menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Close */
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Tests */
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Controls */
+    menu_update(&m, MI_CONFIRM, 0); menu_update(&m, 0, 0);  /* its page: RIGHT STICK */
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_RS_SPEED);
+    CHECK(m.sel == MENU_RS_SPEED && m.page == MENU_PAGE_CONTROLS);
     CHECK(menu_update(&m, MI_LEFT, 0) == 0 && menu_rs_speed(&m) == 1.0f);   /* already at the bottom */
     menu_update(&m, 0, 0);
     float want = 1.0f;
@@ -334,7 +380,7 @@ static void test_rs_speed(void) {
     menu_update(&m, 0, 0);
     CHECK(menu_update(&m, menu_inputs_from_psp(0x2000, 128, 128), 0) == MFX_RS_SPEED && menu_rs_speed(&m) == 1.25f);
     menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, menu_inputs_from_psp(0x4000, 128, 128), 0) == MFX_CLOSED);    /* Cross backs out */
+    CHECK(menu_update(&m, menu_inputs_from_psp(0x4000, 128, 128), 0) == 0 && m.page == MENU_PAGE_MAIN);  /* Cross: back */
     CHECK(menu_rs_speed(&m) == 1.25f);                  /* kept */
     menu_set_rs_speed(&m, 1.8f);  CHECK(menu_rs_speed(&m) == 1.75f);
     menu_set_rs_speed(&m, 9.0f);  CHECK(menu_rs_speed(&m) == 2.0f);
@@ -567,6 +613,22 @@ static void entry_frame(void) {
 static void game_asks(uint32_t fps) { psp_cpu.r[4] = fps; entry_set(); }
 static void game_frame(void) { psp_cpu.r[4] = 0x1234; psp_cpu.r[29] = 0x09F00000u; psp_cpu.r[2] = 7; entry_frame(); }
 
+/* The input library's repeat (0x08D5B844) as the hook runs it: what it sees
+ * of the fps object's +4 (read by 0x08D63128 as 60 / it) and the delay and
+ * interval. */
+static uint32_t g_rep_fps, g_rep_delay, g_rep_next;
+static void orig_repeat(void) {
+    const uint32_t o = psp_read32(0x08EE2138u);
+    g_rep_fps = psp_read32(o + 4); g_rep_delay = psp_read32(0x08EE1FC4u); g_rep_next = psp_read32(0x08EE1FC8u);
+}
+static void entry_repeat(void) { psp_hook_fn h = psp_hook_find(0x08D5B844u); if (h) h(orig_repeat); else orig_repeat(); }
+
+/* The weapon palette's update (0x089E1F50) as the hook runs it: a stand-in
+ * that counts +364 down by one per call. */
+#define PAL_OBJ 0x08F10000u
+static void orig_palette(void) { const uint32_t c = psp_read32(PAL_OBJ + 364); if (c) psp_write32(PAL_OBJ + 364, c - 1); }
+static void entry_palette(void) { psp_cpu.r[4] = PAL_OBJ; psp_hook_fn h = psp_hook_find(0x089E1F50u); if (h) h(orig_palette); else orig_palette(); }
+
 static void test_framerate(void) {
     if (psp_mem_init() != 0) { CHECK(!"psp_mem_init"); return; }
     psp_register(FN_SET, entry_set);
@@ -596,12 +658,62 @@ static void test_framerate(void) {
     game_asks(20); CHECK(g_orig_saw == 60);             /* the heavy-scene fallback too */
     game_asks(15); CHECK(g_orig_saw == 15);             /* slow modes as asked */
     game_asks(30); CHECK(g_orig_saw == 60);
+    framerate_set_tests(1, 0);                          /* TESTS > TICK PACING: at 60 too (above 60 always) */
+    {   /* at 60: 2 every other frame */
+        int seq[4];
+        for (int i = 0; i < 4; i++) { game_frame(); seq[i] = (int)psp_read32(0x08EDA560u); }
+        CHECK(seq[0] + seq[1] == 2 && seq[2] + seq[3] == 2 && (seq[0] == 0 || seq[0] == 2));
+    }
 
     /* Back to 30: re-issues the game's last request unmapped. */
     game_asks(20); CHECK(g_orig_saw == 60);
     framerate_set(30);
     game_frame();
     CHECK(g_orig_saw == 20 && framerate_game_fps() == 20);
+
+    /* 120: the display refreshes at 120 Hz from the next frame; the game's 30,
+     * 20 and 60 run at 120, its slow 15 is doubled (it counts 120 Hz vblanks). */
+    CHECK(psp_sched_vblank_rate() == 1);
+    framerate_set(120);
+    CHECK(framerate_target() == 120 && psp_sched_vblank_rate() == 1);
+    game_frame();
+    CHECK(psp_sched_vblank_rate() == 2 && g_orig_saw == 120 && framerate_game_fps() == 120);
+    game_asks(60); CHECK(g_orig_saw == 120);
+    game_asks(15); CHECK(g_orig_saw == 30);
+    game_asks(30); CHECK(g_orig_saw == 120);
+    {   /* the 1/60 s tick field (+0x14) as at 30: 2 every 4th frame at 120 */
+        int seq[8];
+        for (int i = 0; i < 8; i++) { game_frame(); seq[i] = (int)psp_read32(0x08EDA560u); }
+        int ok = 1;
+        for (int i = 0; i < 8; i++) ok &= seq[i] == 0 || seq[i] == 2;
+        for (int i = 0; i + 4 <= 8; i++) ok &= seq[i] + seq[i + 1] + seq[i + 2] + seq[i + 3] == 2;
+        CHECK(ok);
+    }
+    framerate_set_tests(0, 0);
+    {   /* above 60 the pacing stays on with the switch off */
+        int seq[4];
+        for (int i = 0; i < 4; i++) { game_frame(); seq[i] = (int)psp_read32(0x08EDA560u); }
+        CHECK(seq[0] + seq[1] + seq[2] + seq[3] == 2);
+    }
+    {   /* the weapon palette's 8-count window at 120: one count per 4 frames */
+        psp_write32(PAL_OBJ + 364, 8);
+        for (int i = 0; i < 16; i++) { game_frame(); entry_palette(); }
+        CHECK(psp_read32(PAL_OBJ + 364) == 4);
+    }
+    framerate_set(30); game_frame();
+    CHECK(psp_sched_vblank_rate() == 1 && g_orig_saw == 30);
+    CHECK(framerate_normalize(120) == 120 && framerate_normalize(60) == 60 && framerate_normalize(90) == 30);
+
+    /* The menu repeat: at 120 the timer steps 1 per frame (60 / 60) and the
+     * delay and interval double; at 60 untouched; put back after the call. */
+    psp_write32(0x08EE2138u, 0x08F00000u);
+    psp_write32(0x08F00004u, 120); psp_write32(0x08EE1FC4u, 20); psp_write32(0x08EE1FC8u, 24);
+    entry_repeat();
+    CHECK(g_rep_fps == 60 && g_rep_delay == 40 && g_rep_next == 48);
+    CHECK(psp_read32(0x08F00004u) == 120 && psp_read32(0x08EE1FC4u) == 20 && psp_read32(0x08EE1FC8u) == 24);
+    psp_write32(0x08F00004u, 60);
+    entry_repeat();
+    CHECK(g_rep_fps == 60 && g_rep_delay == 20 && g_rep_next == 24);
 
     /* Setting the current target again does nothing. */
     const int n = g_set_calls;
@@ -666,6 +778,53 @@ static void test_camera_hooks(void) {
     psp_mem_free();
 }
 
+/* The touch host's menu (sdl_main.c): items left out are skipped, taps
+ * select and change, CONTROLS and BACK switch pages, the touch colour and
+ * opacity step and clamp. */
+static void test_touch_host(void) {
+    menu_state m;
+    menu_init(&m, 30, 1);
+    CHECK((m.hidden & MENU_BIT(MENU_TOUCH_COLOR)) && (m.hidden & MENU_BIT(MENU_TOUCH_ALPHA)));   /* Windows: hidden */
+    m.hidden = MENU_BIT(MENU_FRAME_RATE) | MENU_BIT(MENU_SEGA_SERVER) | MENU_BIT(MENU_FONT);
+    CHECK(menu_update(&m, MI_TOGGLE, 0) == MFX_OPENED && m.sel == MENU_FPS_COUNTER);  /* the first shown item */
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_ADHOC_SERVER);                          /* SEGA SERVER skipped */
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_CLOSE);                                  /* wraps past the hidden first item */
+
+    /* the main page's taps: rows in shown order, 11 pixels apart */
+    int x, y, bw, bh;
+    menu_box(&m, 480, 272, &x, &y, &bw, &bh);
+    CHECK(bh == 261 + 11 * (13 - 16));                           /* 16 main items, 3 hidden */
+    int row0 = y + 8 + 9 + 8;
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 3) == MFX_SHOW_FPS && m.sel == MENU_FPS_COUNTER && !m.show_fps);
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 + 3) == MFX_EDIT_ADHOC);   /* editors open */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 10 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS */
+
+    /* the CONTROLS page with the touch items: RIGHT STICK, SENSITIVITY, CIRCLE/CROSS, COLOR, OPACITY, BACK */
+    m.hidden = 0;
+    menu_box(&m, 480, 272, &x, &y, &bw, &bh);
+    CHECK(bh == 261 + 11 * (6 - 16));
+    row0 = y + 8 + 9 + 8;
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 3) == MFX_RS_ON && !m.rs_on);
+    const int alpha_row = row0 + 11 * 4, color_row = row0 + 11 * 3;
+    CHECK(menu_touch(&m, 480, 272, x + 200, alpha_row + 3) == MFX_TOUCH && m.touch_alpha == TOUCH_ALPHA_DEFAULT + 1);
+    CHECK(menu_touch(&m, 480, 272, x + 140, alpha_row + 3) == MFX_TOUCH && m.touch_alpha == TOUCH_ALPHA_DEFAULT);
+    for (int i = 0; i < 12; i++) menu_touch(&m, 480, 272, x + 140, alpha_row + 3);
+    CHECK(m.touch_alpha == TOUCH_ALPHA_MIN);                     /* stops at the minimum */
+    CHECK(menu_touch(&m, 480, 272, x + 200, color_row + 3) == MFX_TOUCH && m.touch_color == TOUCH_WHITE);
+    CHECK(menu_touch(&m, 480, 272, x + 140, color_row + 3) == MFX_TOUCH && m.touch_color == TOUCH_DEFAULT);
+    CHECK(menu_touch_color_parse("yellow") == TOUCH_YELLOW && menu_touch_color_parse("nope") < 0);
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 5 + 3) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_CONTROLS);  /* BACK */
+    menu_box(&m, 480, 272, &x, &y, &bw, &bh);                    /* the main page's box again */
+    row0 = y + 8 + 9 + 8;
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 13 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS, nothing hidden */
+    CHECK(menu_touch(&m, 480, 272, 2, 2) == 0 && m.open && m.page == MENU_PAGE_MAIN);   /* outside: back a page */
+    CHECK(menu_touch(&m, 480, 272, 2, 2) == MFX_CLOSED && !m.open);                     /* outside again: closes */
+}
+
 int main(void) {
     test_open_close();
     test_values();
@@ -681,6 +840,7 @@ int main(void) {
     test_draw();
     test_framerate();
     test_camera_hooks();
+    test_touch_host();
     printf("test_menu: %d checks, %d failed\n", g_run, g_fail);
     return g_fail ? 1 : 0;
 }

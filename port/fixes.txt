@@ -22,10 +22,10 @@
 # instead of arriving -- Rapico spinning on the spot in his shop, Hyuga
 # turning past the player. Logged at 60 fps: the walk restarted its turn every
 # frame with the target held ~90 deg to the side (circling) for the whole
-# recording. The radius keeps its 30 fps size: both loads now take the 30.0
-# constant the next instructions already use (0x08E011D8), so 30 / 30 = 1.0.
-0x08A5C27C 0x3C0208E0   # lui $v0, 0x08EE  ->  lui $v0, 0x08E0
-0x08A5C280 0xC44011D8   # lwc1 $f0, fps    ->  lwc1 $f0, 30.0   (arrival radius 30/30)
+# recording. The radius keeps its 30 fps size: the division 30.0 / fps at
+# 0x08A5C2B8 divides 30.0 by itself instead (fps in $f0 is not used after
+# it), so 30 / 30 = 1.0 -- one instruction; the 60 fps cheat uses the same.
+0x08A5C2B8 0x46010843   # div.s $f1, $f1, $f0  ->  div.s $f1, $f1, $f1   (arrival radius 30/30)
 # REMOVED (2026-10-18; the lobby HP bars are right without it): this came from the 60 FPS cheat line
 # "_L 0x2016E914 0x2404003C", whose target is 0x0896E914 (a frame-rate request,
 # li $a0,30 -> 60), mistyped as 0x08A6E914. There it replaced the "slot flag
@@ -36,3 +36,23 @@
 #0x08A6E914 0x2404003C
 0x089E14CC 0x34020000
 0x089E1600 0x34020000
+# 0x089AAD80: the lobby billboard's size limit. 0x089AAD3C hands the received
+# GIM to 0x089976C4 only when its size (*0x08ED5A24) is at most 0xFFFF, so a
+# bigger one leaves the billboard black. Nothing needs the limit: the HTTP
+# receive (0x08A63CB8) reallocates its buffer to the reply's full length, and
+# the loader (0x08997D20) allocates exactly the GIM's size and copies into
+# that. The compare becomes 0, so any size is accepted (the PSP texture limits
+# still apply: up to 512x512).
+0x089AAD80 0x00001021   # slt $v0, $v0, $v1  ->  addu $v0, $zero, $zero# 0x08D9466C..0x08D98170: the GIM library's texture size. It rounds an
+# image's width and height up to a power of two with a loop that starts at
+# 512 (7 steps, 512 down to 8), so anything over 512 is declared 1024 and a
+# bigger image shows only its top-left part -- the game's UVs (0x089AA7E0)
+# assume the full power of two. The loops start at 2048 instead, with 9 steps
+# (2048 down to 8), so up to 4096 is declared right; sizes up to 512 round as
+# before. Two copies in the bind (width, height) and one helper (0x08D9815C).
+0x08D9466C 0x24050800   # addiu $a1, $zero, 512  ->  2048   (width)
+0x08D94688 0x28640009   # slti $a0, $v1, 7       ->  9
+0x08D946B4 0x24030800   # addiu $v1, $zero, 512  ->  2048   (height)
+0x08D946C4 0x28850009   # slti $a1, $a0, 7       ->  9
+0x08D9815C 0x24030800   # addiu $v1, $zero, 512  ->  2048   (helper)
+0x08D98170 0x28A60009   # slti $a2, $a1, 7       ->  9
