@@ -1,7 +1,7 @@
 <h1 align="center"> Phantasy Star Portable 2 Infinity Recomp</h1>
 
 <p align="center">
-  <img src="https://i0.wp.com/bumped.org/psublog/wp-content/uploads/2010/08/Phantasy-star-portable-2-infinity.png?resize=338%2C213" alt="Icon">
+   <img src="asset/Logo.png" alt="Icon">
 </p>
 
 A recompilation project for **Phantasy Star Portable 2 Infinity (PSP2i)**, bringing the game to a native PC environment while preserving the original game's functionality and feel.
