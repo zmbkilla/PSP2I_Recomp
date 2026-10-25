@@ -3,8 +3,12 @@
  * GDI's StretchDIBits scales on the CPU, on the game's thread: at 1080p and
  * above that costs milliseconds per frame, which 60 fps does not have to
  * spare. Here the frame (480x272) is uploaded once and a single triangle
- * scales it on the GPU. Nearest-texel sampling keeps the pixels sharp. */
+ * scales it on the GPU. Nearest-texel sampling keeps the pixels sharp, unless
+ * the engine menu's GRAPHICS page asks for post-processing (postfx.h): the
+ * same shader then filters, anti-aliases, sharpens, draws scanlines and
+ * adjusts brightness and saturation. */
 #include "present.h"
+#include "postfx.h"
 
 void present_fit(int cw, int ch, int fw, int fh, int *x, int *y, int *w, int *h) {
     if (cw <= 0 || ch <= 0 || fw <= 0 || fh <= 0) { *x = *y = *w = *h = 0; return; }
@@ -37,20 +41,57 @@ static ID3D11Texture2D          *g_tex;
 static ID3D11ShaderResourceView *g_srv;
 static ID3D11VertexShader       *g_vs;
 static ID3D11PixelShader        *g_ps;
-static ID3D11SamplerState       *g_smp;
+static ID3D11SamplerState       *g_smp, *g_smp_lin;
+static ID3D11Buffer             *g_cb;               /* the postfx parameters */
 static ID3D11RasterizerState    *g_rs;
 static int g_tex_w, g_tex_h, g_buf_w, g_buf_h, g_resize, g_ok;
 
-/* One triangle covering the viewport; the viewport is the letterboxed rect. */
+/* One triangle covering the viewport; the viewport is the letterboxed rect.
+ * P0 = (scaling, fxaa, sharpen, scanlines), P1 = (brightness, saturation,
+ * window pixels per frame pixel), TS = the frame's size (postfx_params). */
 static const char BLIT_SRC[] =
     "Texture2D t : register(t0);\n"
     "SamplerState s : register(s0);\n"
+    "cbuffer P : register(b0) { float4 P0; float4 P1; float4 TS; };\n"
     "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
     "V vsb(uint id : SV_VertexID) {\n"
     "    V o; float2 uv = float2((id << 1) & 2, id & 2);\n"
     "    o.uv = uv; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o;\n"
     "}\n"
-    "float4 psb(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n";
+    "float3 tap(float2 uv) { return t.SampleLevel(s, uv, 0).rgb; }\n"
+    "float3 frame(float2 uv) {\n"
+    "    float2 x = uv * TS.xy, i = floor(x), f = saturate((x - i - 0.5) * P1.z + 0.5);\n"
+    "    return tap(P0.x > 1.5 ? (i + f) / TS.xy : uv);\n"      /* 2 = sharp bilinear */
+    "}\n"
+    "static const float3 L = float3(0.299, 0.587, 0.114);\n"
+    "float3 fxaa(float2 uv, float2 px) {\n"
+    "    float3 nw = tap(uv + float2(-1, -1) * px), ne = tap(uv + float2(1, -1) * px);\n"
+    "    float3 sw = tap(uv + float2(-1, 1) * px), se = tap(uv + float2(1, 1) * px), m = frame(uv);\n"
+    "    float lnw = dot(nw, L), lne = dot(ne, L), lsw = dot(sw, L), lse = dot(se, L), lm = dot(m, L);\n"
+    "    float lmin = min(lm, min(min(lnw, lne), min(lsw, lse))), lmax = max(lm, max(max(lnw, lne), max(lsw, lse)));\n"
+    "    float2 d = float2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));\n"
+    "    float red = max((lnw + lne + lsw + lse) * 0.03125, 1.0 / 128.0);\n"
+    "    d = clamp(d / (min(abs(d.x), abs(d.y)) + red), -8.0, 8.0) * px;\n"
+    "    float3 a = 0.5 * (tap(uv + d * (1.0 / 3.0 - 0.5)) + tap(uv + d * (2.0 / 3.0 - 0.5)));\n"
+    "    float3 b = a * 0.5 + 0.25 * (tap(uv - d * 0.5) + tap(uv + d * 0.5));\n"
+    "    float lb = dot(b, L);\n"
+    "    return (lb < lmin || lb > lmax) ? a : b;\n"
+    "}\n"
+    "float4 psb(V i) : SV_Target {\n"
+    "    float2 px = 1.0 / TS.xy;\n"
+    "    float3 c = P0.y > 0.5 ? fxaa(i.uv, px) : frame(i.uv);\n"
+    "    if (P0.z > 0.0) {\n"                                    /* sharpen: unsharp mask, 4 neighbours */
+    "        float3 n = tap(i.uv + float2(0, -px.y)) + tap(i.uv + float2(0, px.y)) + tap(i.uv + float2(-px.x, 0)) + tap(i.uv + float2(px.x, 0));\n"
+    "        c = saturate(c + P0.z * (c * 4.0 - n) * 0.25);\n"
+    "    }\n"
+    "    if (P0.w > 0.0) {\n"                                    /* scanlines: darker between frame rows */
+    "        float y = frac(i.uv.y * TS.y);\n"
+    "        c *= 1.0 - P0.w * (1.0 - 4.0 * y * (1.0 - y));\n"
+    "    }\n"
+    "    c *= P1.x;\n"
+    "    c = lerp(dot(c, L).xxx, c, P1.y);\n"
+    "    return float4(saturate(c), 1);\n"
+    "}\n";
 
 static ID3DBlob *compile(const char *entry, const char *target) {
     ID3DBlob *code = NULL, *err = NULL;
@@ -140,11 +181,18 @@ int present_init(HWND wnd) {
     smp.AddressU = smp.AddressV = smp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     smp.MaxLOD = D3D11_FLOAT32_MAX;
     ID3D11Device_CreateSamplerState(g_dev, &smp, &g_smp);
+    smp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    ID3D11Device_CreateSamplerState(g_dev, &smp, &g_smp_lin);
+    D3D11_BUFFER_DESC bd;
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = 48; bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb);
     D3D11_RASTERIZER_DESC rd;
     memset(&rd, 0, sizeof rd);
     rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
     ID3D11Device_CreateRasterizerState(g_dev, &rd, &g_rs);
-    if (!g_vs || !g_ps || !g_smp || !g_rs || make_rtv() != 0) {
+    if (!g_vs || !g_ps || !g_smp || !g_smp_lin || !g_cb || !g_rs || make_rtv() != 0) {
         fprintf(stderr, "present: setup failed; using GDI\n");
         return -1;
     }
@@ -192,7 +240,18 @@ int present_frame(const uint32_t *px, int w, int h) {
     ID3D11DeviceContext_VSSetShader(g_ctx, g_vs, NULL, 0);
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps, NULL, 0);
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &g_srv);
-    ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &g_smp);
+    {   /* the post-processing (postfx.h) */
+        float p[12] = { 0 };
+        int linear = 0;
+        postfx_params(w, vw, p, p + 4, &linear);
+        p[8] = (float)w; p[9] = (float)h;
+        if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+            memcpy(m.pData, p, sizeof p);
+            ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cb, 0);
+        }
+        ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &g_cb);
+        ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, linear ? &g_smp_lin : &g_smp);
+    }
     ID3D11DeviceContext_Draw(g_ctx, 3, 0);
     /* No vsync wait here: the scheduler already paces frames to the vblank. */
     HRESULT hr = IDXGISwapChain_Present(g_sc, 0, 0);

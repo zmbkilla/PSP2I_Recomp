@@ -56,6 +56,7 @@
  *               the first time it runs; see host/oracle.c
  */
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -87,6 +88,7 @@
 #include "gamelog.h"
 #include "functrace.h"
 #include "rateaudit.h"
+#include "postfx.h"
 #include "prod.h"
 #include "textedit.h"
 #include "present.h"
@@ -349,12 +351,14 @@ static void compose(void) {
     draw_overlay();
 }
 
+static uint64_t g_quit_at;                 /* QUIT GAME chosen (engine menu): 0 = not */
 #ifdef _WIN32
 static HWND g_wnd;
 static int g_alt_enter;                     /* Alt+Enter pressed; handled with the menu */
 static uint32_t g_keys;
 static WPARAM g_menu_vk = VK_F1;
-static ULONGLONG g_close_at;       /* when the window was closed (GetTickCount64); 0 = not closed */
+static volatile LONG g_prof_keyed, g_prof_keyon;   /* F8 with --profile: sample only between presses */
+static volatile ULONGLONG g_close_at;   /* when the window was closed (GetTickCount64); 0 = not closed */
 
 /* Keys for the menu only: the hotkey, and Escape/Backspace as Back. */
 static uint32_t host_key(WPARAM vk) {
@@ -367,6 +371,25 @@ static int g_swap_oc;                       /* Circle <-> Cross (menu CIRCLE/CRO
 static float g_rs_saved;                    /* menu CONTROLS > SENSITIVITY (rs_speed=; 0: not saved yet) */
 static int g_rs_on = 1;                     /* menu CONTROLS > RIGHT STICK (right_stick=on/off) */
 static int g_test_ticks, g_test_logic;      /* menu TESTS (test_tick_pacing= / test_30hz_logic=; framerate.c) */
+static int g_draw_dist;                     /* menu DRAW DISTANCE (draw_distance=far/normal; switches.txt 0) */
+static int g_vertex_arg = -1;               /* --vertex-work gpu|cpu (tests): over the ini */
+static int g_gpu_vertex = 1;                /* menu VERTEX WORK (vertex_work=gpu/cpu; psp_gpu_set_gpu_transform) */
+static postfx g_post = { PF_NEAREST, 0, PF_OFF, PF_OFF, 10, 10 };   /* menu GRAPHICS post-processing (postfx.h) */
+
+/* Once per vblank: the DRAW DISTANCE switch (port/switches.txt, switch 0). The
+ * PPSSPP cheat it comes from is reported to corrupt the UI while saving, so
+ * it stays off while the savedata utility runs and for 3 s after. */
+static void draw_dist_apply(void) {
+    static uint64_t quiet_until;
+    const uint64_t now = psp_sched_now_us();
+    if (psp_utility_savedata_busy()) quiet_until = now + 3000000u;
+    const uint8_t on = g_draw_dist && now >= quiet_until;
+    if (psp_switch[0] != on) {
+        psp_switch[0] = on;
+        fprintf(stderr, "graphics: draw distance %s%s\n", on ? "far" : "normal",
+                g_draw_dist && !on ? " (saving)" : "");
+    }
+}
 
 static uint32_t key_bit(WPARAM vk) {
     if (g_swap_oc && (vk == 'X' || vk == 'Z')) vk = vk == 'X' ? 'Z' : 'X';
@@ -387,20 +410,30 @@ static uint32_t key_bit(WPARAM vk) {
     }
 }
 
-static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+/* The window's messages, on the game thread (window_pump, from the window
+ * thread's queue): keys, text, resizes, closing. */
+static void game_msg(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    (void)h;
     switch (msg) {
     case WM_CHAR:
         /* Text for the sign-in screen (letters do not act as PSP buttons then). */
         if (g_sega_edit.open) { if (wp > 32 && wp < 127) textedit_type(&g_sega_edit, (char)wp); }
         else if (g_login.state != LOGIN_CLOSED && wp >= 32 && wp < 127) login_type(&g_login, (char)wp);
-        return 0;
+        return;
     case WM_KEYDOWN: {
         const int first = !(lp & (1 << 30));                     /* not an auto-repeat */
 #ifndef PSP2I_PROD                                     /* test keys: not in the community build */
         if (wp == VK_F12 && first) g_dump_key = 1;
-        if (wp == VK_F9 && first && g_menu_vk != VK_F9) { functrace_toggle(); return 0; }   /* function-activity recorder */
-        if (wp == VK_F7 && first && g_menu_vk != VK_F7) { rateaudit_start(); return 0; }    /* frame-rate audit */
-        if (wp == VK_F6 && first && g_menu_vk != VK_F6) { rateaudit_start_press(); return 0; }   /* press audit */
+        if (wp == VK_F9 && first && g_menu_vk != VK_F9) { functrace_toggle(); return; }   /* function-activity recorder */
+        if (wp == VK_F7 && first && g_menu_vk != VK_F7) { rateaudit_start(); return; }    /* frame-rate audit */
+        if (wp == VK_F6 && first && g_menu_vk != VK_F6) { rateaudit_start_press(); return; }   /* press audit */
+        if (wp == VK_F8 && first && g_menu_vk != VK_F8) {                                      /* profile window */
+            g_prof_keyed = 1;
+            g_prof_keyon = !g_prof_keyon;
+            fprintf(stderr, "profile: F8 -- sampling %s\n", g_prof_keyon ? "on" : "off");
+            gamelog_note("[profile] F8: sampling %s", g_prof_keyon ? "on (press F8 again to stop)" : "off");
+            return;
+        }
 #endif
         if (text_ui_open() && wp != g_menu_vk) {
             uint32_t k = 0;
@@ -415,12 +448,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             default: break;
             }
             g_login_keys |= k;
-            return 0;
+            return;
         }
         const uint32_t hk = host_key(wp);
-        if (hk) { g_host_held |= hk; if (first) g_host_latched |= hk; return 0; }
+        if (hk) { g_host_held |= hk; if (first) g_host_latched |= hk; return; }
         if (first) g_keys_latched |= key_bit(wp);
-        g_keys |= key_bit(wp);  ctrl_commit(); return 0;
+        g_keys |= key_bit(wp);  ctrl_commit(); return;
     }
     case WM_KEYUP:
         switch (wp) {
@@ -432,62 +465,134 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case VK_ESCAPE: g_login_keys &= ~MI_BACK; break;
         default: break;
         }
-        g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); ctrl_commit(); return 0;
+        g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); ctrl_commit(); return;
     case WM_SYSKEYDOWN:
         if (wp == VK_RETURN && (lp & (1 << 29))) {               /* Alt+Enter */
             if (!(lp & (1 << 30))) g_alt_enter = 1;
-            return 0;
+            return;
         }
+        break;
+    case WM_SIZE: present_resized(); web_overlay_resize(); return;
+    case WM_CLOSE: web_overlay_close(); return;   /* the rest was done on the window thread */
+    }
+}
+
+/* The composed frame drawn with GDI, scaled with the aspect kept and black
+ * bars -- the fallback when the GPU cannot present (present.c does this on
+ * the GPU). */
+static void gdi_paint(void) {
+    HDC dc = GetDC(g_wnd);
+    if (!dc) return;
+    RECT rc;
+    GetClientRect(g_wnd, &rc);
+    int x, y, w, hh;
+    present_fit(rc.right, rc.bottom, SCREEN_W, SCREEN_H, &x, &y, &w, &hh);
+    HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    RECT bar;
+    if (x > 0) {
+        SetRect(&bar, 0, 0, x, rc.bottom); FillRect(dc, &bar, black);
+        SetRect(&bar, x + w, 0, rc.right, rc.bottom); FillRect(dc, &bar, black);
+    }
+    if (y > 0) {
+        SetRect(&bar, 0, 0, rc.right, y); FillRect(dc, &bar, black);
+        SetRect(&bar, 0, y + hh, rc.right, rc.bottom); FillRect(dc, &bar, black);
+    }
+    SetStretchBltMode(dc, COLORONCOLOR);
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = SCREEN_W;
+    bi.bmiHeader.biHeight = -SCREEN_H;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    StretchDIBits(dc, x, y, w, hh, 0, 0, SCREEN_W, SCREEN_H, g_rgba, &bi, DIB_RGB_COLORS, SRCCOPY);
+    ReleaseDC(g_wnd, dc);
+}
+
+/* ---- the window thread ----------------------------------------------------
+ *
+ * The window belongs to a thread of its own that does nothing but answer
+ * Windows. The game thread can be busy for seconds at a time -- a DNS lookup
+ * for one of the game's network requests, the movie decoder's download, a
+ * long load -- and a window whose thread reads no messages for 5 s is marked
+ * "Not Responding" (its title says so, and it greys out). The window thread
+ * queues what the game acts on (keys, text, resizes, closing) and the game
+ * thread handles it at each vblank (window_pump), as it did the messages
+ * themselves before. Closing hides the window and stops the game at once,
+ * and ends the process after 10 s if the game is stuck. */
+typedef struct { UINT msg; WPARAM wp; LPARAM lp; } win_msg;
+#define WIN_QUEUE 512
+static win_msg g_winq[WIN_QUEUE];
+static unsigned g_winq_head, g_winq_tail;
+static CRITICAL_SECTION g_winq_lock;
+
+static void winq_push(UINT msg, WPARAM wp, LPARAM lp) {
+    EnterCriticalSection(&g_winq_lock);
+    if (g_winq_tail - g_winq_head < WIN_QUEUE) {
+        win_msg *m = &g_winq[g_winq_tail++ % WIN_QUEUE];
+        m->msg = msg; m->wp = wp; m->lp = lp;
+    }
+    LeaveCriticalSection(&g_winq_lock);
+}
+
+#define STUCK_TIMER 1
+static volatile LONG g_game_stopped;   /* the game loop has returned: the clean-up and report run (any length) */
+static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CHAR: case WM_KEYDOWN: case WM_KEYUP:
+        winq_push(msg, wp, lp);
+        return 0;
+    case WM_SYSKEYDOWN:
+        if (wp == VK_RETURN && (lp & (1 << 29))) { winq_push(msg, wp, lp); return 0; }   /* Alt+Enter */
         break;
     case WM_SYSCHAR:
         if (wp == '\r') return 0;                                 /* no beep for Alt+Enter */
         break;
-    case WM_SIZE:    present_resized(); web_overlay_resize(); InvalidateRect(h, NULL, FALSE); return 0;
-    case WM_ERASEBKGND: return 1;                                 /* WM_PAINT covers it all */
-    case WM_CLOSE:
-        /* Gone at once: the game stops at its next check and the clean-up
-         * (report, devices, libraries) runs after, out of sight and silent. */
-        web_overlay_close();                   /* a web page open over the game (LoadExec, below) */
-        g_close_at = GetTickCount64();
-        ShowWindow(h, SW_HIDE);
-        audio_set_master(0.0f);
-        psp_request_exit();
+    case WM_SIZE:
+        winq_push(msg, wp, lp);
+        web_overlay_post(WEB_POST_RESIZE);     /* the game thread may be in the page's own loop */
         return 0;
-    case WM_PAINT: {
+    case WM_ERASEBKGND: return 1;                                 /* the game draws it all */
+    case WM_PAINT: {                                              /* ... every vblank */
         PAINTSTRUCT ps;
-        HDC dc = BeginPaint(h, &ps);
-        if (present_active() || g_gl_window) { EndPaint(h, &ps); return 0; }   /* the GPU shows it */
-        RECT rc;
-        GetClientRect(h, &rc);
-        /* Aspect kept, black bars (GDI fallback; present.c does this on the GPU). */
-        int x, y, w, hh;
-        present_fit(rc.right, rc.bottom, SCREEN_W, SCREEN_H, &x, &y, &w, &hh);
-        HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
-        RECT bar;
-        if (x > 0) {
-            SetRect(&bar, 0, 0, x, rc.bottom); FillRect(dc, &bar, black);
-            SetRect(&bar, x + w, 0, rc.right, rc.bottom); FillRect(dc, &bar, black);
-        }
-        if (y > 0) {
-            SetRect(&bar, 0, 0, rc.right, y); FillRect(dc, &bar, black);
-            SetRect(&bar, 0, y + hh, rc.right, rc.bottom); FillRect(dc, &bar, black);
-        }
-        SetStretchBltMode(dc, COLORONCOLOR);
-        BITMAPINFO bi;
-        memset(&bi, 0, sizeof bi);
-        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-        bi.bmiHeader.biWidth = SCREEN_W;
-        bi.bmiHeader.biHeight = -SCREEN_H;
-        bi.bmiHeader.biPlanes = 1;
-        bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB;
-        StretchDIBits(dc, x, y, w, hh, 0, 0, SCREEN_W, SCREEN_H,
-                      g_rgba, &bi, DIB_RGB_COLORS, SRCCOPY);
+        BeginPaint(h, &ps);
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_CLOSE:
+        /* Gone at once: the game stops at its next check and the clean-up
+         * (report, devices, libraries) runs after, out of sight and silent. */
+        if (!g_close_at) {
+            g_close_at = GetTickCount64();
+            ShowWindow(h, SW_HIDE);
+            audio_set_master(0.0f);
+            psp_request_exit();
+            winq_push(msg, wp, lp);
+            web_overlay_post(WEB_POST_CLOSE);   /* a web page open over the game (LoadExec, below) */
+            SetTimer(h, STUCK_TIMER, 10000, NULL);
+        }
+        return 0;
+    case WM_TIMER:
+        if (wp == STUCK_TIMER && !g_game_stopped) TerminateProcess(GetCurrentProcess(), 1);   /* closed, and the game never stopped */
+        break;
     }
     return DefWindowProcA(h, msg, wp, lp);
+}
+
+static HANDLE g_win_ready;
+
+static DWORD WINAPI window_thread(LPVOID arg) {
+    WNDCLASSA *wc = (WNDCLASSA *)arg;
+    RegisterClassA(wc);
+    g_wnd = CreateWindowA("psp2i", WINDOW_TITLE, WS_OVERLAPPEDWINDOW,
+                          CW_USEDEFAULT, CW_USEDEFAULT, SCREEN_W * 2, SCREEN_H * 2,
+                          NULL, NULL, wc->hInstance, NULL);
+    SetEvent(g_win_ready);
+    if (!g_wnd) return 1;
+    MSG m;
+    while (GetMessageA(&m, NULL, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageA(&m); }
+    return 0;
 }
 
 /* Size the window for a RES_ mode (menu.h): a framed window with that client
@@ -539,10 +644,10 @@ static void window_open(int res) {
      * Without the resource both are NULL and Windows' default stays. */
     wc.hIcon = (HICON)LoadImageA(wc.hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
                                  GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
-    RegisterClassA(&wc);
-    g_wnd = CreateWindowA("psp2i", WINDOW_TITLE, WS_OVERLAPPEDWINDOW,
-                          CW_USEDEFAULT, CW_USEDEFAULT, SCREEN_W * 2, SCREEN_H * 2,
-                          NULL, NULL, wc.hInstance, NULL);
+    InitializeCriticalSection(&g_winq_lock);
+    g_win_ready = CreateEventA(NULL, TRUE, FALSE, NULL);
+    HANDLE t = CreateThread(NULL, 0, window_thread, &wc, 0, NULL);
+    if (t) { WaitForSingleObject(g_win_ready, INFINITE); CloseHandle(t); }
     {
         HICON sm_icon = (HICON)LoadImageA(wc.hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
                                         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
@@ -571,8 +676,17 @@ static int window_show(void) {
 }
 
 static void window_pump(void) {
-    MSG m;
+    MSG m;   /* the game thread's own windows: the web page, SDL's */
     while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
+    for (;;) {                                /* the game window's, from the window thread */
+        win_msg w;
+        EnterCriticalSection(&g_winq_lock);
+        const int have = g_winq_head != g_winq_tail;
+        if (have) w = g_winq[g_winq_head++ % WIN_QUEUE];
+        LeaveCriticalSection(&g_winq_lock);
+        if (!have) break;
+        game_msg(g_wnd, w.msg, w.wp, w.lp);
+    }
 }
 #endif
 
@@ -585,6 +699,7 @@ static char     g_capture_dir[512] = "captures";
 #define MAX_OVERLAY_SHOT 16
 static uint64_t g_overlay_shot[MAX_OVERLAY_SHOT];   /* --overlay-shot */
 static int      g_noverlay_shot;
+static int      g_shot_by_flip;   /* --shot-by-flip: --overlay-shot numbers are display flips (game frames) */
 
 /* Scripted input for headless runs: --press BUTTON@VBLANK[+FRAMES] holds a
  * button from that vblank for FRAMES vblanks (default 6). Repeatable. */
@@ -860,6 +975,14 @@ static int display_load(void) {
         else if (!strncmp(line, "rs_speed=", 9))       g_rs_saved = (float)atof(line + 9);
         else if (!strncmp(line, "right_stick=", 12))   g_rs_on = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "test_tick_pacing=", 17)) g_test_ticks = !strncmp(line + 17, "on", 2);
+        else if (!strncmp(line, "draw_distance=", 14))    g_draw_dist = !strncmp(line + 14, "far", 3);
+        else if (!strncmp(line, "vertex_work=", 12))      g_gpu_vertex = strncmp(line + 12, "cpu", 3) != 0;
+        else if (!strncmp(line, "scaling=", 8))  { const int v = postfx_scaling_parse(line + 8); if (v >= 0) g_post.scaling = v; }
+        else if (!strncmp(line, "fxaa=", 5))     g_post.fxaa = !strncmp(line + 5, "on", 2);
+        else if (!strncmp(line, "sharpen=", 8))  { const int v = postfx_level_parse(line + 8); if (v >= 0) g_post.sharpen = v; }
+        else if (!strncmp(line, "scanlines=", 10)) { const int v = postfx_level_parse(line + 10); if (v >= 0) g_post.scanlines = v; }
+        else if (!strncmp(line, "brightness=", 11)) g_post.brightness = (atoi(line + 11) + 5) / 10;
+        else if (!strncmp(line, "saturation=", 11)) g_post.saturation = (atoi(line + 11) + 5) / 10;
         else if (!strncmp(line, "test_30hz_logic=", 16))  g_test_logic = !strncmp(line + 16, "on", 2);
         else if (!strncmp(line, "font=", 5)) {
             snprintf(g_font_key, sizeof g_font_key, "%s", line + 5);
@@ -894,6 +1017,22 @@ static void display_save(int res) {
     fprintf(f, "right_stick=%s\nrs_speed=%.2f\n", g_rs_on ? "on" : "off", (double)menu_rs_speed(&g_menu));
     fprintf(f, "; menu TESTS at 60 / 120 fps (off by default): the game's tick counters paced as at 30; frame-counted logic at 30 Hz\n");
     fprintf(f, "test_tick_pacing=%s\ntest_30hz_logic=%s\n", g_test_ticks ? "on" : "off", g_test_logic ? "on" : "off");
+    fprintf(f, "; far = the longer draw distance (off while saving), normal = the game's\n");
+    fprintf(f, "draw_distance=%s\n", g_draw_dist ? "far" : "normal");
+    fprintf(f, "; gpu = 3D vertices transformed and lit on the graphics card, cpu = on the processor (as before)\n");
+    fprintf(f, "vertex_work=%s\n", g_gpu_vertex ? "gpu" : "cpu");
+    fprintf(f, "; post-processing: scaling nearest / bilinear / sharp_bilinear; fxaa on/off; sharpen and scanlines\n"
+               "; off / low / high; brightness 70..130 and saturation 0..200 (%%)\n");
+    char sc[24];
+    snprintf(sc, sizeof sc, "%s", postfx_scaling_name(g_post.scaling));
+    for (char *q = sc; *q; q++) *q = *q == ' ' ? '_' : (char)tolower((unsigned char)*q);
+    char sh[8], sl[8];
+    snprintf(sh, sizeof sh, "%s", postfx_level_name(g_post.sharpen));
+    snprintf(sl, sizeof sl, "%s", postfx_level_name(g_post.scanlines));
+    for (char *q = sh; *q; q++) *q = (char)tolower((unsigned char)*q);
+    for (char *q = sl; *q; q++) *q = (char)tolower((unsigned char)*q);
+    fprintf(f, "scaling=%s\nfxaa=%s\nsharpen=%s\nscanlines=%s\nbrightness=%d\nsaturation=%d\n", sc, g_post.fxaa ? "on" : "off",
+            sh, sl, g_post.brightness * 10, g_post.saturation * 10);
     fclose(f);
 }
 
@@ -1022,6 +1161,36 @@ static void menu_step(void) {
         fprintf(stderr, "menu: font %s (saved; text drawn from now on)\n", g_font_key);
     }
     if (fx & MFX_SHOW_FPS) fprintf(stderr, "menu: FPS counter %s\n", g_menu.show_fps ? "on" : "off");
+    if (fx & MFX_POSTFX) {
+        g_post = g_menu.post;
+        postfx_set(&g_post);
+        if (!g_headless) display_save(g_res_saved);
+    }
+    if (fx & MFX_QUIT) {
+        /* QUIT GAME: gone at once and silent; the game stops at its next
+         * check, the report and the profile are written in full out of sight
+         * (no time limit, unlike closing the window), then the process ends
+         * (see the end of main). */
+        g_quit_at = psp_sched_now_us() ? psp_sched_now_us() : 1;
+        audio_set_master(0.0f);
+#ifdef _WIN32
+        if (g_wnd) ShowWindow(g_wnd, SW_HIDE);
+#endif
+        fprintf(stderr, "menu: quit game\n");
+        online_log("exit: QUIT GAME from the engine menu");
+        psp_request_exit();
+    }
+    if (fx & MFX_VERTEX) {
+        g_gpu_vertex = g_menu.gpu_vertex;
+        psp_gpu_set_gpu_transform(g_gpu_vertex);
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: vertex work on the %s (saved)\n", g_gpu_vertex ? "GPU" : "CPU");
+    }
+    if (fx & MFX_DRAW_DIST) {
+        g_draw_dist = g_menu.draw_dist;
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: draw distance %s (saved)\n", g_draw_dist ? "far" : "normal");
+    }
     if (fx & MFX_TESTS) {
         g_test_ticks = g_menu.test_ticks;
         g_test_logic = g_menu.test_logic;
@@ -1233,11 +1402,12 @@ static uint64_t g_prof_from, g_prof_to;
 
 static void on_vblank(void) {
     uint64_t vb = psp_sched_vblank_count();
-    g_prof_on = vb >= g_prof_from && (!g_prof_to || vb < g_prof_to);
+    g_prof_on = g_prof_keyed ? g_prof_keyon : vb >= g_prof_from && (!g_prof_to || vb < g_prof_to);
     if (g_dump_key) { g_dump_key = 0; take_dump(vb); }
 #ifndef PSP2I_PROD
     rateaudit_vblank();
 #endif
+    draw_dist_apply();
     if (g_find_vblank && vb == g_find_vblank) find_word();
     if (g_watch_late_addr && psp_display_flips() >= g_watch_late_flip) {
         /* --watch-from-flip: arm the write watch only once the game is there. */
@@ -1299,15 +1469,30 @@ static void on_vblank(void) {
                 fprintf(stderr, "present-verify: %llu frames, %llu differ (%llu pixels)\n",
                         (unsigned long long)frames, (unsigned long long)bad_frames, (unsigned long long)bad_px);
         }
-        else if (p == 0 && !g_headless) have_frame = grab_frame();
+        else if (p == 0 && !g_headless) {
+            /* From VRAM (130,000 reads): only for a new frame, or every 4th
+             * vblank for a picture the CPU changes without flipping. */
+            static uint64_t grabbed_flip = (uint64_t)-1;
+            const uint64_t fl = psp_display_flips();
+            if (fl != grabbed_flip || (vb & 3) == 0) { grabbed_flip = fl; have_frame = grab_frame(); }
+        }
 #endif
     }
 #ifdef _WIN32
     if (!g_headless) {
         if (have_frame) g_have_frame = 1;
         if (g_have_frame) {
+            /* Shown again only when the composed picture changed (a new game
+             * frame, or the overlay: menu, counters): at 120 Hz most vblanks
+             * repeat the last frame, and each show is an upload and a swap. */
+            static uint32_t shown[SCREEN_W * SCREEN_H];
+            static int shown_ok;
             compose();
-            if (window_show() != 0) InvalidateRect(g_wnd, NULL, FALSE);
+            if (!shown_ok || have_frame || memcmp(shown, g_rgba, sizeof shown)) {
+                if (window_show() != 0) gdi_paint();
+                memcpy(shown, g_rgba, sizeof shown);
+                shown_ok = 1;
+            }
         }
 #ifndef PSP2I_PROD
         if ((vb % 30) == 0) {                                /* dev builds: progress in the title */
@@ -1321,10 +1506,12 @@ static void on_vblank(void) {
     }
 #endif
     for (int i = 0; i < g_noverlay_shot; i++) {
-        if (g_overlay_shot[i] != vb || !grab_frame()) continue;
+        const uint64_t at = g_shot_by_flip ? psp_display_flips() : vb;
+        if (!g_overlay_shot[i] || g_overlay_shot[i] != at || !grab_frame()) continue;
+        g_overlay_shot[i] = 0;                                  /* once (a flip spans several vblanks) */
         compose();
         char path[700];
-        snprintf(path, sizeof path, "%s/overlay_%06llu.ppm", g_capture_dir, (unsigned long long)vb);
+        snprintf(path, sizeof path, "%s/overlay_%06llu.ppm", g_capture_dir, (unsigned long long)at);
         FILE *f = fopen(path, "wb");
         if (f) {
             fprintf(f, "P6\n%d %d\n255\n", SCREEN_W, SCREEN_H);
@@ -2139,6 +2326,8 @@ int main(int argc, char **argv) {
             g_nrstick++;
         }
         else if (!strcmp(argv[i], "--hide-fps"))                      show_fps = 0;
+        else if (!strcmp(argv[i], "--shot-by-flip"))                  g_shot_by_flip = 1;
+        else if (!strcmp(argv[i], "--vertex-work") && i + 1 < argc)   g_vertex_arg = strcmp(argv[++i], "cpu") != 0;
         else if (!strcmp(argv[i], "--overlay-shot") && i + 1 < argc && g_noverlay_shot < MAX_OVERLAY_SHOT)
             g_overlay_shot[g_noverlay_shot++] = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--menu-key") && i + 1 < argc) {
@@ -2342,9 +2531,17 @@ int main(int argc, char **argv) {
     }
     fps_meter_init(&g_fpsm);
     framerate_init(fps);
+    framerate_set_log(gamelog_note);
     menu_set_rs_speed(&g_menu, !rs_arg && g_rs_saved > 0.0f ? g_rs_saved : rs_speed);
     g_menu.rs_on = g_rs_on;
     g_menu.test_ticks = g_test_ticks;
+    g_menu.draw_dist = g_draw_dist;
+    if (g_vertex_arg >= 0) g_gpu_vertex = g_vertex_arg;
+    g_menu.gpu_vertex = g_gpu_vertex;
+    psp_gpu_set_gpu_transform(g_gpu_vertex);
+    postfx_set(&g_post);                  /* clamps what the ini held */
+    g_post = *postfx_get();
+    g_menu.post = g_post;
     g_menu.test_logic = g_test_logic;
 #ifdef PSP2I_PROD
     g_menu.hidden |= MENU_BIT(MENU_TESTS);              /* the frame-rate tests are for development builds */
@@ -2368,7 +2565,10 @@ int main(int argc, char **argv) {
         printf("starting module_start at 0x%08X\n", mi.entry);
         fflush(stdout);
         rc = psp_sched_run(mi.entry, (uint32_t)sizeof BOOT_PATH, argp, 0x20, 0x40000, mi.gp);
-        if (!g_reboot || g_close_at) break;
+#ifdef _WIN32
+        if (g_close_at) g_game_stopped = 1;
+#endif
+        if (!g_reboot || g_close_at || g_quit_at) break;
         /* LoadExec (the website): the game again, in the same window */
         g_reboot = 0;
         online_log("game: booting the game again (after the website)");
@@ -2380,6 +2580,8 @@ int main(int argc, char **argv) {
     /* Closing: how long each step took (a slow one shows in online_log.txt). */
     const ULONGLONG t_stop = GetTickCount64();
     if (g_close_at) online_log("exit: window closed; the game stopped after %llu ms", t_stop - g_close_at);
+    else if (g_quit_at) online_log("exit: QUIT GAME; the game stopped after %llu ms",
+                                   (unsigned long long)((psp_sched_now_us() - g_quit_at) / 1000));
 #endif
     report();
 #ifdef _WIN32
@@ -2397,13 +2599,13 @@ int main(int argc, char **argv) {
 #endif
     psp_mem_free();
 #ifdef _WIN32
-    if (g_close_at)
+    if (g_close_at || g_quit_at)
         online_log("exit: report %llu ms, controllers and sound %llu ms, memory %llu ms",
                    t_report - t_stop, t_devices - t_report, GetTickCount64() - t_devices);
     /* What is left (Windows unloading the libraries, their threads) only
      * delays the process ending; the logs are written, so end it here. */
     fflush(NULL);
-    if (g_close_at) TerminateProcess(GetCurrentProcess(), (UINT)rc);
+    if (g_close_at || g_quit_at) TerminateProcess(GetCurrentProcess(), (UINT)rc);
 #endif
     return rc;
 }

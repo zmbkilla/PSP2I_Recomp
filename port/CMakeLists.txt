@@ -4,7 +4,7 @@
 # the generated C in gen/, and the host in host/. Regenerate gen/ with:
 #
 #   psprecomp/build/tools/allegrexrecomp/Release/allegrexrecomp.exe emit EBOOT.BIN port/gen recomp \
-#       --hooks port/hooks.txt --fixes port/fixes.txt
+#       --hooks port/hooks.txt --fixes port/fixes.txt --switches port/switches.txt
 #
 # Configure and build (MSVC):
 #   cmake -S port -B port/build -G "Visual Studio 17 2022" -A x64
@@ -40,6 +40,7 @@ add_executable(psp2i
     host/duck_win.c
     host/framerate.c
     host/menu.c
+    host/postfx.c
     host/camera.c
     host/tls.c
     host/rpcn.c
@@ -151,7 +152,7 @@ endif()
 # Unit tests for the settings menu, the FPS counter and run-time frame-rate
 # switching (no game data needed): ctest -C Release, or run test_menu.
 enable_testing()
-add_executable(test_menu tests/test_menu.c host/menu.c host/framerate.c host/camera.c host/login.c host/textedit.c)
+add_executable(test_menu tests/test_menu.c host/menu.c host/postfx.c host/framerate.c host/camera.c host/login.c host/textedit.c)
 target_include_directories(test_menu PRIVATE host)
 target_link_libraries(test_menu PRIVATE psprecomp)
 add_test(NAME test_menu COMMAND test_menu)

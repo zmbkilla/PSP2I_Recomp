@@ -63,6 +63,14 @@ static ID3D11VertexShader  *g_xvs;          /* GPU-side VRAM transfer between ta
 static ID3D11PixelShader   *g_xps;
 static ID3D11Buffer        *g_xcb;
 static ID3D11RasterizerState *g_rs;
+static ID3D11RasterizerState *g_rs_cull_pos, *g_rs_cull_neg;   /* d3d_draw_tl: render.h cull 1 / 2 */
+static ID3D11VertexShader *g_tlvs;                               /* TL_SRC; NULL: the vertex work stays on the CPU */
+static ID3D11Buffer *g_tlvb, *g_tlib, *g_tlcb;
+static ID3D11ShaderResourceView *g_tlsrv;
+static UINT g_tlvb_pos, g_tlib_pos;                              /* bytes */
+static uint64_t n_tl_draws;
+#define TLVB_BYTES (16u << 20)                                    /* ring of game vertex bytes */
+#define TLIB_BYTES (8u << 20)                                     /* ring of 32-bit indices */
 static uint32_t g_vb_pos;
 
 typedef struct {
@@ -254,6 +262,131 @@ static const char *SHADER_SRC =
 "  return c;\n"
 "}\n";
 
+/* The vertex work of gpu.c's psp_gpu_prim for a transformed triangle draw
+ * (render.h psp_gpu_tl), as gl_ge.c's TLVS_SRC: the game's vertex bytes as
+ * 32-bit words (VB), decoded, skinned, transformed, lit and projected onto
+ * the target; psmain colours it. Depth is clamped (DepthClipEnable FALSE). */
+static const char *TL_SRC =
+"cbuffer V : register(b0) { float4 vp; };\n"
+"cbuffer TL : register(b3) { float4 U[81]; int4 LI[4]; };\n"
+"Buffer<uint> VB : register(t2);\n"
+"struct VO { float4 p : SV_Position; float2 uv : TEXCOORD0; float4 c : COLOR0; };\n"
+"uint wd(int a) { return VB.Load(a >> 2); }\n"
+"uint b8(int a) { return (wd(a) >> (uint)((a & 3) * 8)) & 0xFFu; }\n"
+"uint b16(int a) { return (wd(a) >> (uint)((a & 2) * 8)) & 0xFFFFu; }\n"
+"int csz(int f) { return f == 1 ? 1 : f == 2 ? 2 : f == 3 ? 4 : 0; }\n"
+"float cmp(int a, int f, bool sg) {\n"
+"  float v = 0.0;\n"
+"  if (f == 1) { uint b = b8(a); v = (sg ? (float)(asint(b << 24) >> 24) : (float)b) * (1.0 / 128.0); }\n"
+"  else if (f == 2) { uint h = b16(a); v = (sg ? (float)(asint(h << 16) >> 16) : (float)h) * (1.0 / 32768.0); }\n"
+"  else if (f == 3) v = asfloat(wd(a));\n"
+"  return v;\n"
+"}\n"
+"float3 cmp3(int a, int f, bool sg) { int s = csz(f); return float3(cmp(a, f, sg), cmp(a + s, f, sg), cmp(a + 2 * s, f, sg)); }\n"
+"float3 m43(int r, float3 p) { float4 q = float4(p, 1.0); return float3(dot(U[r], q), dot(U[r + 1], q), dot(U[r + 2], q)); }\n"
+"float3 m33(int r, float3 p) { return float3(dot(U[r].xyz, p), dot(U[r + 1].xyz, p), dot(U[r + 2].xyz, p)); }\n"
+"float pw(float x, float y) { return x > 0.0 ? pow(abs(x), y) : (y == 0.0 ? 1.0 : 0.0); }\n"
+"float4 light(float4 color, float3 pos, float3 nrm) {\n"
+"  int mu = LI[3].y;\n"
+"  float4 amb = (mu & 1) != 0 ? color : U[42];\n"
+"  float3 dif = (mu & 2) != 0 ? color.rgb : U[43].rgb;\n"
+"  float3 spc = (mu & 4) != 0 ? color.rgb : U[44].rgb;\n"
+"  float3 sum = U[41].rgb + U[45].rgb * amb.rgb;\n"
+"  float sa = U[45].a * amb.a;\n"
+"  float3 spec = float3(0.0, 0.0, 0.0);\n"
+"  float sh = U[46].x;\n"
+"  [loop] for (int l = 0; l < 4; l++) {\n"
+"    int bits = (LI[3].x >> (8 * l)) & 0xFF;\n"
+"    if ((bits & 1) == 0) continue;\n"
+"    int type = (bits >> 1) & 3, comp = (bits >> 3) & 3, b = 47 + 8 * l;\n"
+"    float3 to = type == 0 ? U[b].xyz : U[b].xyz - pos;\n"
+"    float dist = sqrt(dot(to, to)), d = 0.0;\n"
+"    if (dist > 0.0) { to /= dist; d = dot(to, nrm); }\n"
+"    if (d < 0.0) d = 0.0;\n"
+"    if (comp == 2) d = pw(d, sh);\n"
+"    float scale = 1.0;\n"
+"    if (type != 0) {\n"
+"      float3 at = U[b + 2].xyz;\n"
+"      float a = at.x + at.y * dist + at.z * dist * dist;\n"
+"      scale = clamp(a > 0.0 ? 1.0 / a : 1.0, 0.0, 1.0);\n"
+"      if (type >= 2) {\n"
+"        float len = sqrt(dot(U[b + 1].xyz, U[b + 1].xyz));\n"
+"        float ang = len > 0.0 ? dot(U[b + 1].xyz, to) / len : 0.0;\n"
+"        scale = ang >= U[b + 6].y ? scale * pw(ang, U[b + 6].x) : 0.0;\n"
+"      }\n"
+"    }\n"
+"    sum += (U[b + 3].rgb * amb.rgb + U[b + 4].rgb * dif * d) * scale;\n"
+"    if (comp == 1) {\n"
+"      float3 h = float3(to.x, to.y, to.z + 1.0);\n"
+"      float hl = sqrt(dot(h, h)), s = hl > 0.0 ? dot(h, nrm) / hl : 0.0;\n"
+"      if (s > 0.0) spec += U[b + 5].rgb * spc * (pw(s, sh) * scale);\n"
+"    }\n"
+"  }\n"
+"  sum += spec;\n"
+"  return clamp(float4(sum, sa), 0.0, 1.0);\n"
+"}\n"
+"VO vstl(uint id : SV_VertexID) {\n"
+"  int base = LI[0].y + (int)id * LI[0].x, vt = LI[0].z, nw = LI[0].w;\n"
+"  int ft = vt & 3, fc = (vt >> 2) & 7, fn = (vt >> 5) & 3, fp = (vt >> 7) & 3, fw = (vt >> 9) & 3;\n"
+"  int wo = LI[1].x, too = LI[1].y, co = LI[1].z, no = LI[1].w, po = LI[2].x, flags = LI[2].y;\n"
+"  float3 pos, nrm = float3(0.0, 0.0, 0.0); float2 uv = float2(0.0, 0.0); float4 col;\n"
+"  if (too >= 0) { uv.x = cmp(base + too, ft, false); uv.y = cmp(base + too + csz(ft), ft, false); }\n"
+"  if (co >= 0) {\n"
+"    if (fc == 4) { uint h = b16(base + co); uint r = h & 31u, g = (h >> 5) & 63u, bl = (h >> 11) & 31u;\n"
+"      col = float4((float)((r << 3) | (r >> 2)), (float)((g << 2) | (g >> 4)), (float)((bl << 3) | (bl >> 2)), 255.0); }\n"
+"    else if (fc == 5) { uint h = b16(base + co); uint r = h & 31u, g = (h >> 5) & 31u, bl = (h >> 10) & 31u;\n"
+"      col = float4((float)((r << 3) | (r >> 2)), (float)((g << 3) | (g >> 2)), (float)((bl << 3) | (bl >> 2)), (h & 0x8000u) != 0u ? 255.0 : 0.0); }\n"
+"    else if (fc == 6) { uint h = b16(base + co);\n"
+"      col = float4((float)(h & 15u), (float)((h >> 4) & 15u), (float)((h >> 8) & 15u), (float)((h >> 12) & 15u)) * 17.0; }\n"
+"    else { uint w = wd(base + co); col = float4((float)(w & 255u), (float)((w >> 8) & 255u), (float)((w >> 16) & 255u), (float)(w >> 24)); }\n"
+"  } else col = U[42] * 255.0;\n"
+"  if (no >= 0) nrm = cmp3(base + no, fn, true);\n"
+"  pos = cmp3(base + po, fp, true);\n"
+"  float3 mp = pos, mn = nrm;\n"
+"  if ((flags & 2) != 0) {\n"
+"    mp = float3(0.0, 0.0, 0.0); mn = float3(0.0, 0.0, 0.0);\n"
+"    [loop] for (int i = 0; i < nw; i++) {\n"
+"      float w = cmp(base + wo + i * csz(fw), fw, false);\n"
+"      if (w == 0.0) continue;\n"
+"      mp += w * m43(13 + 3 * i, pos);\n"
+"      mn += w * m33(13 + 3 * i, nrm);\n"
+"    }\n"
+"  }\n"
+"  float3 wp = m43(0, mp), wn = float3(0.0, 0.0, 1.0);\n"
+"  bool lit = (flags & 1) != 0;\n"
+"  int mapm = LI[2].z;\n"
+"  if (lit || mapm == 2) {\n"
+"    if ((flags & 4) != 0) mn = -mn;\n"
+"    wn = m33(0, mn);\n"
+"    float l = sqrt(dot(wn, wn));\n"
+"    if (l > 0.0) wn /= l;\n"
+"  }\n"
+"  if (lit) col = light(col / 255.0, wp, wn) * 255.0;\n"
+"  float2 t;\n"
+"  if (mapm == 1) {\n"
+"    int src = LI[2].w;\n"
+"    float3 s3;\n"
+"    if (src == 0) s3 = pos;\n"
+"    else if (src == 1) s3 = float3(uv, 0.0);\n"
+"    else if (src == 2) { float l = sqrt(dot(nrm, nrm)); s3 = l > 0.0 ? nrm / l : float3(0.0, 0.0, 1.0); }\n"
+"    else s3 = nrm;\n"
+"    float3 q3 = m43(10, s3);\n"
+"    float q = q3.z != 0.0 ? q3.z : 1.0;\n"
+"    t = q3.xy / q * U[39].xy * U[40].xy;\n"
+"  } else if (mapm == 2) {\n"
+"    t = float2(1.0 + dot(U[79].xyz, wn), 1.0 + dot(U[80].xyz, wn)) * 0.5 * U[39].xy * U[40].xy;\n"
+"  } else t = (uv * U[39].xy + U[39].zw) * U[40].xy;\n"
+"  float4 q = float4(m43(3, wp), 1.0);\n"
+"  float4 cl = float4(dot(U[6], q), dot(U[7], q), dot(U[8], q), dot(U[9], q));\n"
+"  float2 s2 = 2.0 / vp.xy;\n"
+"  VO o;\n"
+"  o.p = float4(cl.x * U[37].x * s2.x + cl.w * (U[38].x * s2.x - 1.0),\n"
+"               -(cl.y * U[37].y * s2.y) + cl.w * (1.0 - U[38].y * s2.y),\n"
+"               (cl.z * U[37].z + cl.w * U[38].z) * (1.0 / 65535.0), cl.w);\n"
+"  o.uv = t * vp.zw; o.c = col / 255.0;\n"
+"  return o;\n"
+"}\n";
+
 /* The bytes of one render target (src) as another target's pixels (dst),
  * where the two cover the same VRAM in different layouts: exactly what
  * reading src back to VRAM and seeding dst from VRAM would produce
@@ -304,6 +437,7 @@ typedef struct { uint32_t dst[4], src[4], rng[4]; } xfer_consts;
 
 typedef struct { float vp[4]; } vs_consts;
 typedef struct { float env[4]; uint32_t tf[4], at[4], misc[4]; } ps_consts;
+typedef struct { float u[PSP_TL_NU * 4]; int32_t i[PSP_TL_NI * 4]; } tl_consts;
 
 static ID3DBlob *compile_src(const char *src, const char *entry, const char *target) {
     ID3DBlob *code = NULL, *err = NULL;
@@ -981,27 +1115,15 @@ static int rt_resolve_copy(rt_entry *r) {
     return newer;
 }
 
-static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
-    if ((st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || nverts <= 0) return 1;
-    if (trace_on()) {
-        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
-        for (int i = 0; i < nverts; i++) {
-            if (v[i].x < x0) x0 = v[i].x; if (v[i].x > x1) x1 = v[i].x;
-            if (v[i].y < y0) y0 = v[i].y; if (v[i].y > y1) y1 = v[i].y;
-        }
-        fprintf(stderr, "draw: fb 0x%06X/%u fmt %d  %s  verts %d  box %.0f,%.0f-%.0f,%.0f  scissor %d,%d-%d,%d",
-                vram_off(st->fb_addr), st->fb_stride, st->fb_fmt, st->clear ? "CLEAR" : "     ", nverts,
-                x0, y0, x1, y1, st->sx0, st->sy0, st->sx1, st->sy1);
-        if (st->clear) fprintf(stderr, "  which %u", st->clear_which);
-        if (st->tex) fprintf(stderr, "  tex 0x%08X/%u psm %d %ux%u", st->tex_addr, st->tex_bufw, st->tex_psm, st->tex_w, st->tex_h);
-        if (st->blend) fprintf(stderr, "  blend %d/%d eq %d", st->bsrc, st->bdst, st->beq);
-        fprintf(stderr, "  mask %06X/%02X\n", st->mask_rgb, st->mask_a);
-    }
+/* The target a draw goes to, made current with VRAM and with the targets it
+ * overlaps; its depth view and texture. NULL: not drawable here. */
+static rt_entry *draw_target(const psp_gpu_state *st, ID3D11DepthStencilView **dsvp, ID3D11ShaderResourceView **srvp,
+                             float uvs[2]) {
     const uint32_t off = vram_off(st->fb_addr);
     uint32_t rows = (uint32_t)st->sy1 + 1;
     if (rows > 512) rows = 512;
     rt_entry *t = rt_get(off, st->fb_stride, st->fb_fmt, rows);
-    if (!t) return 1;
+    if (!t) return NULL;
     /* Targets that share VRAM with this one at a different start or layout
      * (PSP2i blurs its bloom in two 256-wide buffers that sit inside the
      * 512-wide display buffer, which the final copy then overwrites). VRAM
@@ -1049,24 +1171,21 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
     }
 
     ID3D11ShaderResourceView *srv = NULL;
-    float uvs[2] = { 1, 1 };
+    uvs[0] = uvs[1] = 1.0f;
     if (st->tex) {
         srv = texture_view(st, t, uvs);
-        if (!srv) return 1;
+        if (!srv) return NULL;
     }
 
-    /* Vertices into the ring buffer. */
-    UINT bytes = (UINT)nverts * (UINT)sizeof(psp_gpu_vertex);
-    if (bytes > VB_BYTES) return 1;
-    D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
-    if (g_vb_pos + bytes > VB_BYTES) { g_vb_pos = 0; mode = D3D11_MAP_WRITE_DISCARD; }
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_vb, 0, mode, 0, &m))) return 1;
-    memcpy((uint8_t *)m.pData + g_vb_pos, v, bytes);
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_vb, 0);
-    UINT stride = sizeof(psp_gpu_vertex), vboff = g_vb_pos;
-    g_vb_pos += bytes;
+    *dsvp = dsv;
+    *srvp = srv;
+    return t;
+}
 
+/* Constants, blending, target, viewport, scissor, rasterizer, depth, and
+ * the pixel stage with its texture. */
+static void draw_state(const psp_gpu_state *st, rt_entry *t, ID3D11DepthStencilView *dsv, ID3D11ShaderResourceView *srv,
+                       const float uvs[2], ID3D11RasterizerState *rs) {
     vs_consts vc = { { (float)t->w, (float)t->h, uvs[0], uvs[1] } };
     ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_vcb, 0, NULL, &vc, 0, 0);
     ps_consts pc;
@@ -1091,14 +1210,9 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
     D3D11_RECT sc = { st->sx0, st->sy0, st->sx1 + 1, st->sy1 + 1 };
     ID3D11DeviceContext_RSSetScissorRects(g_ctx, 1, &sc);
-    ID3D11DeviceContext_RSSetState(g_ctx, g_rs);
+    ID3D11DeviceContext_RSSetState(g_ctx, rs);
     ID3D11DeviceContext_OMSetBlendState(g_ctx, bs, bf, 0xFFFFFFFFu);
     ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, depth_state(st), 0);
-    ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout);
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &g_vb, &stride, &vboff);
-    ID3D11DeviceContext_VSSetShader(g_ctx, g_vs, NULL, 0);
-    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_vcb);
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps, NULL, 0);
     ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 1, 1, &g_pcb);
     if (srv) {
@@ -1106,22 +1220,124 @@ static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts
         ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &srv);
         ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &ss);
     }
-    ID3D11DeviceContext_Draw(g_ctx, (UINT)nverts, 0);
+}
+
+static void draw_done(const psp_gpu_state *st, rt_entry *t, ID3D11ShaderResourceView *srv, float ymin, float ymax) {
     if (srv) {                                          /* unbind, so the view can become a target */
         ID3D11ShaderResourceView *none = NULL;
         ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &none);
     }
-
-    /* Rows touched: the scissor, narrowed to the geometry's extent. */
-    float ymin = 1e9f, ymax = -1e9f;
-    for (int i = 0; i < nverts; i++) { if (v[i].y < ymin) ymin = v[i].y; if (v[i].y > ymax) ymax = v[i].y; }
     int y0 = (int)ymin - 1, y1 = (int)ymax + 2;
     if (y0 < st->sy0) y0 = st->sy0;
     if (y1 > st->sy1 + 1) y1 = st->sy1 + 1;
     if (y0 < y1) rows_mark(t, (uint32_t)y0, (uint32_t)y1);
     if (xverify()) xverify_owners();
+}
+
+static int d3d_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    if ((st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || nverts <= 0) return 1;
+    if (trace_on()) {
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        for (int i = 0; i < nverts; i++) {
+            if (v[i].x < x0) x0 = v[i].x; if (v[i].x > x1) x1 = v[i].x;
+            if (v[i].y < y0) y0 = v[i].y; if (v[i].y > y1) y1 = v[i].y;
+        }
+        fprintf(stderr, "draw: fb 0x%06X/%u fmt %d  %s  verts %d  box %.0f,%.0f-%.0f,%.0f  scissor %d,%d-%d,%d",
+                vram_off(st->fb_addr), st->fb_stride, st->fb_fmt, st->clear ? "CLEAR" : "     ", nverts,
+                x0, y0, x1, y1, st->sx0, st->sy0, st->sx1, st->sy1);
+        if (st->clear) fprintf(stderr, "  which %u", st->clear_which);
+        if (st->tex) fprintf(stderr, "  tex 0x%08X/%u psm %d %ux%u", st->tex_addr, st->tex_bufw, st->tex_psm, st->tex_w, st->tex_h);
+        if (st->blend) fprintf(stderr, "  blend %d/%d eq %d", st->bsrc, st->bdst, st->beq);
+        fprintf(stderr, "  mask %06X/%02X\n", st->mask_rgb, st->mask_a);
+    }
+    ID3D11DepthStencilView *dsv;
+    ID3D11ShaderResourceView *srv;
+    float uvs[2];
+    rt_entry *t = draw_target(st, &dsv, &srv, uvs);
+    if (!t) return 1;
+
+    /* Vertices into the ring buffer. */
+    UINT bytes = (UINT)nverts * (UINT)sizeof(psp_gpu_vertex);
+    if (bytes > VB_BYTES) return 1;
+    D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
+    if (g_vb_pos + bytes > VB_BYTES) { g_vb_pos = 0; mode = D3D11_MAP_WRITE_DISCARD; }
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_vb, 0, mode, 0, &m))) return 1;
+    memcpy((uint8_t *)m.pData + g_vb_pos, v, bytes);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_vb, 0);
+    UINT stride = sizeof(psp_gpu_vertex), vboff = g_vb_pos;
+    g_vb_pos += bytes;
+
+    draw_state(st, t, dsv, srv, uvs, g_rs);
+    ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &g_vb, &stride, &vboff);
+    ID3D11DeviceContext_VSSetShader(g_ctx, g_vs, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_vcb);
+    ID3D11DeviceContext_Draw(g_ctx, (UINT)nverts, 0);
+
+    float ymin = 1e9f, ymax = -1e9f;
+    for (int i = 0; i < nverts; i++) { if (v[i].y < ymin) ymin = v[i].y; if (v[i].y > ymax) ymax = v[i].y; }
+    draw_done(st, t, srv, ymin, ymax);
     n_draws++;
     n_tris += (uint64_t)nverts / 3;
+    return 0;
+}
+
+/* A transformed triangle draw with the vertex work in TL_SRC (render.h
+ * psp_gpu_tl): the game's vertex bytes into their ring (a default-usage
+ * buffer: a dynamic one with a shader view cannot be appended to without
+ * discarding it on feature level 11.0), the triangle list into the index
+ * ring, the GE state as constants, culling by the rasterizer. Where the
+ * triangles land is not known here, so the whole scissor counts as
+ * written. */
+static int d3d_draw_tl(const psp_gpu_state *st, const psp_gpu_tl *tl) {
+    if (!g_tlvs || tl->nidx <= 0) return 1;
+    const UINT vb = tl->vbytes, ib = (UINT)tl->nidx * 4u;
+    if (vb > TLVB_BYTES || ib > TLIB_BYTES) return 1;
+    ID3D11DepthStencilView *dsv;
+    ID3D11ShaderResourceView *srv;
+    float uvs[2];
+    rt_entry *t = draw_target(st, &dsv, &srv, uvs);
+    if (!t) return 1;
+
+    if (g_tlvb_pos + vb > TLVB_BYTES) g_tlvb_pos = 0;
+    D3D11_BOX box = { g_tlvb_pos, 0, 0, g_tlvb_pos + vb, 1, 1 };
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_tlvb, 0, &box, tl->vdata, 0, 0);
+    const UINT vfirst = g_tlvb_pos;
+    g_tlvb_pos += vb;
+    D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
+    if (g_tlib_pos + ib > TLIB_BYTES) { g_tlib_pos = 0; mode = D3D11_MAP_WRITE_DISCARD; }
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_tlib, 0, mode, 0, &m))) return 1;
+    memcpy((uint8_t *)m.pData + g_tlib_pos, tl->idx, ib);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_tlib, 0);
+    const UINT ifirst = g_tlib_pos;
+    g_tlib_pos += ib;
+
+    tl_consts tc;
+    memcpy(tc.u, tl->u, sizeof tc.u);
+    memcpy(tc.i, tl->i, sizeof tc.i);
+    tc.i[4 * PSP_TL_I_LAYOUT0 + 1] += (int32_t)vfirst;   /* the misalignment, plus where these bytes are in the ring */
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_tlcb, 0, NULL, &tc, 0, 0);
+
+    /* D3D's window y is PSP y; clockwise there -- positive signed area --
+     * is front for these states (FrontCounterClockwise FALSE): render.h's
+     * cull 1 drops front faces. */
+    draw_state(st, t, dsv, srv, uvs, tl->cull == 1 ? g_rs_cull_pos : tl->cull == 2 ? g_rs_cull_neg : g_rs);
+    ID3D11DeviceContext_IASetInputLayout(g_ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetIndexBuffer(g_ctx, g_tlib, DXGI_FORMAT_R32_UINT, 0);
+    ID3D11DeviceContext_VSSetShader(g_ctx, g_tlvs, NULL, 0);
+    ID3D11Buffer *cbs[4] = { g_vcb, NULL, NULL, g_tlcb };
+    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 4, cbs);
+    ID3D11DeviceContext_VSSetShaderResources(g_ctx, 2, 1, &g_tlsrv);
+    ID3D11DeviceContext_DrawIndexed(g_ctx, (UINT)tl->nidx, ifirst / 4u, 0);
+
+    draw_done(st, t, srv, (float)st->sy0, (float)st->sy1);
+    n_draws++;
+    n_tl_draws++;
+    n_tris += (uint64_t)tl->nidx / 3;
     return 0;
 }
 
@@ -1297,7 +1513,49 @@ int d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
     return shown;
 }
 
-static const psp_gpu_backend D3D11_BACKEND = { "d3d11", d3d_draw, d3d_sync_vram, d3d_vram_written, 1 };
+static psp_gpu_backend D3D11_BACKEND = { "d3d11", d3d_draw, d3d_sync_vram, d3d_vram_written, 1, NULL };
+
+/* The vertex work on the GPU (d3d_draw_tl): its shader, rings and states.
+ * Without them it stays on the CPU. */
+static void tl_init(void) {
+    ID3DBlob *vb = compile_src(TL_SRC, "vstl", "vs_4_0");
+    if (!vb) { fprintf(stderr, "d3d11: the vertex work stays on the CPU\n"); return; }
+    ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(vb), ID3D10Blob_GetBufferSize(vb), NULL, &g_tlvs);
+    ID3D10Blob_Release(vb);
+    D3D11_BUFFER_DESC bd;
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = TLVB_BYTES; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_tlvb);
+    if (g_tlvb) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd;
+        memset(&sd, 0, sizeof sd);
+        sd.Format = DXGI_FORMAT_R32_UINT; sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        sd.Buffer.FirstElement = 0; sd.Buffer.NumElements = TLVB_BYTES / 4;
+        ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)g_tlvb, &sd, &g_tlsrv);
+    }
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = TLIB_BYTES; bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_INDEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_tlib);
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = sizeof(tl_consts); bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_tlcb);
+    D3D11_RASTERIZER_DESC rd;
+    memset(&rd, 0, sizeof rd);
+    rd.FillMode = D3D11_FILL_SOLID; rd.FrontCounterClockwise = FALSE;
+    rd.ScissorEnable = TRUE; rd.DepthClipEnable = FALSE;
+    rd.CullMode = D3D11_CULL_FRONT;
+    ID3D11Device_CreateRasterizerState(g_dev, &rd, &g_rs_cull_pos);
+    rd.CullMode = D3D11_CULL_BACK;
+    ID3D11Device_CreateRasterizerState(g_dev, &rd, &g_rs_cull_neg);
+    if (!g_tlvs || !g_tlvb || !g_tlsrv || !g_tlib || !g_tlcb || !g_rs_cull_pos || !g_rs_cull_neg) {
+        fprintf(stderr, "d3d11: vertex work setup failed; it stays on the CPU\n");
+        g_tlvs = NULL;
+        return;
+    }
+    D3D11_BACKEND.draw_tl = d3d_draw_tl;
+    fprintf(stderr, "d3d11: the vertex work of 3D draws runs on the GPU\n");
+}
 
 /* ---- setup ------------------------------------------------------------------------------ */
 
@@ -1353,6 +1611,7 @@ int d3d11_init(void) {
         fprintf(stderr, "d3d11: device object creation failed\n");
         return -1;
     }
+    tl_init();
     psp_gpu_set_backend(&D3D11_BACKEND);
     psp_mem_set_vram_hook(d3d_cpu_access);
     fprintf(stderr, "d3d11: rendering on the GPU (feature level %x.%x)\n", (fl >> 12) & 0xF, (fl >> 8) & 0xF);
@@ -1371,6 +1630,8 @@ void d3d11_report(FILE *out) {
             (unsigned long long)n_rb_reason[3], (unsigned long long)n_rb_reason[4], (unsigned long long)n_rb_reason[5],
             (unsigned long long)n_rb_reason[6]);
     fprintf(out, "  d3d11 transfers     %llu GPU-side target-to-target transfers\n", (unsigned long long)n_xfer);
+    fprintf(out, "  d3d11 vertex work   %llu draws transformed and lit on the GPU%s\n", (unsigned long long)n_tl_draws,
+            g_tlvs ? "" : " (unavailable: on the CPU)");
     if (xverify())
         fprintf(out, "  d3d11 xfer-verify   %llu transfers checked, %llu wrong (%llu pixels); %llu ownership overlaps\n",
                 (unsigned long long)n_xv_checked, (unsigned long long)n_xv_bad_xfers,

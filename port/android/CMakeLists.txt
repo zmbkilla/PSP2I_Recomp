@@ -59,6 +59,7 @@ add_library(main SHARED
     ${PORT}/host/camera.c
     ${PORT}/host/framerate.c
     ${PORT}/host/menu.c
+    ${PORT}/host/postfx.c
     ${GAME_SOURCES})
 target_include_directories(main PRIVATE ${PORT}/host ${PORT}/gen ${CMAKE_BINARY_DIR}/gen_split)
 target_compile_definitions(main PRIVATE PSP2I_GLES)

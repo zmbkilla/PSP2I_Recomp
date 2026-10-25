@@ -683,7 +683,7 @@ const char *rateaudit_status(void) { return g_state == A_IDLE && g_pstate == P_I
 void rateaudit_vblank(void) {
     const uint64_t now = psp_sched_now_us();
     {   /* at 60 / 120 fps, every 30 s: the actual rate and the busiest vblank users */
-        static uint64_t last_t, last_flips, last_n[MAX_SITES];
+        static uint64_t last_t, last_flips, last_n[MAX_SITES], last_late;
         if (!last_t) { last_t = now; last_flips = psp_display_flips(); }
         if (now - last_t >= 30000000u) {
             if (framerate_target() >= 60 && g_state == A_IDLE) {
@@ -691,6 +691,9 @@ void rateaudit_vblank(void) {
                 const double secs = (double)(now - last_t) / 1e6;
                 size_t n = (size_t)snprintf(line, sizeof line, "[rate] %d fps target: %.1f fps over %.0f s; vblank use /s:",
                                             framerate_target(), (double)(psp_display_flips() - last_flips) / secs, secs);
+                if (framerate_target() == 120)
+                    n += (size_t)snprintf(line + n, sizeof line - n, " (late frames, not waited: %.1f/s);",
+                                          (double)(framerate_late_frames() - last_late) / secs);
                 for (int i = 0; i < g_nsites && n < sizeof line - 40; i++)
                     if (g_site[i].n > last_n[i])
                         n += (size_t)snprintf(line + n, sizeof line - n, " %s 0x%08X %.1f", g_site[i].kind ? "vcount" : "wait",
@@ -699,6 +702,7 @@ void rateaudit_vblank(void) {
             }
             last_t = now;
             last_flips = psp_display_flips();
+            last_late = framerate_late_frames();
             for (int i = 0; i < g_nsites; i++) last_n[i] = g_site[i].n;
         }
     }

@@ -6,6 +6,19 @@
 0x08B85AB0   # frame pacing (called by the main loop 0x08B86320 once per frame): applies a frame-rate change at run time
 0x08B20E34   # character select's update (a virtual, from the scene dispatcher 0x089F7A64): at 30 Hz at 60/120 fps when TESTS > 30 HZ LOGIC is on (host/framerate.c)
 0x089E1F50   # weapon palette's per-frame update (counts +364 down, stepping its UI while > 0): counted at 30 Hz (host/framerate.c)
+0x08A94C30   # enemy hazard update (vtable 0x08E3A5D8 slot 5): obj+200 -= 60/fps, 0 at 120: sees 60 fps on alternate frames (host/framerate.c)
+0x08933CEC   # stepped object constructor: obj+72 = 2*(60/fps), 0 at 120: built with 60 fps (host/framerate.c)
+0x08933F18   # stepped object update (runs obj+72 steps): on alternate frames above 60 fps (host/framerate.c)
+0x08B8D6B0   # fio_th: serve one file request (logged) (host/framerate.c)
+0x08B8BF74   # fio queue: take a request (the file thread holds it until complete) (host/framerate.c)
+0x08B8C0C8   # fio queue: complete a request (host/framerate.c)
+0x08B8C064   # fio queue: complete a request (host/framerate.c)
+0x08B8C3B4   # fio: is request N done? (main thread): queued requests served first (host/framerate.c)
+0x08D56B5C   # the game's blocking load (file, nonblocking): for the DLC loader, its stages run back to back first (host/framerate.c)
+0x0896E8F8   # loading-screen frame: the PDR loop draws it at the frame rate, not per file (host/framerate.c)
+0x08AE4FFC   # play an effect (resource a1, position a2): failures logged (host/gamelog.c; spells that do not fire)
+0x08D5D46C   # the game's allocator (size a0, align a1): failures logged (host/gamelog.c)
+0x08CBC59C   # DLC item scanner (lists ms0:/PSP/GAME/<id>/ while its count < 600): logged (host/gamelog.c)
 0x08D5B844   # input library: held buttons' repeat (timer += 60/fps, 0 at 120): finer timer at over 60 fps (host/framerate.c)
 0x08A16794   # camera yaw/pitch input (writes *a1, *a2): right-stick camera (host/camera.c, from rightstick.txt)
 0x08AFA530   # "camera is being controlled" test: right stick counts, for the call at 0x08AF8C48 only
@@ -32,6 +45,7 @@
 0x08A6D490   # client: destroys the session info object *(0x08ED5A28): kept packets cleared
 0x08D3F3B4   # game: report(fmt, ...) -- formatted error/warning report, returns: logged (host/gamelog.c)
 0x08D3F418   # game: fatal(fmt, ...) -- formatted report, then hangs at 0x08D3F470: logged
+0x08DD8524   # game: __cxa_pure_virtual -- would print "pure virtual method called" and abort: logged, returns 0 (host/gamelog.c)
 0x08D4C5C0   # game: pattern key (index, a1, f12); index > 10000 -> "Large PatternIndex Error." + hang: logged
 0x08D3F470   # game: hang loop (j self) after fatal(): logged, thread parked like a PSP (was a stack overflow)
 0x08D4C604   # game: hang loop (j self) after "Large PatternIndex Error.": logged, thread parked

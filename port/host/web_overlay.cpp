@@ -65,6 +65,7 @@ static int g_modal;                    /* web_overlay_show (its own loop) vs web
 static int g_close_req;                /* modeless: closing asked; web_overlay_poll does it */
 #ifdef _WIN32
 static UINT_PTR g_timer;
+static volatile LONG g_posted;          /* web_overlay_post, done by poll_input */
 #endif
 
 /* Shown while the game starts again: the page fades to this. */
@@ -160,6 +161,9 @@ static void virtual_mouse(uint32_t b, uint8_t ax, uint8_t ay) {
 static void CALLBACK poll_input(HWND, UINT, UINT_PTR, DWORD) {
     static int armed;                       /* only after everything is released (no carry-over press) */
     enum { P_START = 0x0008, P_CROSS = 0x4000 };
+    const LONG posted = InterlockedExchange(&g_posted, 0);
+    if (posted & WEB_POST_RESIZE) web_overlay_resize();
+    if ((posted & WEB_POST_CLOSE) && g_view) { request_close(0); return; }
     uint32_t b = 0;
     uint8_t ax = 128, ay = 128;
     input_sdl_poll(&b, &ax, &ay);
@@ -245,6 +249,13 @@ int web_overlay_poll(void) {
 }
 
 void web_overlay_close(void) { request_close(0); }
+void web_overlay_post(int what) {
+#ifdef _WIN32
+    InterlockedOr(&g_posted, what);
+#else
+    (void)what;
+#endif
+}
 int  web_overlay_active(void) { return g_view != NULL; }
 
 #else  /* built without the webview library */
@@ -262,5 +273,6 @@ int web_overlay_poll(void) { return 0; }
 void web_overlay_close(void) {}
 int  web_overlay_active(void) { return 0; }
 void web_overlay_resize(void) {}
+void web_overlay_post(int what) { (void)what; }
 
 #endif

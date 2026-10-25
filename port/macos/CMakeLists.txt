@@ -19,7 +19,7 @@ endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PORT}/gen/recomp_funcs.c)
 file(GLOB GEN_PARTS ${SPLIT_DIR}/recomp_part_*.c)
 set_source_files_properties(${GEN_PARTS} PROPERTIES COMPILE_OPTIONS "-O1;-g0")
-add_executable(psp2i ${PORT}/host/sdl_main.c ${PORT}/host/gl_ge.c
+add_executable(psp2i ${PORT}/host/sdl_main.c ${PORT}/host/gl_ge.c ${PORT}/host/postfx.c
     ${PORT}/host/gl_load.c ${PORT}/host/atrac_at3.c ${PORT}/host/camera.c
     ${PORT}/host/framerate.c ${GEN_PARTS} ${PORT}/gen/recomp_imports.c)
 target_include_directories(psp2i PRIVATE ${PORT}/host ${PORT}/gen ${SPLIT_DIR})

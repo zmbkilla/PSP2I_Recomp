@@ -783,6 +783,23 @@ static void hook_game_fatal(void (*original)(void)) {
     original();
 }
 
+/* __cxa_pure_virtual: a virtual call on an object being destroyed (its vtable
+ * already the base class's). The game would print "pure virtual method called"
+ * and abort; log the object and the callers, and return 0 instead. */
+static void hook_pure_virtual(void (*original)(void)) {
+    (void)original;
+    static int count;
+    const uint32_t obj = psp_cpu.r[4];
+    if (count++ < 20) {
+        char where[400] = "";
+        game_stack(where, sizeof where, 16);
+        const uint32_t vt = obj >= 0x08800000u && obj < 0x0A000000u ? psp_read32(obj) : 0;
+        logf_line("[game error] pure virtual call (skipped, %d so far): object 0x%08X vtable 0x%08X, called from 0x%08X,"
+                  " draw distance %s  [game: %s]", count, obj, vt, psp_cpu.r[31] - 8, psp_switch[0] ? "far" : "normal", where);
+    }
+    psp_cpu.r[2] = 0;
+}
+
 static void hook_pattern_key(void (*original)(void)) {
     const int32_t index = (int32_t)psp_cpu.r[4];
     if (index > 10000) {                /* the game's own "Large PatternIndex Error." case; -1 is normal ("no pattern") */
@@ -810,6 +827,51 @@ static void hook_hang_fatal(void (*original)(void))   { (void)original; park_han
 static void hook_hang_pattern(void (*original)(void)) { (void)original; park_hang(0x08D4C604u); }
 static void hook_hang_break(void (*original)(void))   { (void)original; park_hang(0x08B8D840u); }
 
+#ifndef PSP2I_PROD
+/* ---- effects that do not appear (spells that do not fire) --------------------
+ * 0x08AE4FFC plays an effect from a loaded resource and returns its handle,
+ * or -1 (a loading/pause state, no resource, or none made); the effect object
+ * (188 bytes) comes from the game's allocator 0x08D5D46C, which returns 0 when
+ * its heap is out. Both failures are logged with the game's stack, so a run
+ * where a spell does not fire shows which it is. */
+static unsigned g_fx_fails, g_alloc_fails;
+
+static void hook_play_effect(void (*original)(void)) {
+    const uint32_t res = psp_cpu.r[5];
+    original();
+    if (psp_cpu.r[2] != 0xFFFFFFFFu || g_fx_fails >= 200) return;
+    char where[400] = "";
+    game_stack(where, sizeof where, 14);
+    logf_line("[effect] play failed (#%u): resource 0x%08X at vblank %llu  [game: %s]", ++g_fx_fails, res,
+              (unsigned long long)psp_sched_vblank_count(), where);
+}
+
+/* The DLC item scanner (0x08CBC59C, a0 = its state, a1 = 1 PSP2i / 2 PSP2
+ * folder): it lists ms0:/PSP/GAME/<id>/ only while its item count
+ * (a0 + 0x28000 + 16284) is below 600. Logged: the count going in, and the
+ * result (1 done, 0 failed). */
+static void hook_dlc_scan(void (*original)(void)) {
+    static int n;
+    const uint32_t st = psp_cpu.r[4], which = psp_cpu.r[5];
+    const uint32_t cnt_at = st + 0x28000u + 16284u;
+    const int32_t before = st ? (int32_t)psp_read32(cnt_at) : -1;
+    original();
+    if (n++ < 40)
+        logf_line("[dlc items] scan folder %u: state 0x%08X, count %d -> %d (limit 600), result %d",
+                  which, st, before, st ? (int32_t)psp_read32(cnt_at) : -1, (int32_t)psp_cpu.r[2]);
+}
+
+static void hook_alloc(void (*original)(void)) {
+    const uint32_t size = psp_cpu.r[4], align = psp_cpu.r[5];
+    original();
+    if (psp_cpu.r[2] || !size || g_alloc_fails >= 200) return;
+    char where[400] = "";
+    game_stack(where, sizeof where, 14);
+    logf_line("[effect] allocation of %u bytes (align %u) failed (#%u): the heap is out, at vblank %llu  [game: %s]",
+              size, align, ++g_alloc_fails, (unsigned long long)psp_sched_vblank_count(), where);
+}
+#endif
+
 static void ms_line(const char *line) { logf_line("[file] %s", line); }
 static void atrac_line(const char *line) { logf_line("[atrac] %s", line); }
 
@@ -831,6 +893,7 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x08D3F3B4u, hook_game_report);
     psp_hook_set(0x08D3F418u, hook_game_fatal);
     psp_hook_set(0x08D4C5C0u, hook_pattern_key);
+    psp_hook_set(0x08DD8524u, hook_pure_virtual);
     psp_hook_set(0x08D3F470u, hook_hang_fatal);
     psp_hook_set(0x08D4C604u, hook_hang_pattern);
     psp_hook_set(0x08B8D840u, hook_hang_break);
@@ -842,6 +905,11 @@ void gamelog_init(const char *exe_dir) {
     psp_hook_set(0x089489FCu, hook_counter_info);
     psp_hook_set(0x08CB1538u, hook_member_netid);
     psp_hook_set(0x08D10ACCu, hook_server_client_netid);
+#ifndef PSP2I_PROD
+    psp_hook_set(0x08AE4FFCu, hook_play_effect);
+    psp_hook_set(0x08D5D46Cu, hook_alloc);
+    psp_hook_set(0x08CBC59Cu, hook_dlc_scan);
+#endif
     psp_io_set_ms_log(ms_line);
     psp_atrac_set_log(atrac_line);
 }

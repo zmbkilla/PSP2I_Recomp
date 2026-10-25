@@ -38,6 +38,12 @@ int  web_overlay_active(void);
 /* Fit the open page to its parent again (call on the parent's WM_SIZE). */
 void web_overlay_resize(void);
 
+/* From another thread (the window's own, main.c): close the page and / or
+ * fit it again on its thread's next frame tick -- the game thread may be
+ * inside the page's own message loop then. */
+enum { WEB_POST_CLOSE = 1, WEB_POST_RESIZE = 2 };
+void web_overlay_post(int what);
+
 #ifdef __cplusplus
 }
 #endif

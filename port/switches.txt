@@ -1,0 +1,23 @@
+# Instructions with a run-time alternative (allegrexrecomp emit --switches):
+#   ID  ADDRESS     ALTERNATIVE   # comment
+# The generated code runs the alternative while psp_switch[ID] is set (the host
+# sets it; see port/host/main.c). A branch's alternative may only be 0 (nop:
+# never taken while on); other alternatives must not transfer control.
+#
+# ---- 0: DRAW DISTANCE (engine menu; the PPSSPP "Improved Draw Distance" cheat) ----
+# The game's far distances are short (-600..-2000 by area type, -200 in one
+# scene): these make them -18048 / -3200 / -4000, widen a search radius from 20
+# to 320, take out two "too far: skip" tests and give each object a distance
+# limit of -1 (none). Off while the savedata utility runs (main.c), as the
+# cheat is reported to corrupt the UI when saving.
+0 0x0890D5C8 0xC44C144C   # lwc1 $f12, 20.0  -> lwc1 $f12, 320.0  (radius passed to 0x089040D8)
+0 0x089FF198 0x3C04C57A   # 0x089FF178 (far by zone id, cached): a0 = -4000.0f
+0 0x089FF1A4 0x44840000   #   f0 = -4000.0 instead of the cached value
+0 0x089FF228 0x3C03C68D   # 0x089FF210 (far by area type): v1 = -18048.0f
+0 0x089FF234 0xAFA30000   #   the default is -18048 instead of the table's -600..-2000
+0 0x089FF2D8 0x3C02C548   #   area 2 with the 0x08ED4FF8 flag: v0 = -3200.0f
+0 0x089FF2E0 0x44820000   #   f0 = -3200 instead of -200
+0 0x08A5474C 0x00000000   # 0x08A54640: bc1tl "beyond obj+480: skip" -> never skips
+0 0x08A55540 0x3C02BF80   # 0x08A5521C: v0 = -1.0f
+0 0x08A5554C 0xAE2201D8   #   obj+472 (its distance limit) = -1 instead of the data's
+0 0x08A7DF3C 0x00000000   # 0x08A7DC84: bc1t "distance > limit: skip" -> never skips

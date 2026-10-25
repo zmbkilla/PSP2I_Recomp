@@ -76,7 +76,9 @@
  * 2, 0 at 60; 2, 0, 0, 0 at 120. The counters keep real time and advance by
  * exactly the steps they do at 30 (no division by it anywhere, and a 0 is a
  * frame where they stand still). Smooth motion uses dt and the 30 Hz step,
- * which stay per frame.
+ * which stay per frame. (Steps of 1 as at 60 -- 1, 0 at 120 -- were tried:
+ * smoother rolls, but the roll's animation then ran ahead of its movement
+ * and the lobby lost fps, so the 30 fps steps stay.)
  *
  * ## Test: logic kept at 30 Hz (TESTS > 30 HZ LOGIC)
  *
@@ -109,7 +111,20 @@
  * its full rate and returns to it as soon as frames fit again. Each frame
  * carries the previous frame's duration, so the steps add up to the time
  * that passed: the game keeps its speed, and a heavy moment costs frames,
- * not speed. Frames over 4 vblanks (loading) are counted as 4. */
+ * not speed. Frames over 1/15 s (loading) are counted as 1/15 s. At 120 Hz
+ * some frame lengths have no rate of their own; see adapt().
+ *
+ * ## 120 fps: frames over 8.3 ms
+ *
+ * At 120 Hz the vblanks are 8.3 ms apart, and the lobby's frames often take
+ * a little longer (~10 ms: under 16.7 ms nearly always, with a third of the
+ * time spent waiting). Each such frame misses its vblank and waits for the
+ * next: 16.7 ms, 60 fps. Letting a late frame skip that wait
+ * (psp_display_skip_next_wait) was tried and made it worse -- a tenth of the
+ * lobby's frames then took 25-33 ms of work, down to 30 fps: the game's
+ * threads hand work over at the vblank. The late frames are counted (the
+ * 30 s [rate] line); each frame's step comes from the host time since the
+ * previous frame ended. */
 
 #include "framerate.h"
 
@@ -119,6 +134,7 @@
 #include <psprecomp/mem.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #define FN_SET_FRAME_RATE 0x08B81890u
 #define FN_FRAME          0x08B85AB0u   /* the main loop's per-frame pacing call (from 0x08B86320) */
@@ -138,6 +154,9 @@ static int g_adapt_log;  /* rate changes logged so far */
 static double g_tick_acc; /* 1/60 s ticks of frame time not yet given to the game */
 static int g_tick_log;
 static uint32_t g_ticks_now = 2; /* the ticks the current frame sees (2 = a frame a 30 fps game would have) */
+static double g_debt;            /* seconds of real frame time not yet given to the game as steps */
+static uint64_t g_frame_end_us;  /* host time the previous frame ended */
+static uint64_t g_late_frames;   /* frames at 120 Hz that missed their vblank and did not wait */
 static int g_test_ticks, g_test_logic;   /* the engine menu's TESTS (off by default) */
 static int g_ticks_ours;  /* the tick field holds a value written here */
 
@@ -171,6 +190,255 @@ static void hook_palette_update(void (*original)(void)) {
     original();
     if (g_applied > 30 && g_ticks_now != 2 && before > 0 && psp_read32(obj + 364) == before - 1)
         psp_write32(obj + 364, before);
+}
+
+/* ## Integer 60 / fps above 60 (port/testwork/fps_notes.md)
+ *
+ * Two places compute 60 / fps as an integer, exact at 30 (2) and 60 (1) and 0
+ * at 120: an enemy hazard's per-frame update counts obj+200 down by it, so
+ * at 120 its timer never ran out; and a stepped object's constructor sets
+ * its steps per frame (obj+72) to 2 * (60 / fps), whose update steps until
+ * the end in one frame when that is 0. At 120 the hazard sees 60 fps on every
+ * other frame (1, 0, 1, 0: 60 a second), and the stepped object is built
+ * with 60's numbers and updated on every other frame. */
+#define FN_HAZARD_UPDATE 0x08A94C30u   /* vtable 0x08E3A5D8 slot 5: obj+200 -= 60 / fps */
+#define FN_STEPPED_NEW   0x08933CECu   /* obj+72 = *0x08E94690 * (60 / fps) */
+#define FN_STEPPED_UPD   0x08933F18u   /* runs obj+72 steps; to the end when obj+72 <= 0 */
+static uint32_t g_frame_no;            /* frames ended (hook_frame) */
+
+/* Run `original` with fps_int 60 in the timing state (restored after). */
+static void as_60(void (*original)(void)) {
+    const uint32_t fps = psp_read32(TIMING_FPS_INT);
+    psp_write32(TIMING_FPS_INT, 60);
+    original();
+    psp_write32(TIMING_FPS_INT, fps);
+}
+
+static void hook_hazard_update(void (*original)(void)) {
+    if (psp_read32(TIMING_FPS_INT) > 60 && (g_frame_no & 1)) as_60(original);
+    else original();
+}
+
+static void hook_stepped_new(void (*original)(void)) {
+    if (psp_read32(TIMING_FPS_INT) > 60) as_60(original);
+    else original();
+}
+
+static void hook_stepped_update(void (*original)(void)) {
+    if (psp_read32(TIMING_FPS_INT) > 60 && !(g_frame_no & 1)) return;   /* as at 60 */
+    original();
+}
+
+/* ## The effects' clock
+ *
+ * Effects advance their time (effect+144) by the effect manager's step, +4,
+ * in 1/300 s: 300 / fps as an integer, 10 at 30 and 5 at 60, but 2 at 120
+ * (2.5 is right): every effect animated 20% slow. After each frame the step
+ * for the next is set from the real frame length (2, 3, 2, 3 at 120), unless
+ * the game set a step of its own (0x08AE5D48, e.g. a slow motion). */
+#define EFFECT_GLOBAL 0x08ED92FCu      /* -> { [0] the effect manager, [4] loaded effects } */
+static double g_eff_acc;
+static uint32_t g_eff_ours;            /* the step written last (0: none) */
+
+static void effect_step(void) {
+    const uint32_t g = psp_read32(EFFECT_GLOBAL);
+    const uint32_t mgr = g ? psp_read32(g) : 0;
+    if (!mgr || g_applied <= 60) { g_eff_ours = 0; g_eff_acc = 0; return; }   /* exact there */
+    const uint32_t cur = psp_read32(mgr + 4);
+    const uint32_t game = 300u / (uint32_t)g_applied ? 300u / (uint32_t)g_applied : 1u;
+    if (cur != game && cur != g_eff_ours) { g_eff_ours = 0; return; }        /* the game's own step */
+    g_eff_acc += 300.0 / (double)g_applied;
+    uint32_t step = (uint32_t)g_eff_acc;
+    g_eff_acc -= step;
+    if (!step) step = 1;
+    psp_write32(mgr + 4, step);
+    g_eff_ours = step;
+}
+
+/* ## File requests served when the game checks for them
+ *
+ * The game's file thread (fio_th, priority 36) serves one request at a time
+ * from a queue the main thread (32) fills; the main thread asks whether its
+ * request is done (0x08B8C3B4) once per step of its loading logic -- once a
+ * frame. Being lower in priority, the file thread only runs while the main
+ * thread waits (its vblank wait), and it sleeps 8 ms when its queue is
+ * empty, so a request was often still queued at the first check: the step
+ * came a frame later (requests 16.7 / 66.7 ms apart; loading a save with
+ * imported DLC opens its ~150 DLC files two to four times each).
+ *
+ * So at that check -- after letting the file thread finish a request it
+ * was interrupted in (a nap of at most 5 ms) -- the queued
+ * requests are served there and then, in order, by the file thread's own
+ * code (take, serve, store the result, complete: its loop at 0x08B8D8E8),
+ * and the check finds them done. The file work is the same; frames and the
+ * game's steps are untouched -- only the wait between them is gone. */
+#define FN_FIO_REQUEST  0x08B8D6B0u    /* serve one request (a0): the result */
+#define FN_FIO_TAKE     0x08B8BF74u    /* (queue, &request): -1 when empty */
+#define FN_FIO_DONE_A   0x08B8C0C8u    /* (queue, request): complete (flag 0x80 or result -8) */
+#define FN_FIO_DONE_B   0x08B8C064u    /* (queue, request): complete */
+#define FN_FIO_CHECK    0x08B8C3B4u    /* (request id): its state, from the main thread */
+#define FIO_QUEUE       0x08EDE9D0u
+#define FIO_RING 16
+static uint64_t g_fio_at[FIO_RING];    /* host time of the last requests (ring) */
+static unsigned g_fio_n;
+static int g_fio_holding;              /* the file thread has taken a request and not completed it */
+static uint32_t g_fio_req;             /* ... that request */
+static int g_serving;                  /* the port is serving requests at a check */
+static int g_dlc_spin;                 /* a DLC file's stages run back to back (hook_load_wait) */
+static uint64_t g_served;
+static void (*g_log)(const char *fmt, ...);   /* the game log (framerate_set_log) */
+void framerate_set_log(void (*fn)(const char *fmt, ...)) { g_log = fn; }
+
+static void hook_fio_request(void (*original)(void)) {
+    const uint64_t t0 = psp_sched_now_us();
+    const uint64_t prev = g_fio_n ? g_fio_at[(g_fio_n - 1) % FIO_RING] : t0;
+    const uint32_t req = psp_cpu.r[4];
+    const uint32_t type = req ? psp_read16(req + 20) & 0x7F : 0;
+    g_fio_at[g_fio_n++ % FIO_RING] = t0;
+    original();
+    /* the first 400 requests: what was served, when, and by whom (load pacing) */
+    static int file_log = -1;
+    if (file_log < 0) { const char *e = getenv("PSP2I_FILE_LOG"); file_log = e && *e == '1'; }
+    if (g_log && file_log && g_fio_n <= 400)
+        g_log("[fio] request %u type %u: %.1f ms after the previous, served in %.2f ms by the %s (vblank %llu)", g_fio_n,
+              type, (double)(t0 - prev) / 1000.0, (double)(psp_sched_now_us() - t0) / 1000.0,
+              g_serving ? "check" : "file thread", (unsigned long long)psp_sched_vblank_count());
+}
+
+static void hook_fio_take(void (*original)(void)) {
+    /* While a DLC file's stages run back to back, the file thread finds the
+     * queue empty: the checks serve those requests at once, instead of
+     * napping until the file thread -- which took one while the main thread
+     * napped -- finishes it (1-2 ms a nap on Windows; ~27 ms a DLC file). */
+    if (g_dlc_spin && !g_serving) {
+        if (psp_cpu.r[5]) psp_write32(psp_cpu.r[5], 0);
+        psp_cpu.r[2] = 0xFFFFFFFFu;
+        return;
+    }
+    const uint32_t out = psp_cpu.r[5];
+    original();
+    if (!g_serving && (int32_t)psp_cpu.r[2] != -1 && out) { g_fio_holding = 1; g_fio_req = psp_read32(out); }
+}
+
+/* (queue, request): the file thread's request done -- by whoever completes
+ * it (keyed by the request: clearing only on the file thread's own
+ * completions left the flag set whenever the check completed it, and every
+ * later check then napped its full 5 ms). */
+static void hook_fio_done(void (*original)(void)) {
+    const uint32_t req = psp_cpu.r[5];
+    original();
+    if (g_fio_holding && req == g_fio_req) g_fio_holding = 0;
+}
+
+/* One guest call from a hook, the CPU state kept. */
+static uint32_t guest_call(uint32_t fn, uint32_t a0, uint32_t a1) {
+    psp_fn_t f = psp_lookup(fn);
+    if (!f) return 0xFFFFFFFFu;
+    psp_cpu.r[4] = a0;
+    psp_cpu.r[5] = a1;
+    psp_cpu.r[31] = 0;
+    f();
+    return psp_cpu.r[2];
+}
+
+static void hook_fio_check(void (*original)(void)) {
+    /* The file thread may hold a request it started and was interrupted in
+     * (the main thread outranks it): let it finish first -- under 1 ms of
+     * work -- by napping here, at most 5 ms, inside the frame. Skipping the
+     * serving then left the request half done for frames (100 ms gaps). */
+    for (int k = 0; k < 10 && g_fio_holding && !g_serving; k++) {
+        psp_sched_sleep_until(psp_sched_now_us() + 500);
+    }
+    if (!g_fio_holding && !g_serving) {
+        const psp_cpu_state saved = psp_cpu;
+        g_serving = 1;
+        const uint32_t out = psp_cpu.r[29] - 64;          /* below the caller's stack: the taken request */
+        for (int k = 0; k < 64; k++) {                    /* the queue as it stands, in order */
+            psp_cpu = saved;
+            if ((int32_t)guest_call(FN_FIO_TAKE, FIO_QUEUE, out) == -1) break;
+            const uint32_t req = psp_read32(out);
+            if (!req) break;
+            psp_cpu = saved;
+            const uint32_t res = guest_call(FN_FIO_REQUEST, req, 0);
+            psp_write32(req + 24, res);
+            psp_cpu = saved;
+            if ((psp_read16(req + 20) & 0x80) || (int32_t)res == -8) guest_call(FN_FIO_DONE_A, FIO_QUEUE, req);
+            else guest_call(FN_FIO_DONE_B, FIO_QUEUE, req);
+            g_served++;
+        }
+        g_serving = 0;
+        psp_cpu = saved;
+    }
+    original();
+}
+
+unsigned long long framerate_served_at_check(void) { return g_served; }
+
+/* The DLC loaders -- 0x08A0A8F4.. (the PDR*.EDAT files of ms0:/PSP/GAME/
+ * NPJH50043) and the DLC item code at 0x08CBDxxx (its ITM*.EDAT files), both
+ * run when a save with imported DLC loads -- wait for each file in the game's
+ * blocking load (0x08D56B5C(file, 0)): step the file object (its method 0:
+ * one stage -- open, check, read -- per call), and if that is not done, run
+ * the loading-screen frame (0x08D5601C) and the resource library's update
+ * (0x08DA1264), then step again. One stage a frame: 4-5 frames a file
+ * although every read is served at once now (above). For that loader only,
+ * the stages run back to back first -- step, library update, step ... up to
+ * 16 -- before the game's loop, which then finds the file done; the frames
+ * still come at the game's rate. */
+#define FN_LOAD_WAIT    0x08D56B5Cu    /* (file object, nonblocking): the game's blocking load */
+#define FN_LIB_UPDATE   0x08DA1264u    /* the resource library's per-poll update */
+static uint64_t g_dlc_files_quick;
+/* Where the DLC loaders call the blocking load (return addresses: call + 8);
+ * the game's other ~100 loads keep their pace. */
+static const uint32_t DLC_LOAD_RA[] = { 0x08A0AB10u, 0x08A0AC14u, 0x08A0B1A8u, 0x08CBDA0Cu };
+
+static int dlc_load_site(uint32_t ra) {
+    for (size_t k = 0; k < sizeof DLC_LOAD_RA / sizeof DLC_LOAD_RA[0]; k++) if (ra == DLC_LOAD_RA[k]) return 1;
+    return 0;
+}
+
+static void hook_load_wait(void (*original)(void)) {
+    const uint32_t obj = psp_cpu.r[4], ra = psp_cpu.r[31];
+    const int dlc = obj && psp_cpu.r[5] == 0 && dlc_load_site(ra);
+    if (dlc) {
+        const psp_cpu_state saved = psp_cpu;
+        g_dlc_spin = 1;
+        for (int k = 0; k < 16; k++) {
+            psp_cpu = saved;
+            const uint32_t vt = psp_read32(obj), step = vt ? psp_read32(vt) : 0;
+            if (!step || guest_call(step, obj, 0) != 0) { if (step) g_dlc_files_quick++; break; }
+            psp_cpu = saved;
+            guest_call(FN_LIB_UPDATE, 0, 0);
+        }
+        g_dlc_spin = 0;
+        psp_cpu = saved;
+    }
+    original();
+}
+
+unsigned long long framerate_dlc_files_quick(void) { return g_dlc_files_quick; }
+
+/* The PDR loop (0x08A0AA08..) draws a whole loading-screen frame -- with its
+ * vblank wait -- after every file (0x0896E8F8, called from 0x08A0AC9C), so it
+ * reads one file a frame: ~400 frames for its two passes at 30 fps, a quarter
+ * of that time at 120. Here that frame is drawn only once the frame period
+ * has nearly passed since the last one; the files in between load back to
+ * back. The loading screen still shows at the game's rate and every frame is
+ * the game's own -- only the files per frame change. */
+#define FN_LOAD_FRAME   0x0896E8F8u    /* the loading screen's frame (draw, wait, flip) */
+#define PDR_FRAME_RA    0x08A0ACA4u    /* its call in the PDR loop (return address) */
+static uint64_t g_load_frame_end;
+static void hook_load_frame(void (*original)(void)) {
+    if (psp_cpu.r[31] == PDR_FRAME_RA) {
+        const uint64_t now = psp_sched_now_us();
+        const uint64_t budget = 1000000u / (uint64_t)(g_target > 0 ? g_target : 30);
+        /* the frame starts with 6 ms to spare, so its wait ends at the vblank it would have */
+        if (g_load_frame_end && now - g_load_frame_end + 6000u < budget) { psp_cpu.r[2] = 0; return; }
+        original();
+        g_load_frame_end = psp_sched_now_us();
+        return;
+    }
+    original();
 }
 
 #define FN_INPUT_REPEAT  0x08D5B844u   /* held buttons' repeat, every frame (from 0x08D5B604) */
@@ -224,28 +492,44 @@ int framerate_normalize(int fps) { return fps >= 120 ? 120 : fps == 60 ? 60 : 30
 /* The emulated display's refresh for the target: 120 Hz for 120 fps. */
 static int rate_for(int target) { return target == 120 ? 2 : 1; }
 
+static int g_reissuing;  /* hook_frame re-issues the game's request itself (a new target) */
+
 static void hook_set_frame_rate(void (*original)(void)) {
     const uint32_t asked = psp_cpu.r[4];                /* $a0: fps */
+    /* The same request again: 0x08B34B18 / 0x08B34B60 call this whenever the
+     * current fps is not 30 / 20, which at 60 / 120 is always; going through
+     * would reset the frame step and the time carry-over (adapt) each time. */
+    if (!g_reissuing && g_base > 0 && (int)asked == g_asked) return;
     g_asked = (int)asked;
     if (g_target >= 60 && (asked == 30 || asked == 20 || asked == 60)) psp_cpu.r[4] = (uint32_t)g_target;
     else if (rate_for(g_target) == 2 && asked > 0 && asked < 30) psp_cpu.r[4] = asked * 2;   /* 15 at 120 Hz */
     g_base = g_applied = (int)psp_cpu.r[4];
+    g_debt = 0;
     original();
 }
 
-/* The next frame's timing for a frame that took `n` vblanks (of the emulated
- * display: 1/120 s each at 120 fps): the rate that matches, among those the
- * game's own timing fill handles (60/fps a whole number of vblanks). */
-static void adapt(uint32_t n) {
+/* The next frame's timing for a frame that took `secs`, among the rates the
+ * game's own timing fill handles (60/fps a whole number of vblanks). Most
+ * frame lengths have none: 25 ms (3 vblanks at 120 Hz) once was stepped as
+ * the next lower rate, 30 fps (33 ms), and timers and countdowns ran up to a
+ * third quicker whenever 120 was missed. So the real time not yet stepped is
+ * carried over (g_debt) and each frame takes the rate whose step is nearest
+ * it: 25 ms frames alternate 60 and 30, and the steps add up to the time
+ * that passed. */
+static void adapt(double secs) {
     if (g_base <= 0) return;
-    const int hz = 60 * psp_sched_vblank_rate();
-    if (n < 1) n = 1;
-    if (n > (uint32_t)(hz / 15)) n = (uint32_t)(hz / 15);
     static const int RATES[] = { 120, 60, 30, 20, 15 };
+    g_debt += secs;
+    if (g_debt > 1.0 / 15.0) g_debt = 1.0 / 15.0;    /* longer frames (loading) count as 1/15 s */
     int eff = 15;
-    for (size_t k = 0; k < sizeof RATES / sizeof RATES[0]; k++)
-        if (RATES[k] * (int)n <= hz) { eff = RATES[k]; break; }
-    if (eff > g_base) eff = g_base;
+    double best = 1e9;
+    for (size_t k = 0; k < sizeof RATES / sizeof RATES[0]; k++) {
+        if (RATES[k] > g_base) continue;
+        const double d = g_debt > 1.0 / RATES[k] ? g_debt - 1.0 / RATES[k] : 1.0 / RATES[k] - g_debt;
+        if (d < best - 1e-9) { best = d; eff = RATES[k]; }
+    }
+    g_debt -= 1.0 / eff;
+    if (g_debt < -1.0 / 30.0) g_debt = -1.0 / 30.0;  /* short frames (fast loading) run ahead by at most a frame */
     if (eff == g_applied) return;
     psp_fn_t fill = psp_lookup(FN_TIMING_FILL);
     if (!fill) return;
@@ -259,8 +543,8 @@ static void adapt(uint32_t n) {
     if (obj) psp_write32(obj + 4, (uint32_t)eff);
     if (g_adapt_log < 20) {
         g_adapt_log++;
-        fprintf(stderr, "framerate: a frame took %u vblank(s); the next one steps as %d fps (the game runs at %d)%s\n",
-                n, eff, g_base, g_adapt_log == 20 ? " -- further changes not logged" : "");
+        fprintf(stderr, "framerate: a frame took %.1f ms; the next one steps as %d fps (the game runs at %d)%s\n",
+                secs * 1000.0, eff, g_base, g_adapt_log == 20 ? " -- further changes not logged" : "");
     }
     g_applied = eff;
 }
@@ -283,17 +567,27 @@ static void hook_frame(void (*original)(void)) {
             const psp_cpu_state saved = psp_cpu;
             psp_cpu.r[4] = (uint32_t)g_asked;
             psp_cpu.r[31] = 0;           /* setFrameRate saves and restores $ra itself */
+            g_reissuing = 1;
             set();
+            g_reissuing = 0;
             psp_cpu = saved;
             fprintf(stderr, "framerate: switched to a %d fps target (game timing now %d fps)\n",
                     g_target, framerate_game_fps());
         }
     }
+    /* A frame at 120 Hz that missed its vblank: counted (see the top). */
     const uint32_t before = psp_read32(FRAME_END_VCOUNT);
+    if (before && rate_for(g_target) == 2 && (uint32_t)psp_sched_vblank_count() != before) g_late_frames++;
     original();                               /* the frame's wait: it ends at a vblank */
-    if (before) adapt(psp_read32(FRAME_END_VCOUNT) - before);
+    const uint64_t now = psp_sched_now_us();
+    if (g_frame_end_us) adapt((double)(now - g_frame_end_us) / 1e6);
+    g_frame_end_us = now;
     pace_ticks();
+    g_frame_no++;
+    effect_step();
 }
+
+unsigned long long framerate_late_frames(void) { return g_late_frames; }
 
 void framerate_init(int fps) {
     g_target = framerate_normalize(fps);
@@ -305,6 +599,16 @@ void framerate_init(int fps) {
     for (size_t i = 0; i < sizeof LOGIC_30HZ / sizeof LOGIC_30HZ[0]; i++) psp_hook_set(LOGIC_30HZ[i], hook_30hz);
     psp_hook_set(FN_INPUT_REPEAT, hook_input_repeat);
     psp_hook_set(FN_PALETTE_UPDATE, hook_palette_update);
+    psp_hook_set(FN_HAZARD_UPDATE, hook_hazard_update);
+    psp_hook_set(FN_STEPPED_NEW, hook_stepped_new);
+    psp_hook_set(FN_STEPPED_UPD, hook_stepped_update);
+    psp_hook_set(FN_FIO_REQUEST, hook_fio_request);
+    psp_hook_set(FN_FIO_TAKE, hook_fio_take);
+    psp_hook_set(FN_FIO_DONE_A, hook_fio_done);
+    psp_hook_set(FN_FIO_DONE_B, hook_fio_done);
+    psp_hook_set(FN_FIO_CHECK, hook_fio_check);
+    psp_hook_set(FN_LOAD_WAIT, hook_load_wait);
+    psp_hook_set(FN_LOAD_FRAME, hook_load_frame);
     if (g_target >= 60)
         fprintf(stderr, "framerate: %d fps (the game's 30/20 fps requests run at %d through its own timing%s)\n",
                 g_target, g_target, g_target == 120 ? "; the display refreshes at 120 Hz" : "");

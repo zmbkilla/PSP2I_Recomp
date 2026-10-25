@@ -32,7 +32,7 @@ static void test_open_close(void) {
     CHECK(menu_update(&m, MI_DOWN, 0) == 0);           /* closed: navigation does nothing */
     CHECK(menu_update(&m, 0, 0) == 0);
     CHECK(menu_update(&m, MI_TOGGLE, 0) == MFX_OPENED);
-    CHECK(m.open && m.sel == MENU_FRAME_RATE);
+    CHECK(m.open && m.sel == MENU_GRAPHICS);
     CHECK(menu_update(&m, MI_TOGGLE, 0) == 0);         /* still held: no second toggle */
     CHECK(m.open);
     CHECK(menu_update(&m, 0, 0) == 0);
@@ -51,12 +51,27 @@ static void test_open_close(void) {
     CHECK(menu_update(&m, MI_RIGHT, 0) == 0 && m.open);
     menu_update(&m, 0, 0);
     CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_CLOSED && !m.open);
+
+    /* QUIT GAME: above Close; Confirm ends the game, Left/Right do nothing */
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_QUIT);
+    CHECK(menu_update(&m, MI_LEFT, 0) == 0 && m.open);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == (MFX_CLOSED | MFX_QUIT) && !m.open);
 }
 
 static void test_values(void) {
     menu_state m;
     menu_init(&m, 30, 1);
     menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
+
+    /* GRAPHICS opens its page at FRAME RATE */
+    CHECK(m.sel == MENU_GRAPHICS && m.page == MENU_PAGE_MAIN);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == 0 && m.page == MENU_PAGE_GRAPHICS && m.sel == MENU_FRAME_RATE);
+    menu_update(&m, 0, 0);
 
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_FPS_CHANGED && m.fps == 60);
     menu_update(&m, 0, 0);
@@ -74,6 +89,94 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_SHOW_FPS && m.show_fps == 0);
     menu_update(&m, 0, 0);
     CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_SHOW_FPS && m.show_fps == 1);
+    menu_update(&m, 0, 0);
+
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_RESOLUTION);
+    CHECK(m.res == RES_DEFAULT && m.res == RES_1920x1080);              /* 1080p is the default */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RES_CHANGED && m.res == RES_2560x1440);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_RES_CHANGED && m.res == RES_1920x1080);
+    menu_update(&m, 0, 0);
+    m.res = RES_FULLSCREEN;
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RES_CHANGED && m.res == RES_960x544);   /* wraps */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_RES_CHANGED && m.res == RES_FULLSCREEN);
+    menu_update(&m, 0, 0);
+    m.res = RES_DEFAULT;
+    {
+        int w = 0, h = 0;
+        CHECK(menu_res_size(RES_1920x1080, &w, &h) == 1 && w == 1920 && h == 1080);
+        CHECK(menu_res_size(RES_FULLSCREEN, &w, &h) == 0 && w == 0 && h == 0);
+        CHECK(menu_res_parse("1920x1080") == RES_1920x1080);
+        CHECK(menu_res_parse("FULLSCREEN") == RES_FULLSCREEN);
+        CHECK(menu_res_parse("fullscreen\r\n") == RES_FULLSCREEN);
+        CHECK(menu_res_parse("1920x1081") == -1);
+        CHECK(strcmp(menu_res_name(RES_3840x2160), "3840X2160") == 0);
+    }
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_RENDERER && m.renderer == REN_D3D11);         /* Direct3D 11 by default */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RENDERER && m.renderer == REN_GL);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_RENDERER && m.renderer == REN_D3D11);   /* two choices: wraps */
+    menu_update(&m, 0, 0);
+    CHECK(menu_ren_parse("opengl") == REN_GL && menu_ren_parse("gl\r\n") == REN_GL && menu_ren_parse("OPENGL") == REN_GL);
+    CHECK(menu_ren_parse("d3d11") == REN_D3D11 && menu_ren_parse("software") == REN_SOFTWARE && menu_ren_parse("vulkan") == -1);
+    CHECK(strcmp(menu_ren_key(REN_GL), "opengl") == 0 && strcmp(menu_ren_key(REN_D3D11), "d3d11") == 0);
+    /* draw distance: normal by default; Right, Left and Confirm each flip it */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_DRAW_DIST && !m.draw_dist);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_DRAW_DIST && m.draw_dist);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_DRAW_DIST && !m.draw_dist);
+    menu_update(&m, 0, 0);
+    /* vertex work: on the GPU by default; Right and Confirm flip it */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_VERTEX_WORK && m.gpu_vertex);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_VERTEX && !m.gpu_vertex);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_VERTEX && m.gpu_vertex);
+    menu_update(&m, 0, 0);
+    /* post-processing: all off by default */
+    CHECK(m.post.scaling == PF_NEAREST && !m.post.fxaa && m.post.sharpen == PF_OFF && m.post.scanlines == PF_OFF &&
+          m.post.brightness == 10 && m.post.saturation == 10);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_SCALING);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_POSTFX && m.post.scaling == PF_BILINEAR);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_POSTFX && m.post.scaling == PF_SHARP_BILINEAR);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_POSTFX && m.post.scaling == PF_NEAREST);    /* wraps */
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_POSTFX && m.post.scaling == PF_SHARP_BILINEAR);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_FXAA && menu_update(&m, MI_CONFIRM, 0) == MFX_POSTFX && m.post.fxaa);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_SHARPEN && menu_update(&m, MI_RIGHT, 0) == MFX_POSTFX && m.post.sharpen == PF_LOW);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_SCANLINES && menu_update(&m, MI_LEFT, 0) == MFX_POSTFX && m.post.scanlines == PF_HIGH);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_BRIGHTNESS);
+    for (int k = 0; k < 5; k++) { menu_update(&m, MI_RIGHT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.post.brightness == POSTFX_BRIGHT_MAX);                   /* stops at 130% */
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_POSTFX && m.post.brightness == POSTFX_BRIGHT_MIN);   /* Confirm cycles */
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_SATURATION);
+    for (int k = 0; k < 12; k++) { menu_update(&m, MI_LEFT, 0); menu_update(&m, 0, 0); }
+    CHECK(m.post.saturation == 0);                                   /* stops at 0% */
+    CHECK(postfx_scaling_parse("sharp_bilinear") == PF_SHARP_BILINEAR && postfx_scaling_parse("Bilinear\r\n") == PF_BILINEAR &&
+          postfx_scaling_parse("nope") < 0 && postfx_level_parse("high") == PF_HIGH);
+    postfx_defaults(&m.post);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_GRAPHICS_BACK);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_FRAME_RATE);                    /* wraps within the page */
+    CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.open && m.page == MENU_PAGE_MAIN && m.sel == MENU_GRAPHICS);  /* Cross: back */
     menu_update(&m, 0, 0);
 
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -108,38 +211,6 @@ static void test_values(void) {
     menu_update(&m, 0, 0);
     CHECK(menu_update(&m, MI_RIGHT, 0) == 0);
     menu_update(&m, 0, 0);
-    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_RESOLUTION);
-    CHECK(m.res == RES_DEFAULT && m.res == RES_1920x1080);              /* 1080p is the default */
-    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RES_CHANGED && m.res == RES_2560x1440);
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_RES_CHANGED && m.res == RES_1920x1080);
-    menu_update(&m, 0, 0);
-    m.res = RES_FULLSCREEN;
-    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RES_CHANGED && m.res == RES_960x544);   /* wraps */
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_RES_CHANGED && m.res == RES_FULLSCREEN);
-    menu_update(&m, 0, 0);
-    m.res = RES_DEFAULT;
-    {
-        int w = 0, h = 0;
-        CHECK(menu_res_size(RES_1920x1080, &w, &h) == 1 && w == 1920 && h == 1080);
-        CHECK(menu_res_size(RES_FULLSCREEN, &w, &h) == 0 && w == 0 && h == 0);
-        CHECK(menu_res_parse("1920x1080") == RES_1920x1080);
-        CHECK(menu_res_parse("FULLSCREEN") == RES_FULLSCREEN);
-        CHECK(menu_res_parse("fullscreen\r\n") == RES_FULLSCREEN);
-        CHECK(menu_res_parse("1920x1081") == -1);
-        CHECK(strcmp(menu_res_name(RES_3840x2160), "3840X2160") == 0);
-    }
-    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_RENDERER && m.renderer == REN_D3D11);         /* Direct3D 11 by default */
-    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_RENDERER && m.renderer == REN_GL);
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_RENDERER && m.renderer == REN_D3D11);   /* two choices: wraps */
-    menu_update(&m, 0, 0);
-    CHECK(menu_ren_parse("opengl") == REN_GL && menu_ren_parse("gl\r\n") == REN_GL && menu_ren_parse("OPENGL") == REN_GL);
-    CHECK(menu_ren_parse("d3d11") == REN_D3D11 && menu_ren_parse("software") == REN_SOFTWARE && menu_ren_parse("vulkan") == -1);
-    CHECK(strcmp(menu_ren_key(REN_GL), "opengl") == 0 && strcmp(menu_ren_key(REN_D3D11), "d3d11") == 0);
     /* volumes: 100% by default, 10% steps, Left/Right stop at the ends, Confirm wraps */
     for (int k = 0; k < VOL_N; k++) {
         menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -234,15 +305,17 @@ static void test_values(void) {
     menu_update(&m, 0, 0);
     m.test_ticks = m.test_logic = 0;
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_QUIT);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_FRAME_RATE);                    /* wraps */
+    CHECK(m.sel == MENU_GRAPHICS);                      /* wraps */
 
     /* Values survive closing and reopening; reopening starts at the top. */
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
     menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
-    CHECK(m.open && m.sel == MENU_FRAME_RATE && m.fps == 60 && m.show_fps == 1);
+    CHECK(m.open && m.sel == MENU_GRAPHICS && m.page == MENU_PAGE_MAIN && m.fps == 60 && m.show_fps == 1);
 
     menu_state d;
     menu_init(&d, 45, 0);                               /* anything but 60 or 120 is 30 */
@@ -307,6 +380,8 @@ static void test_buttons(void) {
     CHECK(STEP(0) == MFX_OPENED);
     toggle = 0;
     CHECK(STEP(0) == 0);
+    CHECK(STEP(CIRCLE) == 0 && m.page == MENU_PAGE_GRAPHICS);   /* Circle on GRAPHICS: its page */
+    CHECK(STEP(0) == 0);
     CHECK(STEP(CIRCLE) == MFX_FPS_CHANGED && m.fps == 60);      /* Circle accepts */
     CHECK(STEP(CIRCLE) == 0 && m.fps == 60);                    /* held: no repeat */
     CHECK(STEP(0) == 0);
@@ -314,19 +389,13 @@ static void test_buttons(void) {
     CHECK(STEP(0) == 0);
     CHECK(STEP(CIRCLE) == MFX_SHOW_FPS && m.show_fps == 0);
     CHECK(STEP(0) == 0);
-    CHECK(STEP(DOWN) == 0 && m.sel == MENU_SEGA_SERVER);
+    for (int k = MENU_RESOLUTION; k <= MENU_GRAPHICS_BACK; k++) {
+        CHECK(STEP(DOWN) == 0 && m.sel == k);
+        CHECK(STEP(0) == 0);
+    }
+    CHECK(STEP(CIRCLE) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_GRAPHICS);   /* BACK */
     CHECK(STEP(0) == 0);
-    CHECK(STEP(DOWN) == 0 && m.sel == MENU_ADHOC_SERVER);
-    CHECK(STEP(0) == 0);
-    CHECK(STEP(DOWN) == 0 && m.sel == MENU_ADHOC_MODE);
-    CHECK(STEP(0) == 0);
-    CHECK(STEP(DOWN) == 0 && m.sel == MENU_MODERN_SERVER);
-    CHECK(STEP(0) == 0);
-    CHECK(STEP(DOWN) == 0 && m.sel == MENU_RESOLUTION);
-    CHECK(STEP(0) == 0);
-    CHECK(STEP(DOWN) == 0 && m.sel == MENU_RENDERER);
-    CHECK(STEP(0) == 0);
-    for (int k = MENU_MASTER_VOL; k <= MENU_TESTS; k++) {
+    for (int k = MENU_SEGA_SERVER; k <= MENU_QUIT; k++) {
         CHECK(STEP(DOWN) == 0 && m.sel == k);
         CHECK(STEP(0) == 0);
     }
@@ -359,6 +428,7 @@ static void test_rs_speed(void) {
     CHECK(menu_rs_speed(&m) == 1.0f);                   /* default 1.00x */
     menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Close */
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Quit game */
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Tests */
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Controls */
     menu_update(&m, MI_CONFIRM, 0); menu_update(&m, 0, 0);  /* its page: RIGHT STICK */
@@ -570,8 +640,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 5, 384, 266));             /* the centred 288x261 box */
-    CHECK(!changed_outside(96, 5, 384, 266));
+    CHECK(changed_inside(96, 16, 384, 255));            /* the centred 288x239 box (14 items) */
+    CHECK(!changed_outside(96, 16, 384, 255));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */
@@ -785,11 +855,11 @@ static void test_touch_host(void) {
     menu_state m;
     menu_init(&m, 30, 1);
     CHECK((m.hidden & MENU_BIT(MENU_TOUCH_COLOR)) && (m.hidden & MENU_BIT(MENU_TOUCH_ALPHA)));   /* Windows: hidden */
-    m.hidden = MENU_BIT(MENU_FRAME_RATE) | MENU_BIT(MENU_SEGA_SERVER) | MENU_BIT(MENU_FONT);
-    CHECK(menu_update(&m, MI_TOGGLE, 0) == MFX_OPENED && m.sel == MENU_FPS_COUNTER);  /* the first shown item */
+    m.hidden = MENU_BIT(MENU_GRAPHICS) | MENU_BIT(MENU_ADHOC_SERVER) | MENU_BIT(MENU_FONT);
+    CHECK(menu_update(&m, MI_TOGGLE, 0) == MFX_OPENED && m.sel == MENU_SEGA_SERVER);  /* the first shown item */
     menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_ADHOC_SERVER);                          /* SEGA SERVER skipped */
+    CHECK(m.sel == MENU_ADHOC_MODE);                            /* ADHOC SERVER skipped */
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);                                  /* wraps past the hidden first item */
@@ -797,11 +867,11 @@ static void test_touch_host(void) {
     /* the main page's taps: rows in shown order, 11 pixels apart */
     int x, y, bw, bh;
     menu_box(&m, 480, 272, &x, &y, &bw, &bh);
-    CHECK(bh == 261 + 11 * (13 - 16));                           /* 16 main items, 3 hidden */
+    CHECK(bh == 261 + 11 * (11 - 16));                           /* 14 main items, 3 hidden */
     int row0 = y + 8 + 9 + 8;
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 3) == MFX_SHOW_FPS && m.sel == MENU_FPS_COUNTER && !m.show_fps);
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 + 3) == MFX_EDIT_ADHOC);   /* editors open */
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 10 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 3) == MFX_EDIT_SEGA && m.sel == MENU_SEGA_SERVER);   /* editors open */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 + 3) == MFX_ADHOC_MODE && m.adhoc_mode == 1);
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 7 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS */
 
     /* the CONTROLS page with the touch items: RIGHT STICK, SENSITIVITY, CIRCLE/CROSS, COLOR, OPACITY, BACK */
     m.hidden = 0;
@@ -820,7 +890,7 @@ static void test_touch_host(void) {
     CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 5 + 3) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_CONTROLS);  /* BACK */
     menu_box(&m, 480, 272, &x, &y, &bw, &bh);                    /* the main page's box again */
     row0 = y + 8 + 9 + 8;
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 13 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS, nothing hidden */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 10 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS, nothing hidden */
     CHECK(menu_touch(&m, 480, 272, 2, 2) == 0 && m.open && m.page == MENU_PAGE_MAIN);   /* outside: back a page */
     CHECK(menu_touch(&m, 480, 272, 2, 2) == MFX_CLOSED && !m.open);                     /* outside again: closes */
 }

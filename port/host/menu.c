@@ -19,7 +19,9 @@ void menu_init(menu_state *m, int fps, int show_fps) {
     for (int k = 0; k < VOL_N; k++) m->vol[k] = VOL_STEPS;   /* 100% */
     m->att = ATT_DEFAULT;
     m->touch_alpha = TOUCH_ALPHA_DEFAULT;
+    postfx_defaults(&m->post);
     m->rs_on = 1;
+    m->gpu_vertex = 1;
     m->hidden = MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA);   /* the touch host shows them */
 }
 
@@ -128,6 +130,26 @@ static int change(menu_state *m, int dir) {
         return MFX_AUDIO;
     case MENU_SWAP_OC:     m->swap_oc = !m->swap_oc; return MFX_SWAP_OC;
     case MENU_RS_ON:       m->rs_on = !m->rs_on; return MFX_RS_ON;
+    case MENU_DRAW_DIST:   m->draw_dist = !m->draw_dist; return MFX_DRAW_DIST;
+    case MENU_VERTEX_WORK: m->gpu_vertex = !m->gpu_vertex; return MFX_VERTEX;
+    case MENU_SCALING:     m->post.scaling = (m->post.scaling + (dir < 0 ? PF_FILTERS - 1 : 1)) % PF_FILTERS; return MFX_POSTFX;
+    case MENU_FXAA:        m->post.fxaa = !m->post.fxaa; return MFX_POSTFX;
+    case MENU_SHARPEN:     m->post.sharpen = (m->post.sharpen + (dir < 0 ? PF_LEVELS - 1 : 1)) % PF_LEVELS; return MFX_POSTFX;
+    case MENU_SCANLINES:   m->post.scanlines = (m->post.scanlines + (dir < 0 ? PF_LEVELS - 1 : 1)) % PF_LEVELS; return MFX_POSTFX;
+    case MENU_BRIGHTNESS: {                    /* 70..130%: Left/Right step and stop, Confirm cycles */
+        const int old = m->post.brightness;
+        if (dir < 0)      { if (m->post.brightness > POSTFX_BRIGHT_MIN) m->post.brightness--; }
+        else if (dir > 0) { if (m->post.brightness < POSTFX_BRIGHT_MAX) m->post.brightness++; }
+        else m->post.brightness = m->post.brightness >= POSTFX_BRIGHT_MAX ? POSTFX_BRIGHT_MIN : m->post.brightness + 1;
+        return m->post.brightness != old ? MFX_POSTFX : 0;
+    }
+    case MENU_SATURATION: {                    /* 0..200% */
+        const int old = m->post.saturation;
+        if (dir < 0)      { if (m->post.saturation > 0) m->post.saturation--; }
+        else if (dir > 0) { if (m->post.saturation < POSTFX_SAT_MAX) m->post.saturation++; }
+        else m->post.saturation = m->post.saturation >= POSTFX_SAT_MAX ? 0 : m->post.saturation + 1;
+        return m->post.saturation != old ? MFX_POSTFX : 0;
+    }
     case MENU_TEST_TICKS:  m->test_ticks = !m->test_ticks; return MFX_TESTS;
     case MENU_TEST_LOGIC:  m->test_logic = !m->test_logic; return MFX_TESTS;
     case MENU_TOUCH_COLOR:
@@ -159,11 +181,24 @@ static int change(menu_state *m, int dir) {
 }
 
 int menu_page_of(int item) {
-    return item >= MENU_TEST_TICKS ? MENU_PAGE_TESTS : item >= MENU_RS_ON ? MENU_PAGE_CONTROLS : MENU_PAGE_MAIN;
+    return item >= MENU_FRAME_RATE ? MENU_PAGE_GRAPHICS : item >= MENU_TEST_TICKS ? MENU_PAGE_TESTS
+         : item >= MENU_RS_ON ? MENU_PAGE_CONTROLS : MENU_PAGE_MAIN;
 }
 
 /* The main page's item that opens a sub-page (where BACK returns to). */
-static int page_item(int page) { return page == MENU_PAGE_TESTS ? MENU_TESTS : MENU_CONTROLS; }
+static int page_item(int page) {
+    return page == MENU_PAGE_TESTS ? MENU_TESTS : page == MENU_PAGE_GRAPHICS ? MENU_GRAPHICS : MENU_CONTROLS;
+}
+
+/* The page a main-page item opens, or -1. */
+static int opens_page(int item) {
+    return item == MENU_CONTROLS ? MENU_PAGE_CONTROLS : item == MENU_TESTS ? MENU_PAGE_TESTS
+         : item == MENU_GRAPHICS ? MENU_PAGE_GRAPHICS : -1;
+}
+
+static int is_back(int item) {
+    return item == MENU_CONTROLS_BACK || item == MENU_TESTS_BACK || item == MENU_GRAPHICS_BACK;
+}
 
 /* On the page shown, and not left out by this host. */
 static int shown(const menu_state *m, int item) {
@@ -212,9 +247,11 @@ int menu_update(menu_state *m, uint32_t held, uint32_t latched) {
     if (press & (MI_LEFT | MI_RIGHT | MI_CONFIRM)) {
         if (m->sel == MENU_CLOSE) {
             if (press & MI_CONFIRM) { m->open = 0; fx |= MFX_CLOSED; }
-        } else if (m->sel == MENU_CONTROLS || m->sel == MENU_TESTS) {
-            if (press & (MI_CONFIRM | MI_RIGHT)) go_page(m, m->sel == MENU_TESTS ? MENU_PAGE_TESTS : MENU_PAGE_CONTROLS, -1);
-        } else if (m->sel == MENU_CONTROLS_BACK || m->sel == MENU_TESTS_BACK) {
+        } else if (m->sel == MENU_QUIT) {
+            if (press & MI_CONFIRM) { m->open = 0; fx |= MFX_CLOSED | MFX_QUIT; }
+        } else if (opens_page(m->sel) >= 0) {
+            if (press & (MI_CONFIRM | MI_RIGHT)) go_page(m, opens_page(m->sel), -1);
+        } else if (is_back(m->sel)) {
             if (press & (MI_CONFIRM | MI_LEFT)) go_page(m, MENU_PAGE_MAIN, page_item(m->page));
         } else {
             fx |= change(m, (press & MI_LEFT) ? -1 : (press & MI_RIGHT) ? 1 : 0);
@@ -399,9 +436,9 @@ int menu_touch(menu_state *m, int w, int h, int x, int y) {
     if (item < 0) return 0;
     m->sel = item;
     if (item == MENU_CLOSE) { m->open = 0; return MFX_CLOSED; }
-    if (item == MENU_CONTROLS) { go_page(m, MENU_PAGE_CONTROLS, -1); return 0; }
-    if (item == MENU_TESTS) { go_page(m, MENU_PAGE_TESTS, -1); return 0; }
-    if (item == MENU_CONTROLS_BACK || item == MENU_TESTS_BACK) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
+    if (item == MENU_QUIT) { m->open = 0; return MFX_CLOSED | MFX_QUIT; }
+    if (opens_page(item) >= 0) { go_page(m, opens_page(item), -1); return 0; }
+    if (is_back(item)) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
     if (is_editor(item)) return change(m, 0);
     return change(m, x < x0 + VALUE_X + 30 ? -1 : 1);
 }
@@ -416,14 +453,22 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
 
     int y = y0 + 8;
     menu_text(img, x0 + 10, y, m->page == MENU_PAGE_CONTROLS ? "SETTINGS > CONTROLS"
-                             : m->page == MENU_PAGE_TESTS ? "SETTINGS > TESTS (60 / 120 FPS)" : "SETTINGS", WHITE);
+                             : m->page == MENU_PAGE_TESTS ? "SETTINGS > TESTS (60 / 120 FPS)"
+                             : m->page == MENU_PAGE_GRAPHICS ? "SETTINGS > GRAPHICS" : "SETTINGS", WHITE);
     y += CELL_H + 8;
 
-    static const char *const NAMES[MENU_ITEMS] = { "FRAME RATE", "FPS COUNTER", "SEGA SERVER", "ADHOC SERVER",
-                                                   "ADHOC MODE", "MODERN SERVER", "RESOLUTION", "RENDERER", "MASTER VOLUME",
-                                                   "MUSIC VOLUME", "SFX VOLUME", "ATTENUATION", "FONT", "CONTROLS", "TESTS",
-                                                   "CLOSE", "RIGHT STICK", "SENSITIVITY", "CIRCLE/CROSS", "TOUCH COLOR",
-                                                   "TOUCH OPACITY", "BACK", "TICK PACING", "30 HZ LOGIC", "BACK" };
+    static const char *const NAMES[MENU_ITEMS] = {
+        [MENU_GRAPHICS] = "GRAPHICS", [MENU_SEGA_SERVER] = "SEGA SERVER", [MENU_ADHOC_SERVER] = "ADHOC SERVER",
+        [MENU_ADHOC_MODE] = "ADHOC MODE", [MENU_MODERN_SERVER] = "MODERN SERVER", [MENU_MASTER_VOL] = "MASTER VOLUME",
+        [MENU_MUSIC_VOL] = "MUSIC VOLUME", [MENU_SFX_VOL] = "SFX VOLUME", [MENU_ATTENUATION] = "ATTENUATION",
+        [MENU_FONT] = "FONT", [MENU_CONTROLS] = "CONTROLS", [MENU_TESTS] = "TESTS", [MENU_QUIT] = "QUIT GAME", [MENU_CLOSE] = "CLOSE",
+        [MENU_RS_ON] = "RIGHT STICK", [MENU_RS_SPEED] = "SENSITIVITY", [MENU_SWAP_OC] = "CIRCLE/CROSS",
+        [MENU_TOUCH_COLOR] = "TOUCH COLOR", [MENU_TOUCH_ALPHA] = "TOUCH OPACITY", [MENU_CONTROLS_BACK] = "BACK",
+        [MENU_TEST_TICKS] = "TICK PACING", [MENU_TEST_LOGIC] = "30 HZ LOGIC", [MENU_TESTS_BACK] = "BACK",
+        [MENU_FRAME_RATE] = "FRAME RATE", [MENU_FPS_COUNTER] = "FPS COUNTER", [MENU_RESOLUTION] = "RESOLUTION",
+        [MENU_RENDERER] = "RENDERER", [MENU_DRAW_DIST] = "DRAW DISTANCE", [MENU_VERTEX_WORK] = "VERTEX WORK", [MENU_SCALING] = "SCALING",
+        [MENU_FXAA] = "ANTI-ALIASING", [MENU_SHARPEN] = "SHARPEN", [MENU_SCANLINES] = "SCANLINES",
+        [MENU_BRIGHTNESS] = "BRIGHTNESS", [MENU_SATURATION] = "SATURATION", [MENU_GRAPHICS_BACK] = "BACK" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
@@ -446,6 +491,12 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     char font[32];
     if (m->font_n > 1) snprintf(font, sizeof font, "< %.18s >", m->font_name);
     else snprintf(font, sizeof font, "%.24s", m->font_name[0] ? m->font_name : "NONE");
+    char scaling[28], sharpen[16], scanlines[16], bright[16], satur[16];
+    snprintf(scaling, sizeof scaling, "< %s >", postfx_scaling_name(m->post.scaling));
+    snprintf(sharpen, sizeof sharpen, "< %s >", postfx_level_name(m->post.sharpen));
+    snprintf(scanlines, sizeof scanlines, "< %s >", postfx_level_name(m->post.scanlines));
+    snprintf(bright, sizeof bright, "< %d%% >", m->post.brightness * 10);
+    snprintf(satur, sizeof satur, "< %d%% >", m->post.saturation * 10);
     char tcol[24], talpha[24];
     snprintf(tcol, sizeof tcol, "< %s >", menu_touch_color_name(m->touch_color));
     snprintf(talpha, sizeof talpha, "< %d%% >", m->touch_alpha * 10);
@@ -456,6 +507,12 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
         menu_text(img, x0 + 22, y, NAMES[i], col);
         const char *v = i == MENU_FRAME_RATE ? (m->fps == 120 ? "< 120 FPS >" : m->fps == 60 ? "< 60 FPS >" : "< 30 FPS >")
                       : i == MENU_FPS_COUNTER ? (m->show_fps ? "< ON >" : "< OFF >")
+                      : i == MENU_DRAW_DIST ? (m->draw_dist ? "< FAR >" : "< NORMAL >")
+                      : i == MENU_VERTEX_WORK ? (m->gpu_vertex ? "< GPU >" : "< CPU >")
+                      : i == MENU_SCALING ? scaling : i == MENU_FXAA ? (m->post.fxaa ? "< FXAA >" : "< OFF >")
+                      : i == MENU_SHARPEN ? sharpen : i == MENU_SCANLINES ? scanlines
+                      : i == MENU_BRIGHTNESS ? bright : i == MENU_SATURATION ? satur
+                      : i == MENU_GRAPHICS ? ">"
                       : i == MENU_TEST_TICKS ? (m->test_ticks ? "< ON >" : "< OFF >")
                       : i == MENU_TEST_LOGIC ? (m->test_logic ? "< ON >" : "< OFF >")
                       : i == MENU_RS_ON ? (m->rs_on ? "< ON >" : "< OFF >") : i == MENU_CONTROLS || i == MENU_TESTS ? ">"

@@ -34,7 +34,7 @@ if defined REGEN (
     if errorlevel 1 goto failed
     echo == Regenerating port\gen from FinalBuild\EBOOT.BIN ==
     pushd port
-    ..\psprecomp\build\tools\allegrexrecomp\Release\allegrexrecomp.exe emit ..\FinalBuild\EBOOT.BIN gen recomp --hooks hooks.txt --fixes fixes.txt
+    ..\psprecomp\build\tools\allegrexrecomp\Release\allegrexrecomp.exe emit ..\FinalBuild\EBOOT.BIN gen recomp --hooks hooks.txt --fixes fixes.txt --switches switches.txt
     if errorlevel 1 (popd & goto failed)
     popd
 )

@@ -119,6 +119,13 @@ typedef struct __GLsync *GLsync;
 #define GL_WAIT_FAILED 0x911D
 #define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
 #define GL_BACK 0x0405
+#define GL_FRONT 0x0404
+#define GL_CW 0x0900
+#define GL_CCW 0x0901
+#define GL_TEXTURE_BUFFER 0x8C2A
+#define GL_MAX_TEXTURE_BUFFER_SIZE 0x8C2B
+#define GL_R32UI 0x8236
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
 
 /* X(return type, name, parameters) -- one line per entry point used. */
 #define GL_FUNCS(X) \
@@ -209,8 +216,14 @@ typedef struct __GLsync *GLsync;
     X(void, glBindFragDataLocation, (GLuint, GLuint, const GLchar *))
 #endif
 
+/* Entry points that may be missing: loaded when there, not required. The
+ * GE's vertex work on the GPU (gl_ge.c, gl_draw_tl) needs them; without
+ * them it stays on the CPU. */
+#define GL_FUNCS_OPT(X)     X(void, glTexBuffer, (GLenum, GLenum, GLuint))     X(void, glUniform4fv, (GLint, GLsizei, const GLfloat *))     X(void, glUniform4iv, (GLint, GLsizei, const GLint *))     X(void, glDrawElements, (GLenum, GLsizei, GLenum, const void *))     X(void, glCullFace, (GLenum))     X(void, glFrontFace, (GLenum))
+
 #define GL_DECLARE(ret, name, args) typedef ret (GLAPIENTRY *PFN_##name) args; extern PFN_##name p_##name;
 GL_FUNCS(GL_DECLARE)
+GL_FUNCS_OPT(GL_DECLARE)
 #undef GL_DECLARE
 
 /* Call through the loaded pointers under the usual names. */
@@ -286,6 +299,12 @@ GL_FUNCS(GL_DECLARE)
 #define glFenceSync p_glFenceSync
 #define glClientWaitSync p_glClientWaitSync
 #define glDeleteSync p_glDeleteSync
+#define glTexBuffer p_glTexBuffer
+#define glUniform4fv p_glUniform4fv
+#define glUniform4iv p_glUniform4iv
+#define glDrawElements p_glDrawElements
+#define glCullFace p_glCullFace
+#define glFrontFace p_glFrontFace
 #ifdef PSP2I_GLES
 #define glClearDepth(d) p_glClearDepthf((GLfloat)(d))
 #define glDepthRange(n, f) p_glDepthRangef((GLfloat)(n), (GLfloat)(f))

@@ -14,6 +14,19 @@ int  framerate_target(void);
  * stepping for), or 0 before the game first sets one. */
 int  framerate_game_fps(void);
 
+/* Frames so far that missed their vblank at 120 Hz and did not wait for the
+ * next one. */
+unsigned long long framerate_late_frames(void);
+
+/* File requests the port served at the game's check for them (file loading). */
+unsigned long long framerate_served_at_check(void);
+
+/* DLC files the DLC loader got done without waiting a frame per stage. */
+unsigned long long framerate_dlc_files_quick(void);
+
+/* Where framerate.c logs (fast loading); NULL = nowhere. */
+void framerate_set_log(void (*fn)(const char *fmt, ...));
+
 /* 30, 60 or 120: the nearest supported target for an fps value (anything
  * else is 30). */
 int  framerate_normalize(int fps);

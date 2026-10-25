@@ -2,7 +2,9 @@
  *
  * Same design, same invariants, same names: the runtime (psprecomp/src/hle/
  * gpu.c) does the vertex work and hands each draw over as a screen-space
- * triangle list plus decoded state; this file rasterizes it on the GPU and
+ * triangle list plus decoded state -- or, for 3D triangles, hands over the
+ * game's vertex bytes for TLVS_SRC to transform and light (gl_draw_tl);
+ * this file rasterizes it on the GPU and
  * keeps emulated VRAM coherent with the render targets it holds (see the long
  * comments in d3d11.c, which apply here unchanged):
  *
@@ -28,6 +30,7 @@
 
 #include "gl_load.h"
 #include "gl_ge.h"
+#include "postfx.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -46,7 +49,6 @@
 
 static int    g_ok;
 static GLuint g_prog, g_xprog, g_vao, g_xvao, g_vb;
-static GLint  u_vp, u_env, u_tf, u_at, u_misc, u_tex;
 static GLint  u_xdst, u_xsrc, u_xrng, u_xtex;
 static GLuint g_samp[8];
 static uint32_t g_vb_pos;                        /* in vertices */
@@ -63,6 +65,7 @@ typedef struct {
     uint64_t synced_hash;
     uint64_t check_frame;
     uint64_t last_use;
+    uint64_t wstamp;                             /* changes whenever its pixels may change (gl_ge_present) */
 } rt_entry;
 
 typedef struct {
@@ -157,6 +160,9 @@ static void rows_bounds(rt_entry *t) {
 static void rows_mark(rt_entry *t, uint32_t y0, uint32_t y1) {
     if (y1 > 512) y1 = 512;
     if (y0 >= y1) return;
+    int all = t->dirty && y0 >= t->dy0 && y1 <= t->dy1;   /* already marked? (draw_tl marks the scissor every draw) */
+    for (uint32_t y = y0; all && y < y1; y++) all = (t->drow[y >> 6] >> (y & 63)) & 1;
+    if (all) return;
     for (uint32_t y = y0; y < y1; y++) t->drow[y >> 6] |= 1ull << (y & 63);
     if (!t->dirty) { t->dy0 = y0; t->dy1 = y1; }
     else { if (y0 < t->dy0) t->dy0 = y0; if (y1 > t->dy1) t->dy1 = y1; }
@@ -216,6 +222,129 @@ GLSL_HEADER
 "    if (!ok) discard;\n"
 "  }\n"
 "  o_c = c;\n"
+"}\n";
+
+/* The vertex work of gpu.c's psp_gpu_prim for a transformed triangle draw
+ * (render.h psp_gpu_tl): the game's vertex bytes are a buffer texture of
+ * 32-bit words (VB); each vertex is decoded by its vertex type (LI[0].z),
+ * skinned, transformed, lit (ge_vertex.c psp_ge_light) and given its texture
+ * coordinates, then taken through the projection and viewport onto the
+ * target: the numbers the CPU path hands gl_draw, as clip-space positions,
+ * so GL clips them and interpolates with perspective. Depth is clamped per
+ * pixel (GL_DEPTH_CLAMP). */
+static const char *TLVS_SRC =
+GLSL_HEADER
+"uniform vec4 U[81]; uniform ivec4 LI[4]; uniform vec4 vp;\n"
+"uniform usamplerBuffer VB;\n"
+"out vec2 v_uv; out vec4 v_c;\n"
+"uint wd(int a) { return texelFetch(VB, a >> 2).r; }\n"
+"uint b8(int a) { return (wd(a) >> uint((a & 3) * 8)) & 0xFFu; }\n"
+"uint b16(int a) { return (wd(a) >> uint((a & 2) * 8)) & 0xFFFFu; }\n"
+"int csz(int f) { return f == 1 ? 1 : f == 2 ? 2 : f == 3 ? 4 : 0; }\n"
+"float cmp(int a, int f, bool sg) {\n"
+"  if (f == 1) { uint b = b8(a); return (sg ? float(int(b << 24u) >> 24) : float(b)) * (1.0 / 128.0); }\n"
+"  if (f == 2) { uint h = b16(a); return (sg ? float(int(h << 16u) >> 16) : float(h)) * (1.0 / 32768.0); }\n"
+"  if (f == 3) return uintBitsToFloat(wd(a));\n"
+"  return 0.0;\n"
+"}\n"
+"vec3 m43(int r, vec3 p) { vec4 q = vec4(p, 1.0); return vec3(dot(U[r], q), dot(U[r + 1], q), dot(U[r + 2], q)); }\n"
+"vec3 m33(int r, vec3 p) { return vec3(dot(U[r].xyz, p), dot(U[r + 1].xyz, p), dot(U[r + 2].xyz, p)); }\n"
+"float pw(float x, float y) { return x > 0.0 ? pow(x, y) : (y == 0.0 ? 1.0 : 0.0); }\n"
+"vec4 light(vec4 color, vec3 pos, vec3 nrm) {\n"
+"  int mu = LI[3].y;\n"
+"  vec4 amb = (mu & 1) != 0 ? color : U[42];\n"
+"  vec3 dif = (mu & 2) != 0 ? color.rgb : U[43].rgb;\n"
+"  vec3 spc = (mu & 4) != 0 ? color.rgb : U[44].rgb;\n"
+"  vec3 sum = U[41].rgb + U[45].rgb * amb.rgb;\n"
+"  float sa = U[45].a * amb.a;\n"
+"  vec3 spec = vec3(0.0);\n"
+"  float sh = U[46].x;\n"
+"  for (int l = 0; l < 4; l++) {\n"
+"    int bits = (LI[3].x >> (8 * l)) & 0xFF;\n"
+"    if ((bits & 1) == 0) continue;\n"
+"    int type = (bits >> 1) & 3, comp = (bits >> 3) & 3, b = 47 + 8 * l;\n"
+"    vec3 to = type == 0 ? U[b].xyz : U[b].xyz - pos;\n"
+"    float dist = sqrt(dot(to, to)), d = 0.0;\n"
+"    if (dist > 0.0) { to /= dist; d = dot(to, nrm); }\n"
+"    if (d < 0.0) d = 0.0;\n"
+"    if (comp == 2) d = pw(d, sh);\n"
+"    float scale = 1.0;\n"
+"    if (type != 0) {\n"
+"      vec3 at = U[b + 2].xyz;\n"
+"      float a = at.x + at.y * dist + at.z * dist * dist;\n"
+"      scale = clamp(a > 0.0 ? 1.0 / a : 1.0, 0.0, 1.0);\n"
+"      if (type >= 2) {\n"
+"        float len = sqrt(dot(U[b + 1].xyz, U[b + 1].xyz));\n"
+"        float ang = len > 0.0 ? dot(U[b + 1].xyz, to) / len : 0.0;\n"
+"        scale = ang >= U[b + 6].y ? scale * pw(ang, U[b + 6].x) : 0.0;\n"
+"      }\n"
+"    }\n"
+"    sum += (U[b + 3].rgb * amb.rgb + U[b + 4].rgb * dif * d) * scale;\n"
+"    if (comp == 1) {\n"
+"      vec3 h = vec3(to.x, to.y, to.z + 1.0);\n"
+"      float hl = sqrt(dot(h, h)), s = hl > 0.0 ? dot(h, nrm) / hl : 0.0;\n"
+"      if (s > 0.0) spec += U[b + 5].rgb * spc * (pw(s, sh) * scale);\n"
+"    }\n"
+"  }\n"
+"  sum += spec;\n"
+"  return clamp(vec4(sum, sa), 0.0, 1.0);\n"
+"}\n"
+"void main() {\n"
+"  int base = LI[0].y + gl_VertexID * LI[0].x, vt = LI[0].z, nw = LI[0].w;\n"
+"  int ft = vt & 3, fc = (vt >> 2) & 7, fn = (vt >> 5) & 3, fp = (vt >> 7) & 3, fw = (vt >> 9) & 3;\n"
+"  int wo = LI[1].x, to = LI[1].y, co = LI[1].z, no = LI[1].w, po = LI[2].x, flags = LI[2].y;\n"
+"  vec3 pos = vec3(0.0), nrm = vec3(0.0); vec2 uv = vec2(0.0); vec4 col;\n"
+"  if (to >= 0) { uv.x = cmp(base + to, ft, false); uv.y = cmp(base + to + csz(ft), ft, false); }\n"
+"  if (co >= 0) {\n"
+"    if (fc == 4) { uint h = b16(base + co); uint r = h & 31u, g = (h >> 5) & 63u, bl = (h >> 11) & 31u;\n"
+"      col = vec4(float((r << 3) | (r >> 2)), float((g << 2) | (g >> 4)), float((bl << 3) | (bl >> 2)), 255.0); }\n"
+"    else if (fc == 5) { uint h = b16(base + co); uint r = h & 31u, g = (h >> 5) & 31u, bl = (h >> 10) & 31u;\n"
+"      col = vec4(float((r << 3) | (r >> 2)), float((g << 3) | (g >> 2)), float((bl << 3) | (bl >> 2)), (h & 0x8000u) != 0u ? 255.0 : 0.0); }\n"
+"    else if (fc == 6) { uint h = b16(base + co);\n"
+"      col = vec4(float(h & 15u), float((h >> 4) & 15u), float((h >> 8) & 15u), float((h >> 12) & 15u)) * 17.0; }\n"
+"    else { uint w = wd(base + co); col = vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }\n"
+"  } else col = U[42] * 255.0;\n"
+"  if (no >= 0) for (int k = 0; k < 3; k++) nrm[k] = cmp(base + no + k * csz(fn), fn, true);\n"
+"  for (int k = 0; k < 3; k++) pos[k] = cmp(base + po + k * csz(fp), fp, true);\n"
+"  vec3 mp = pos, mn = nrm;\n"
+"  if ((flags & 2) != 0) {\n"
+"    mp = vec3(0.0); mn = vec3(0.0);\n"
+"    for (int i = 0; i < nw; i++) {\n"
+"      float w = cmp(base + wo + i * csz(fw), fw, false);\n"
+"      if (w == 0.0) continue;\n"
+"      mp += w * m43(13 + 3 * i, pos);\n"
+"      mn += w * m33(13 + 3 * i, nrm);\n"
+"    }\n"
+"  }\n"
+"  vec3 wp = m43(0, mp), wn = vec3(0.0, 0.0, 1.0);\n"
+"  bool lit = (flags & 1) != 0;\n"
+"  int mapm = LI[2].z;\n"
+"  if (lit || mapm == 2) {\n"
+"    if ((flags & 4) != 0) mn = -mn;\n"
+"    wn = m33(0, mn);\n"
+"    float l = sqrt(dot(wn, wn));\n"
+"    if (l > 0.0) wn /= l;\n"
+"  }\n"
+"  if (lit) col = light(col / 255.0, wp, wn) * 255.0;\n"
+"  vec2 t;\n"
+"  if (mapm == 1) {\n"
+"    int src = LI[2].w;\n"
+"    vec3 s3;\n"
+"    if (src == 0) s3 = pos;\n"
+"    else if (src == 1) s3 = vec3(uv, 0.0);\n"
+"    else if (src == 2) { float l = sqrt(dot(nrm, nrm)); s3 = l > 0.0 ? nrm / l : vec3(0.0, 0.0, 1.0); }\n"
+"    else s3 = nrm;\n"
+"    vec3 q3 = m43(10, s3);\n"
+"    float q = q3.z != 0.0 ? q3.z : 1.0;\n"
+"    t = q3.xy / q * U[39].xy * U[40].xy;\n"
+"  } else if (mapm == 2) {\n"
+"    t = vec2(1.0 + dot(U[79].xyz, wn), 1.0 + dot(U[80].xyz, wn)) * 0.5 * U[39].xy * U[40].xy;\n"
+"  } else t = (uv * U[39].xy + U[39].zw) * U[40].xy;\n"
+"  vec4 q = vec4(m43(3, wp), 1.0);\n"
+"  vec4 cl = vec4(dot(U[6], q), dot(U[7], q), dot(U[8], q), dot(U[9], q));\n"
+"  vec2 s2 = 2.0 / vp.xy;\n"
+"  gl_Position = vec4(cl.x * U[37].x * s2.x + cl.w * (U[38].x * s2.x - 1.0), cl.y * U[37].y * s2.y + cl.w * (U[38].y * s2.y - 1.0), (cl.z * U[37].z + cl.w * U[38].z) * (2.0 / 65535.0) - cl.w, cl.w);\n"
+"  v_uv = t * vp.zw; v_c = col / 255.0;\n"
 "}\n";
 
 /* One target's bytes as another target's pixels (d3d11.c XFER_SRC). */
@@ -333,6 +462,7 @@ static void rt_readback_inner(rt_entry *t) {
 }
 
 static void rt_upload(rt_entry *t) {
+    t->wstamp = ++g_use;
     uint8_t *v = vram();
     if (!v) return;
     const int bpp = bpp_of(t->fmt);
@@ -415,7 +545,7 @@ static rt_entry *rt_get(uint32_t off, uint32_t stride, int fmt, uint32_t rows) {
         t->rows = rows;
         rt_upload(t);
     }
-    t->last_use = ++g_use;
+    t->last_use = t->wstamp = ++g_use;
     return t;
 }
 
@@ -700,6 +830,7 @@ static int xfer_rows(const rt_entry *o, const rt_entry *t, uint32_t *r0, uint32_
 }
 
 static void rt_xfer(rt_entry *t, rt_entry *o, uint32_t a, uint32_t b, int own) {
+    t->wstamp = ++g_use;
     const uint32_t i0 = row_addr(o, a), i1 = row_addr(o, b);
     if (i0 >= i1) return;
     const uint32_t rt = rt_rowbytes(t);
@@ -759,14 +890,32 @@ static int rt_resolve_copy(rt_entry *r) {
 
 /* ---- the draw ------------------------------------------------------------------------------------ */
 
-static int gl_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
-    if (!g_ok || (st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride || nverts <= 0) return 1;
-    if ((uint32_t)nverts > VB_VERTS) return 1;
+typedef struct { GLuint prog; GLint vp, env, tf, at, misc; } draw_prog;
+static draw_prog g_dp, g_tlp;           /* screen-space vertices (VS_SRC); the vertex work on the GPU (TLVS_SRC) */
+static GLint  u_tl_u, u_tl_li;
+/* The uniforms last sent, in groups that change independently (render.h
+ * PSP_TL_U_*): only a changed group is uploaded. At ~450 draws a frame,
+ * sending all 81 vec4s each time was the driver's largest cost. */
+static const int TL_GROUPS[][2] = { { 0, 13 }, { 13, 24 }, { 37, 10 }, { 47, 34 } };   /* first, count */
+static GLint u_tl_group[4];
+static float g_tl_sent_u[PSP_TL_NU * 4];
+static GLint g_tl_sent_i[PSP_TL_NI * 4];
+static int g_tl_sent;
+static GLuint g_tlvao, g_tlvb, g_tlib, g_tltex;
+static uint32_t g_tlvb_pos, g_tlib_pos;  /* bytes */
+static uint64_t n_tl_draws;
+static uint32_t g_tlvb_bytes = 16u << 20;   /* ring of game vertex bytes (at most the buffer-texture limit) */
+#define TLIB_BYTES (8u << 20)             /* ring of 32-bit indices */
+
+/* The target a draw goes to, made current with VRAM and with the targets it
+ * overlaps; its depth buffer and texture. NULL: not drawable here. */
+static rt_entry *draw_target(const psp_gpu_state *st, depth_entry **dp, GLuint *texp, float uvs[2]) {
+    if (!g_ok || (st->fb_addr & 0x0F000000u) != 0x04000000u || !st->fb_stride) return NULL;
     const uint32_t off = vram_off(st->fb_addr);
     uint32_t rows = (uint32_t)st->sy1 + 1;
     if (rows > 512) rows = 512;
     rt_entry *t = rt_get(off, st->fb_stride, st->fb_fmt, rows);
-    if (!t) return 1;
+    if (!t) return NULL;
     {   /* overlapping targets: see d3d11.c d3d_draw */
         const uint32_t t0 = t->off, t1 = rt_end(t);
         int flushed = 0;
@@ -801,11 +950,56 @@ static int gl_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts)
         d = depth_get(vram_off(st->zb_addr), t->w, t->h);
 
     GLuint tex = 0;
-    float uvs[2] = { 1, 1 };
+    uvs[0] = uvs[1] = 1.0f;
     if (st->tex) {
         tex = texture_view(st, t, uvs);
-        if (!tex) return 1;
+        if (!tex) return NULL;
     }
+    *dp = d;
+    *texp = tex;
+    return t;
+}
+
+/* Target, viewport, scissor, blending, depth, and the program with the
+ * fragment stage's state. */
+static void draw_state(const psp_gpu_state *st, rt_entry *t, depth_entry *d, GLuint tex, const draw_prog *p,
+                       const float uvs[2]) {
+    bind_target(t, d);
+    glViewport(0, 0, (GLsizei)t->w, (GLsizei)t->h);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(st->sx0, st->sy0, st->sx1 - st->sx0 + 1, st->sy1 - st->sy0 + 1);
+    int approx = 0;
+    apply_blend(st, &approx);
+    if (approx) n_approx++;
+    apply_depth(st, d != NULL);
+
+    glUseProgram(p->prog);
+    glUniform4f(p->vp, (float)t->w, (float)t->h, uvs[0], uvs[1]);
+    glUniform4f(p->env, (float)(st->env & 0xFF) / 255.0f, (float)((st->env >> 8) & 0xFF) / 255.0f,
+                (float)((st->env >> 16) & 0xFF) / 255.0f, 0.0f);
+    glUniform4ui(p->tf, (GLuint)(st->tex != 0), (GLuint)st->tfunc, (GLuint)st->trgba, (GLuint)st->tdbl);
+    glUniform4ui(p->at, (GLuint)(st->atest && !st->clear), (GLuint)st->afunc, st->aref, st->amask);
+    glUniform4ui(p->misc, (GLuint)st->clear, 0, 0, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glBindSampler(0, tex ? sampler(st->tex_linear, st->tex_clamp_u, st->tex_clamp_v) : 0);
+}
+
+/* Rows a draw may have written: the scissor, narrowed to [ymin, ymax]. */
+static void draw_rows(rt_entry *t, const psp_gpu_state *st, float ymin, float ymax) {
+    int y0 = (int)ymin - 1, y1 = (int)ymax + 2;
+    if (y0 < st->sy0) y0 = st->sy0;
+    if (y1 > st->sy1 + 1) y1 = st->sy1 + 1;
+    if (y0 < y1) rows_mark(t, (uint32_t)y0, (uint32_t)y1);
+}
+
+static int gl_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    if (nverts <= 0 || (uint32_t)nverts > VB_VERTS) return 1;
+    depth_entry *d;
+    GLuint tex;
+    float uvs[2];
+    rt_entry *t = draw_target(st, &d, &tex, uvs);
+    if (!t) return 1;
 
     /* Vertices into the ring. glBufferSubData, not glMapBufferRange: a map
      * hands memory back to the caller, which makes a threaded driver (NVIDIA's
@@ -841,36 +1035,83 @@ static int gl_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts)
     first = (GLint)g_vb_pos;
     g_vb_pos += (uint32_t)nverts;
 
-    bind_target(t, d);
-    glViewport(0, 0, (GLsizei)t->w, (GLsizei)t->h);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(st->sx0, st->sy0, st->sx1 - st->sx0 + 1, st->sy1 - st->sy0 + 1);
-    int approx = 0;
-    apply_blend(st, &approx);
-    if (approx) n_approx++;
-    apply_depth(st, d != NULL);
-
-    glUseProgram(g_prog);
-    glUniform4f(u_vp, (float)t->w, (float)t->h, uvs[0], uvs[1]);
-    glUniform4f(u_env, (float)(st->env & 0xFF) / 255.0f, (float)((st->env >> 8) & 0xFF) / 255.0f,
-                (float)((st->env >> 16) & 0xFF) / 255.0f, 0.0f);
-    glUniform4ui(u_tf, (GLuint)(st->tex != 0), (GLuint)st->tfunc, (GLuint)st->trgba, (GLuint)st->tdbl);
-    glUniform4ui(u_at, (GLuint)(st->atest && !st->clear), (GLuint)st->afunc, st->aref, st->amask);
-    glUniform4ui(u_misc, (GLuint)st->clear, 0, 0, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glBindSampler(0, tex ? sampler(st->tex_linear, st->tex_clamp_u, st->tex_clamp_v) : 0);
+    draw_state(st, t, d, tex, &g_dp, uvs);
     glBindVertexArray(g_vao);
     glDrawArrays(GL_TRIANGLES, first, nverts);
 
     float ymin = 1e9f, ymax = -1e9f;
     for (int i = 0; i < nverts; i++) { if (v[i].y < ymin) ymin = v[i].y; if (v[i].y > ymax) ymax = v[i].y; }
-    int y0 = (int)ymin - 1, y1 = (int)ymax + 2;
-    if (y0 < st->sy0) y0 = st->sy0;
-    if (y1 > st->sy1 + 1) y1 = st->sy1 + 1;
-    if (y0 < y1) rows_mark(t, (uint32_t)y0, (uint32_t)y1);
+    draw_rows(t, st, ymin, ymax);
     n_draws++;
     n_tris += (uint64_t)nverts / 3;
+    return 0;
+}
+
+/* A transformed triangle draw with the vertex work in TLVS_SRC (render.h
+ * psp_gpu_tl): the game's vertex bytes and the triangle list into their
+ * rings, the GE state as uniforms, culling by GL. Where the triangles land
+ * is not known here, so the whole scissor counts as written. */
+static int gl_draw_tl(const psp_gpu_state *st, const psp_gpu_tl *tl) {
+    if (!g_tlp.prog || tl->nidx <= 0) return 1;
+    const uint32_t vb = tl->vbytes, ib = (uint32_t)tl->nidx * 4u;
+    if (vb > g_tlvb_bytes || ib > TLIB_BYTES) return 1;
+    depth_entry *d;
+    GLuint tex;
+    float uvs[2];
+    rt_entry *t = draw_target(st, &d, &tex, uvs);
+    if (!t) return 1;
+
+    /* Sub-data uploads into rings, orphaned on wrap (as gl_draw's vertices). */
+    glBindBuffer(GL_TEXTURE_BUFFER, g_tlvb);
+    if (g_tlvb_pos + vb > g_tlvb_bytes) {
+        glBufferData(GL_TEXTURE_BUFFER, (GLsizeiptr)g_tlvb_bytes, NULL, GL_STREAM_DRAW);
+        g_tlvb_pos = 0;
+    }
+    glBufferSubData(GL_TEXTURE_BUFFER, (GLintptr)g_tlvb_pos, (GLsizeiptr)vb, tl->vdata);
+    const uint32_t vfirst = g_tlvb_pos;
+    g_tlvb_pos += vb;
+    glBindVertexArray(g_tlvao);                     /* holds the index buffer binding */
+    if (g_tlib_pos + ib > TLIB_BYTES) {
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)TLIB_BYTES, NULL, GL_STREAM_DRAW);
+        g_tlib_pos = 0;
+    }
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)g_tlib_pos, (GLsizeiptr)ib, tl->idx);
+    const uint32_t ifirst = g_tlib_pos;
+    g_tlib_pos += ib;
+
+    draw_state(st, t, d, tex, &g_tlp, uvs);
+    GLint li[PSP_TL_NI * 4];
+    memcpy(li, tl->i, sizeof li);
+    li[4 * PSP_TL_I_LAYOUT0 + 1] += (GLint)vfirst;   /* the misalignment, plus where these bytes are in the ring */
+    for (int k = 0; k < 4; k++) {
+        const int first = TL_GROUPS[k][0], n = TL_GROUPS[k][1];
+        const size_t bytes = (size_t)n * 4 * sizeof(float);
+        if (g_tl_sent && !memcmp(g_tl_sent_u + 4 * first, tl->u + 4 * first, bytes)) continue;
+        glUniform4fv(u_tl_group[k], n, tl->u + 4 * first);
+        memcpy(g_tl_sent_u + 4 * first, tl->u + 4 * first, bytes);
+    }
+    if (!g_tl_sent || memcmp(g_tl_sent_i, li, sizeof li)) {
+        glUniform4iv(u_tl_li, PSP_TL_NI, li);
+        memcpy(g_tl_sent_i, li, sizeof li);
+    }
+    g_tl_sent = 1;
+    glActiveTexture(GL_TEXTURE0 + 2);
+    glBindTexture(GL_TEXTURE_BUFFER, g_tltex);
+    glActiveTexture(GL_TEXTURE0);
+    /* GL's window y is PSP y here (no flip), so GL's counter-clockwise --
+     * positive signed area -- is render.h's cull 1. */
+    if (tl->cull) {
+        glEnable(GL_CULL_FACE);
+        glFrontFace(GL_CCW);
+        glCullFace(tl->cull == 1 ? GL_FRONT : GL_BACK);
+    }
+    glDrawElements(GL_TRIANGLES, tl->nidx, GL_UNSIGNED_INT, (const void *)(uintptr_t)ifirst);
+    if (tl->cull) glDisable(GL_CULL_FACE);
+
+    draw_rows(t, st, (float)st->sy0, (float)st->sy1);
+    n_draws++;
+    n_tl_draws++;
+    n_tris += (uint64_t)tl->nidx / 3;
     return 0;
 }
 
@@ -945,16 +1186,26 @@ static void fence_drop(int k) {
     if (g_fence[k]) { glDeleteSync(g_fence[k]); g_fence[k] = NULL; }
 }
 
+static const rt_entry *g_q_t;                  /* the target and its stamp at the last copy queued */
+static uint64_t g_q_stamp;
+
 int gl_ge_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
     if (!g_ok || (addr & 0x0F000000u) != 0x04000000u) return 0;
     rt_entry *t = rt_find(vram_off(addr), stride, fmt);
     const int ahead = t && t->dirty && t->stride == stride && t->fmt == fmt && t->w >= (uint32_t)w;
     if (!ahead) {
         for (int k = 0; k < PRESENT_RING; k++) { g_present_pending[k] = 0; fence_drop(k); }
+        g_q_t = NULL;
         n_present_vram++;
         return 0;
     }
-    {   /* queue a copy of this frame */
+    /* Queue a copy only when the target changed since the last one queued:
+     * presenting runs every vblank (120 a second at 120 fps) and the game
+     * draws a new frame into the other buffer, so most vblanks have nothing
+     * new to copy -- the copies already queued are still collected below. */
+    if (t != g_q_t || t->wstamp != g_q_stamp) {
+        g_q_t = t;
+        g_q_stamp = t->wstamp;
         const int k = g_present_head;
         g_present_head = (g_present_head + 1) % PRESENT_RING;
         const size_t bytes = (size_t)w * (size_t)h * 4;
@@ -1031,7 +1282,7 @@ int gl_ge_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w,
 /* ---- the window: the composed frame scaled into the default framebuffer --------------------------- */
 
 static GLuint g_bprog, g_btex;
-static GLint u_bscale;
+static GLint u_bscale, u_bp0, u_bp1, u_bts;
 static int g_btex_w, g_btex_h;
 
 static const char *BVS_SRC =
@@ -1042,10 +1293,59 @@ GLSL_HEADER
 "  v_uv = vec2(p.x, 1.0 - p.y) * S.xy;\n"             /* frame row 0 at the top of the window */
 "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
 "}\n";
+/* With the post-processing (postfx.h, as present.c): P0 = (scaling, fxaa,
+ * sharpen, scanlines), P1 = (brightness, saturation, window pixels per frame
+ * pixel), TS = the texture's size in texels. P0 = 0, P1 = (1, 1, 1) is the
+ * plain picture (overlays). */
 static const char *BFS_SRC =
 GLSL_HEADER
-"uniform sampler2D F; in vec2 v_uv; out vec4 o_c;\n"
-"void main() { o_c = vec4(texture(F, v_uv).rgb, 1.0); }\n";
+"uniform sampler2D F; uniform vec4 P0; uniform vec4 P1; uniform vec4 TSv;\n"
+"in vec2 v_uv; out vec4 o_c;\n"
+"const vec3 L = vec3(0.299, 0.587, 0.114);\n"
+"vec3 tap(vec2 uv) { return texture(F, uv).rgb; }\n"
+"vec3 frame(vec2 uv) {\n"
+"  if (P0.x > 1.5) {\n"
+"    vec2 x = uv * TSv.xy, i = floor(x), f = x - i;\n"
+"    f = clamp((f - 0.5) * P1.z + 0.5, 0.0, 1.0);\n"
+"    return tap((i + f) / TSv.xy);\n"
+"  }\n"
+"  return tap(uv);\n"
+"}\n"
+"vec3 fxaa(vec2 uv, vec2 px) {\n"
+"  vec3 nw = tap(uv + vec2(-1.0, -1.0) * px), ne = tap(uv + vec2(1.0, -1.0) * px);\n"
+"  vec3 sw = tap(uv + vec2(-1.0, 1.0) * px), se = tap(uv + vec2(1.0, 1.0) * px), m = frame(uv);\n"
+"  float lnw = dot(nw, L), lne = dot(ne, L), lsw = dot(sw, L), lse = dot(se, L), lm = dot(m, L);\n"
+"  float lmin = min(lm, min(min(lnw, lne), min(lsw, lse))), lmax = max(lm, max(max(lnw, lne), max(lsw, lse)));\n"
+"  vec2 d = vec2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));\n"
+"  float red = max((lnw + lne + lsw + lse) * 0.03125, 1.0 / 128.0);\n"
+"  d = clamp(d / (min(abs(d.x), abs(d.y)) + red), -8.0, 8.0) * px;\n"
+"  vec3 a = 0.5 * (tap(uv + d * (1.0 / 3.0 - 0.5)) + tap(uv + d * (2.0 / 3.0 - 0.5)));\n"
+"  vec3 b = a * 0.5 + 0.25 * (tap(uv - d * 0.5) + tap(uv + d * 0.5));\n"
+"  float lb = dot(b, L);\n"
+"  return (lb < lmin || lb > lmax) ? a : b;\n"
+"}\n"
+"void main() {\n"
+"  vec2 px = 1.0 / TSv.xy;\n"
+"  vec3 c = P0.y > 0.5 ? fxaa(v_uv, px) : frame(v_uv);\n"
+"  if (P0.z > 0.0) {\n"
+"    vec3 n = tap(v_uv + vec2(0.0, -px.y)) + tap(v_uv + vec2(0.0, px.y)) + tap(v_uv + vec2(-px.x, 0.0)) + tap(v_uv + vec2(px.x, 0.0));\n"
+"    c = clamp(c + P0.z * (c * 4.0 - n) * 0.25, 0.0, 1.0);\n"
+"  }\n"
+"  if (P0.w > 0.0) {\n"
+"    float y = fract(v_uv.y * TSv.xy.y);\n"
+"    c *= 1.0 - P0.w * (1.0 - 4.0 * y * (1.0 - y));\n"
+"  }\n"
+"  c *= P1.x;\n"
+"  c = mix(vec3(dot(c, L)), c, P1.y);\n"
+"  o_c = vec4(clamp(c, 0.0, 1.0), 1.0);\n"
+"}\n";
+
+/* The plain picture: no post-processing (overlays drawn with this program). */
+static void blit_plain(void) {
+    glUniform4f(u_bp0, 0.0f, 0.0f, 0.0f, 0.0f);
+    glUniform4f(u_bp1, 1.0f, 1.0f, 1.0f, 0.0f);
+    glUniform4f(u_bts, 1.0f, 1.0f, 0.0f, 0.0f);
+}
 
 static int blit_ready(void) {
     if (!g_ok) return 0;
@@ -1053,12 +1353,16 @@ static int blit_ready(void) {
         g_bprog = gl_program("present", BVS_SRC, BFS_SRC);
         if (!g_bprog) return 0;
         u_bscale = glGetUniformLocation(g_bprog, "S");
+        u_bp0 = glGetUniformLocation(g_bprog, "P0");
+        u_bp1 = glGetUniformLocation(g_bprog, "P1");
+        u_bts = glGetUniformLocation(g_bprog, "TSv");
     }
     return 1;
 }
 
-/* The texture bound to unit 0, its top-left sx x sy part, into the window. */
-static void blit_draw(float sx, float sy, int x, int y, int vw, int vh, int cw, int ch) {
+/* The texture bound to unit 0 (tw x th texels), its top-left sx x sy part --
+ * a frame fw pixels wide -- into the window, post-processed (postfx.h). */
+static void blit_draw(float sx, float sy, int tw, int th, int fw, int x, int y, int vw, int vh, int cw, int ch) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
@@ -1070,7 +1374,13 @@ static void blit_draw(float sx, float sy, int x, int y, int vw, int vh, int cw, 
     glViewport(x, ch - y - vh, vw, vh);                   /* window y from the bottom */
     glUseProgram(g_bprog);
     glUniform4f(u_bscale, sx, sy, 0.0f, 0.0f);
-    glBindSampler(0, sampler(0, 1, 1));
+    float p0[4], p1[4];
+    int linear = 0;
+    postfx_params(fw, vw, p0, p1, &linear);
+    glUniform4f(u_bp0, p0[0], p0[1], p0[2], p0[3]);
+    glUniform4f(u_bp1, p1[0], p1[1], p1[2], p1[3]);
+    glUniform4f(u_bts, (float)tw, (float)th, 0.0f, 0.0f);
+    glBindSampler(0, sampler(linear, 1, 1));
     glBindVertexArray(g_xvao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
@@ -1086,7 +1396,7 @@ int gl_ge_present_direct(uint32_t addr, uint32_t stride, int fmt, int w, int h,
     if (!t || !t->dirty || t->w < (uint32_t)w || t->h < (uint32_t)h) return 0;
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, t->tex);
-    blit_draw((float)w / (float)t->w, (float)h / (float)t->h, x, y, vw, vh, cw, ch);
+    blit_draw((float)w / (float)t->w, (float)h / (float)t->h, (int)t->w, (int)t->h, w, x, y, vw, vh, cw, ch);
     n_present_direct++;
     return 1;
 }
@@ -1117,6 +1427,7 @@ int gl_draw_overlay(const uint32_t *px, int w, int h, int x, int y, int vw, int 
     (void)cw;
     glUseProgram(g_bprog);
     glUniform4f(u_bscale, 1.0f, 1.0f, 0.0f, 0.0f);
+    blit_plain();
     glBindSampler(0, sampler(0, 1, 1));
     glBindVertexArray(g_xvao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -1142,25 +1453,78 @@ int gl_blit_frame(const uint32_t *px, int w, int h, int x, int y, int vw, int vh
 #else
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);   /* 0xAARRGGBB */
 #endif
-    blit_draw(1.0f, 1.0f, x, y, vw, vh, cw, ch);
+    blit_draw(1.0f, 1.0f, w, h, w, x, y, vw, vh, cw, ch);
     return 0;
 }
 
 /* ---- setup ------------------------------------------------------------------------------------------- */
 
-static const psp_gpu_backend GL_BACKEND = { "gl", gl_draw, gl_sync_vram, gl_vram_written, 1 };
+static psp_gpu_backend GL_BACKEND = { "gl", gl_draw, gl_sync_vram, gl_vram_written, 1, NULL };
+
+static void prog_uniforms(draw_prog *p) {
+    p->vp = glGetUniformLocation(p->prog, "vp");
+    p->env = glGetUniformLocation(p->prog, "env");
+    p->tf = glGetUniformLocation(p->prog, "tf");
+    p->at = glGetUniformLocation(p->prog, "at");
+    p->misc = glGetUniformLocation(p->prog, "misc");
+    glUseProgram(p->prog);
+    glUniform1i(glGetUniformLocation(p->prog, "T"), 0);
+}
+
+/* The vertex work on the GPU (gl_draw_tl), when the context has what it
+ * needs: buffer textures and the optional entry points (gl_load.h). */
+static void tl_init(void) {
+#ifndef PSP2I_GLES
+    if (!p_glTexBuffer || !p_glUniform4fv || !p_glUniform4iv || !p_glDrawElements || !p_glCullFace || !p_glFrontFace) {
+        fprintf(stderr, "gl: no buffer textures; the vertex work stays on the CPU\n");
+        return;
+    }
+    g_tlp.prog = gl_program("ge vertex work", TLVS_SRC, FS_SRC);
+    if (!g_tlp.prog) { fprintf(stderr, "gl: the vertex work stays on the CPU\n"); return; }
+    prog_uniforms(&g_tlp);
+    u_tl_u = glGetUniformLocation(g_tlp.prog, "U");
+    for (int k = 0; k < 4; k++) {
+        char name[16];
+        snprintf(name, sizeof name, "U[%d]", TL_GROUPS[k][0]);
+        u_tl_group[k] = glGetUniformLocation(g_tlp.prog, name);
+    }
+    u_tl_li = glGetUniformLocation(g_tlp.prog, "LI");
+    glUniform1i(glGetUniformLocation(g_tlp.prog, "VB"), 2);
+    glUseProgram(0);
+    {   /* GL guarantees only 65536 texels in a buffer texture */
+        GLint texels = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &texels);
+        if ((uint64_t)texels * 4u < g_tlvb_bytes) g_tlvb_bytes = (uint32_t)texels * 4u;
+        if (g_tlvb_bytes < (1u << 20)) {
+            fprintf(stderr, "gl: buffer textures of %d texels only; the vertex work stays on the CPU\n", (int)texels);
+            g_tlp.prog = 0;
+            return;
+        }
+    }
+    glGenBuffers(1, &g_tlvb);
+    glBindBuffer(GL_TEXTURE_BUFFER, g_tlvb);
+    glBufferData(GL_TEXTURE_BUFFER, (GLsizeiptr)g_tlvb_bytes, NULL, GL_STREAM_DRAW);
+    glGenTextures(1, &g_tltex);
+    glBindTexture(GL_TEXTURE_BUFFER, g_tltex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, g_tlvb);
+    glBindTexture(GL_TEXTURE_BUFFER, 0);
+    glGenVertexArrays(1, &g_tlvao);
+    glBindVertexArray(g_tlvao);
+    glGenBuffers(1, &g_tlib);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_tlib);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)TLIB_BYTES, NULL, GL_STREAM_DRAW);
+    glBindVertexArray(0);
+    if (glGetError() != GL_NO_ERROR) { fprintf(stderr, "gl: vertex work setup failed; it stays on the CPU\n"); g_tlp.prog = 0; return; }
+    GL_BACKEND.draw_tl = gl_draw_tl;
+    fprintf(stderr, "gl: the vertex work of 3D draws runs on the GPU\n");
+#endif
+}
 
 int gl_ge_init(void) {
     g_prog = gl_program("ge", VS_SRC, FS_SRC);
     if (!g_prog) return -1;
-    u_vp = glGetUniformLocation(g_prog, "vp");
-    u_env = glGetUniformLocation(g_prog, "env");
-    u_tf = glGetUniformLocation(g_prog, "tf");
-    u_at = glGetUniformLocation(g_prog, "at");
-    u_misc = glGetUniformLocation(g_prog, "misc");
-    u_tex = glGetUniformLocation(g_prog, "T");
-    glUseProgram(g_prog);
-    glUniform1i(u_tex, 0);
+    g_dp.prog = g_prog;
+    prog_uniforms(&g_dp);
     g_xprog = gl_program("transfer", XVS_SRC, XFS_SRC);
     if (g_xprog) {
         u_xdst = glGetUniformLocation(g_xprog, "dst");
@@ -1195,6 +1559,7 @@ int gl_ge_init(void) {
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     if (glGetError() != GL_NO_ERROR) { fprintf(stderr, "gl: setup failed\n"); return -1; }
+    tl_init();
     g_ok = 1;
     psp_gpu_set_backend(&GL_BACKEND);
     psp_mem_set_vram_hook(gl_cpu_access);
@@ -1209,6 +1574,8 @@ void gl_ge_report(FILE *out) {
             (unsigned long long)n_draws, (unsigned long long)n_tris, (unsigned long long)n_uploads,
             (unsigned long long)n_readbacks, (unsigned long long)n_tex_decodes,
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx);
+    fprintf(out, "  gl vertex work      %llu draws transformed and lit on the GPU%s\n", (unsigned long long)n_tl_draws,
+            g_tlp.prog ? "" : " (unavailable: on the CPU)");
     fprintf(out, "  gl readbacks by cause: relayout %llu, evict %llu, grow %llu, texture %llu, overlap %llu, sync %llu, cpu access %llu\n",
             (unsigned long long)n_rb_reason[0], (unsigned long long)n_rb_reason[1], (unsigned long long)n_rb_reason[2],
             (unsigned long long)n_rb_reason[3], (unsigned long long)n_rb_reason[4], (unsigned long long)n_rb_reason[5],

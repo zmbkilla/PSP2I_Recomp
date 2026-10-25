@@ -1017,7 +1017,9 @@ int main(int argc, char **argv) {
     /* the settings menu, with psp2i.ini's choices; what this host cannot do is left out */
     menu_init(&g_menu, fps, g_fps_on);
     g_menu.hidden = MENU_BIT(MENU_SEGA_SERVER) | MENU_BIT(MENU_RESOLUTION) | MENU_BIT(MENU_RENDERER)
-                  | MENU_BIT(MENU_ATTENUATION) | MENU_BIT(MENU_FONT) | MENU_BIT(MENU_TESTS);
+                  | MENU_BIT(MENU_ATTENUATION) | MENU_BIT(MENU_FONT) | MENU_BIT(MENU_TESTS) | MENU_BIT(MENU_QUIT) | MENU_BIT(MENU_DRAW_DIST) | MENU_BIT(MENU_VERTEX_WORK)
+                  | MENU_BIT(MENU_SCALING) | MENU_BIT(MENU_FXAA) | MENU_BIT(MENU_SHARPEN) | MENU_BIT(MENU_SCANLINES)
+                  | MENU_BIT(MENU_BRIGHTNESS) | MENU_BIT(MENU_SATURATION);   /* post-processing: Windows for now */
 #ifndef SDL_PLATFORM_ANDROID
     g_menu.hidden |= MENU_BIT(MENU_ADHOC_SERVER) | MENU_BIT(MENU_MODERN_SERVER)          /* no text entry here */
                    | MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA);

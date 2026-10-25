@@ -6,6 +6,7 @@
 
 #define GL_DEFINE(ret, name, args) PFN_##name p_##name;
 GL_FUNCS(GL_DEFINE)
+GL_FUNCS_OPT(GL_DEFINE)
 #undef GL_DEFINE
 
 int gl_load(void *(*get)(const char *name)) {
@@ -15,6 +16,9 @@ int gl_load(void *(*get)(const char *name)) {
     if (!p_##name) { fprintf(stderr, "gl: missing %s\n", #name); missing++; }
     GL_FUNCS(GL_GET)
 #undef GL_GET
+#define GL_GET_OPT(ret, name, args) p_##name = (PFN_##name)get(#name);
+    GL_FUNCS_OPT(GL_GET_OPT)
+#undef GL_GET_OPT
     return missing;
 }
 

@@ -10,6 +10,8 @@
 
 #include <stdint.h>
 
+#include "postfx.h"
+
 /* Logical menu inputs (held state; menu_update finds the presses). */
 enum {
     MI_TOGGLE  = 1 << 0,   /* the hotkey: opens, and closes */
@@ -21,16 +23,19 @@ enum {
     MI_BACK    = 1 << 6,   /* cancel: closes */
 };
 
-/* Menu items, top to bottom: the main page, then the CONTROLS and TESTS
- * pages (opened from their items; BACK, or Cross, returns to the main page). */
-enum { MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE,
-       MENU_MODERN_SERVER, MENU_RESOLUTION, MENU_RENDERER, MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION,
-       MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_CLOSE,
+/* Menu items, top to bottom: the main page, then the CONTROLS, TESTS and
+ * GRAPHICS pages (opened from their items; BACK, or Cross, returns to the
+ * main page). */
+enum { MENU_GRAPHICS, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE, MENU_MODERN_SERVER,
+       MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION, MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_QUIT, MENU_CLOSE,
        MENU_RS_ON, MENU_RS_SPEED, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
-       MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK, MENU_ITEMS };
-enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS };
+       MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK,
+       MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RESOLUTION, MENU_RENDERER, MENU_DRAW_DIST, MENU_VERTEX_WORK,
+       MENU_SCALING, MENU_FXAA, MENU_SHARPEN, MENU_SCANLINES, MENU_BRIGHTNESS, MENU_SATURATION, MENU_GRAPHICS_BACK,
+       MENU_ITEMS };
+enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS, MENU_PAGE_GRAPHICS };
 int menu_page_of(int item);                      /* MENU_PAGE_* */
-#define MENU_BIT(i) (1u << (i))
+#define MENU_BIT(i) (1ull << (i))
 
 /* Touch controls (the SDL host): colour presets and opacity in tenths. */
 enum { TOUCH_DEFAULT, TOUCH_WHITE, TOUCH_BLACK, TOUCH_YELLOW, TOUCH_CYAN, TOUCH_PINK, TOUCH_COLORS };
@@ -84,6 +89,10 @@ enum {
     MFX_TOUCH       = 1 << 14,  /* touch_color or touch_alpha changed */
     MFX_RS_ON       = 1 << 15,  /* rs_on changed: the right stick turns the camera, or nothing */
     MFX_TESTS       = 1 << 16,  /* test_ticks or test_logic changed (framerate_set_tests) */
+    MFX_DRAW_DIST   = 1 << 17,  /* draw_dist changed (port/switches.txt switch 0) */
+    MFX_POSTFX      = 1 << 18,  /* a post-processing value changed: postfx_set(&post) */
+    MFX_VERTEX      = 1 << 19,  /* gpu_vertex changed (psp_gpu_set_gpu_transform) */
+    MFX_QUIT        = 1 << 20,  /* QUIT GAME: the caller ends the game (as closing the window) */
 };
 
 typedef struct {
@@ -94,6 +103,9 @@ typedef struct {
     int      show_fps;     /* the FPS counter */
     int      rs_step;      /* right-stick sensitivity, 0..MENU_RS_STEPS-1 (1.00x + 0.25x each) */
     int      rs_on;        /* the right stick turns the camera (off: it does nothing) */
+    int      draw_dist;    /* DRAW DISTANCE: the longer far distances (switches.txt 0) */
+    int      gpu_vertex;   /* VERTEX WORK: 3D vertices transformed and lit on the GPU (1) or the CPU */
+    postfx   post;         /* GRAPHICS: scaling, FXAA, sharpen, scanlines, brightness, saturation */
     int      test_ticks;   /* TESTS > TICK PACING: the game's 1/60 s ticks paced as at 30 at 60 too (always above 60) */
     int      test_logic;   /* TESTS > 30 HZ LOGIC: frame-counted functions on 30 Hz frames only */
     int      res;          /* RES_*: output resolution */
@@ -112,7 +124,7 @@ typedef struct {
     int      swap_oc;      /* Circle and Cross exchanged (the help line follows) */
     int      touch_color;  /* TOUCH_*: the touch controls' colour */
     int      touch_alpha;  /* their opacity in tenths, TOUCH_ALPHA_MIN..10 */
-    uint32_t hidden;       /* MENU_BIT(item)s this host leaves out (not drawn, skipped);
+    uint64_t hidden;       /* MENU_BIT(item)s this host leaves out (not drawn, skipped);
                               menu_init hides the touch items */
     uint32_t prev;         /* MI_* held last update, for press detection */
     int      hold;         /* updates Up/Down has been held, for auto-repeat */
