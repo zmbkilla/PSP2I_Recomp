@@ -457,6 +457,8 @@ static uint32_t host_key(WPARAM vk) {
 static int g_swap_oc;                       /* Circle <-> Cross (menu CIRCLE/CROSS, swap_circle_cross=) */
 static float g_rs_saved;                    /* menu CONTROLS > SENSITIVITY (rs_speed=; 0: not saved yet) */
 static int g_rs_on = 1;                     /* menu CONTROLS > RIGHT STICK (right_stick=on/off) */
+static int g_deadzone_pct;                  /* menu CONTROLS > STICK DEADZONE (stick_deadzone=, 0 = the game's own) */
+static int g_mouse_cam;                     /* menu CONTROLS > MOUSE CAMERA (mouse_camera=on/off) */
 static int g_test_ticks, g_test_logic;      /* menu TESTS (test_tick_pacing= / test_30hz_logic=; framerate.c) */
 static int g_draw_dist;                     /* menu DRAW DISTANCE (draw_distance=far/normal; switches.txt 0) */
 static int g_vertex_arg = -1;               /* --vertex-work gpu|cpu (tests): over the ini */
@@ -478,23 +480,100 @@ static void draw_dist_apply(void) {
     }
 }
 
-static uint32_t key_bit(WPARAM vk) {
-    if (g_swap_oc && (vk == 'X' || vk == 'Z')) vk = vk == 'X' ? 'Z' : 'X';
-    switch (vk) {
-    case VK_UP:     return 0x0010;
-    case VK_RIGHT:  return 0x0020;
-    case VK_DOWN:   return 0x0040;
-    case VK_LEFT:   return 0x0080;
-    case 'Q':       return 0x0100;   /* L */
-    case 'W':       return 0x0200;   /* R */
-    case 'S':       return 0x1000;   /* triangle */
-    case 'X':       return 0x2000;   /* circle */
-    case 'Z':       return 0x4000;   /* cross */
-    case 'A':       return 0x8000;   /* square */
-    case VK_RETURN: return 0x0008;   /* start */
-    case VK_SPACE:  return 0x0001;   /* select */
-    default:        return 0;
+/* The keys and mouse buttons bound to the PSP's controls (menu CONTROLS > KEYBOARD/MOUSE, key_*= in
+ * psp2i_display.ini), KB_* order; 0 = none. Each key is bound to one control.
+ * Defaults: arrows the D-pad, S/X/Z/A Triangle/Circle/Cross/Square, Q/W L/R,
+ * Enter Start, Space Select, and the left stick on I/K/J/L (as the SDL host). */
+static const WPARAM KEY_DEFAULTS[KB_N] = { VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, 'S', 'X', 'Z', 'A', 'Q', 'W',
+                                           VK_RETURN, VK_SPACE, 'I', 'K', 'J', 'L' };
+static const char *const KEY_INI[KB_N] = { "up", "down", "left", "right", "triangle", "circle", "cross", "square",
+                                           "l", "r", "start", "select", "stick_up", "stick_down", "stick_left", "stick_right" };
+static const uint32_t KEY_PSP[KB_STICK_UP] = { 0x0010, 0x0040, 0x0080, 0x0020, 0x1000, 0x2000, 0x4000, 0x8000,
+                                                0x0100, 0x0200, 0x0008, 0x0001 };
+static WPARAM g_bind[KB_N] = { VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, 'S', 'X', 'Z', 'A', 'Q', 'W',
+                               VK_RETURN, VK_SPACE, 'I', 'K', 'J', 'L' };
+
+/* A key's name, as the menu and the ini show it (the menu font's characters). */
+static const struct { WPARAM vk; const char *name; } KEY_NAMES[] = {
+    { VK_UP, "UP" }, { VK_DOWN, "DOWN" }, { VK_LEFT, "LEFT" }, { VK_RIGHT, "RIGHT" },
+    { VK_RETURN, "ENTER" }, { VK_SPACE, "SPACE" }, { VK_TAB, "TAB" }, { VK_SHIFT, "SHIFT" },
+    { VK_CONTROL, "CTRL" }, { VK_CAPITAL, "CAPS LOCK" }, { VK_INSERT, "INSERT" }, { VK_DELETE, "DELETE" },
+    { VK_HOME, "HOME" }, { VK_END, "END" }, { VK_PRIOR, "PAGE UP" }, { VK_NEXT, "PAGE DOWN" },
+    { VK_MULTIPLY, "NUM *" }, { VK_ADD, "NUM +" }, { VK_SUBTRACT, "NUM -" }, { VK_DECIMAL, "NUM ." },
+    { VK_DIVIDE, "NUM /" }, { VK_OEM_1, "SEMICOLON" }, { VK_OEM_PLUS, "=" }, { VK_OEM_COMMA, "," },
+    { VK_OEM_MINUS, "-" }, { VK_OEM_PERIOD, "." }, { VK_OEM_2, "/" }, { VK_OEM_3, "~" }, { VK_OEM_4, "[" },
+    { VK_OEM_5, "BACKSLASH" }, { VK_OEM_6, "]" }, { VK_OEM_7, "QUOTE" },
+    { VK_LBUTTON, "MOUSE LEFT" }, { VK_RBUTTON, "MOUSE RIGHT" }, { VK_MBUTTON, "MOUSE MIDDLE" },
+    { VK_XBUTTON1, "MOUSE 4" }, { VK_XBUTTON2, "MOUSE 5" },
+};
+static void key_name(WPARAM vk, char *out, size_t cap) {
+    if (!vk) { out[0] = '\0'; return; }
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) { snprintf(out, cap, "%c", (char)vk); return; }
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) { snprintf(out, cap, "NUM %d", (int)(vk - VK_NUMPAD0)); return; }
+    if (vk >= VK_F1 && vk <= VK_F24) { snprintf(out, cap, "F%d", (int)(vk - VK_F1 + 1)); return; }
+    for (size_t i = 0; i < sizeof KEY_NAMES / sizeof KEY_NAMES[0]; i++)
+        if (KEY_NAMES[i].vk == vk) { snprintf(out, cap, "%s", KEY_NAMES[i].name); return; }
+    snprintf(out, cap, "KEY %02X", (unsigned)vk);
+}
+/* ... and back (any case); 0 for "none" or a name not known. */
+static WPARAM key_parse(const char *s) {
+    char want[24];
+    snprintf(want, sizeof want, "%s", s);
+    want[strcspn(want, "\r\n")] = '\0';
+    for (char *p = want; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
+    for (WPARAM vk = 1; vk < 256; vk++) {
+        char n[24];
+        key_name(vk, n, sizeof n);
+        if (!strcmp(n, want)) return vk;
     }
+    return 0;
+}
+/* The bound keys' names into the menu. */
+static void keys_to_menu(void) {
+    for (int i = 0; i < KB_N; i++) key_name(g_bind[i], g_menu.key_name[i], sizeof g_menu.key_name[i]);
+}
+
+/* The left stick on the keyboard. Bits: 1 up, 2 down, 4 left, 8 right. */
+static unsigned g_kstick;
+static unsigned key_stick(WPARAM vk) {
+    unsigned b = 0;
+    for (int i = KB_STICK_UP; i < KB_N; i++) if (g_bind[i] == vk) b |= 1u << (i - KB_STICK_UP);
+    return b;
+}
+/* The stick the keys hold, over the controllers' (centred: 128). */
+static void key_stick_apply(uint8_t *ax, uint8_t *ay) {
+    if (!g_kstick) return;
+    *ax = (uint8_t)(128 + 127 * (((g_kstick & 8) != 0) - ((g_kstick & 4) != 0)));
+    *ay = (uint8_t)(128 + 127 * (((g_kstick & 2) != 0) - ((g_kstick & 1) != 0)));
+}
+
+/* The PSP buttons a key presses (CIRCLE/CROSS swapped exchanges those two). */
+static uint32_t key_bit(WPARAM vk) {
+    uint32_t b = 0;
+    for (int i = 0; i < KB_STICK_UP; i++) if (g_bind[i] == vk) b |= KEY_PSP[i];
+    if (g_swap_oc && (b & 0x6000) && (b & 0x6000) != 0x6000) b ^= 0x6000;
+    return b;
+}
+
+/* KEYBOARD: a row waits for a key. Escape cancels; the menu's hotkey and
+ * Backspace (the menu's Back) cannot be bound. The key leaves any other
+ * control it was on, and every held key is let go (the mapping changed). */
+static int g_keys_save;                     /* a key was bound: the ini is saved with the menu's changes */
+static int key_capture(WPARAM vk, int first) {
+    if (!g_menu.open || !g_menu.key_wait) return 0;
+    if (!first) return 1;
+    if (vk == VK_ESCAPE) { menu_key_done(&g_menu); return 1; }
+    if (vk == g_menu_vk || vk == VK_BACK) return 1;
+    const int k = g_menu.key_wait - MENU_KEY_FIRST;
+    for (int i = 0; i < KB_N; i++) if (g_bind[i] == vk) g_bind[i] = 0;
+    g_bind[k] = vk;
+    g_keys = 0;
+    g_kstick = 0;
+    keys_to_menu();
+    menu_key_done(&g_menu);
+    g_keys_save = 1;                                         /* saved with the menu's changes */
+    fprintf(stderr, "menu: key %s -> %s\n", g_menu.key_name[k], KEY_INI[k]);
+    return 1;
 }
 
 /* The window's messages, on the game thread (window_pump, from the window
@@ -522,6 +601,7 @@ static void game_msg(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return;
         }
 #endif
+        if (key_capture(wp, first)) return;
         if (text_ui_open() && wp != g_menu_vk) {
             uint32_t k = 0;
             switch (wp) {
@@ -539,6 +619,7 @@ static void game_msg(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         const uint32_t hk = host_key(wp);
         if (hk) { g_host_held |= hk; if (first) g_host_latched |= hk; return; }
+        if (key_stick(wp)) { g_kstick |= key_stick(wp); ctrl_commit(); return; }
         if (first) g_keys_latched |= key_bit(wp);
         g_keys |= key_bit(wp);  ctrl_commit(); return;
     }
@@ -552,7 +633,7 @@ static void game_msg(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case VK_ESCAPE: g_login_keys &= ~MI_BACK; break;
         default: break;
         }
-        g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); ctrl_commit(); return;
+        g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); g_kstick &= ~key_stick(wp); ctrl_commit(); return;
     case WM_SYSKEYDOWN:
         if (wp == VK_RETURN && (lp & (1 << 29))) {               /* Alt+Enter */
             if (!(lp & (1 << 30))) g_alt_enter = 1;
@@ -623,13 +704,79 @@ static void winq_push(UINT msg, WPARAM wp, LPARAM lp) {
     LeaveCriticalSection(&g_winq_lock);
 }
 
+/* MOUSE CAMERA. The window thread reads the mouse's raw movement (WM_INPUT:
+ * counts, not the cursor -- it never stops at the screen's edge) and, while
+ * the game thread asks (WM_APP_MOUSECAP: on, the game playing; off, the menu
+ * or the sign-in screen open), holds the cursor: hidden, kept in the window.
+ * Losing focus lets it go; coming back takes it again. */
+#define WM_APP_MOUSECAP (WM_APP + 7)
+static volatile LONG g_mouse_dx, g_mouse_dy;   /* movement since the game thread took it */
+static volatile LONG g_mouse_held;             /* the cursor is held (the movement counts) */
+static int g_mouse_want;                        /* (window thread) the game asks for it */
+
+static void mouse_hold(HWND h, int on) {
+    if (on) {
+        RECT r;
+        GetClientRect(h, &r);
+        POINT a = { r.left, r.top }, b = { r.right, r.bottom };
+        ClientToScreen(h, &a);
+        ClientToScreen(h, &b);
+        const RECT s = { a.x, a.y, b.x, b.y };
+        ClipCursor(&s);
+        if (!g_mouse_held) while (ShowCursor(FALSE) >= 0) {}
+    } else {
+        ClipCursor(NULL);
+        if (g_mouse_held) while (ShowCursor(TRUE) < 0) {}
+    }
+    InterlockedExchange(&g_mouse_held, on);
+}
+
 #define STUCK_TIMER 1
 static volatile LONG g_game_stopped;   /* the game loop has returned: the clean-up and report run (any length) */
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_INPUT: {
+        RAWINPUT ri;
+        UINT sz = sizeof ri;
+        if (g_mouse_held && GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &sz, sizeof(RAWINPUTHEADER)) != (UINT)-1
+            && ri.header.dwType == RIM_TYPEMOUSE && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
+            InterlockedExchangeAdd(&g_mouse_dx, ri.data.mouse.lLastX);
+            InterlockedExchangeAdd(&g_mouse_dy, ri.data.mouse.lLastY);
+        }
+        break;                                                    /* DefWindowProc frees it */
+    }
+    case WM_APP_MOUSECAP:
+        g_mouse_want = (int)wp;
+        mouse_hold(h, g_mouse_want && GetForegroundWindow() == h);
+        return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE) { if (g_mouse_held) mouse_hold(h, 0); }
+        else if (g_mouse_want) mouse_hold(h, 1);
+        break;
+    case WM_MOVE:
+        if (g_mouse_held) mouse_hold(h, 1);                       /* the window moved: clip to where it is */
+        break;
+    case WM_SETCURSOR:
+        if (g_mouse_held && LOWORD(lp) == HTCLIENT) { SetCursor(NULL); return TRUE; }
+        break;
     case WM_CHAR: case WM_KEYDOWN: case WM_KEYUP:
         winq_push(msg, wp, lp);
         return 0;
+    /* Mouse buttons go to the game thread as keys (VK_LBUTTON ..., bindable in
+     * CONTROLS > KEYBOARD); the window keeps the mouse while one is down, so
+     * a release outside it still arrives. */
+    case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN:
+    case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP: {
+        const int down = msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN || msg == WM_XBUTTONDOWN;
+        const WPARAM vk = msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ? VK_LBUTTON
+                        : msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ? VK_RBUTTON
+                        : msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP ? VK_MBUTTON
+                        : GET_XBUTTON_WPARAM(wp) == XBUTTON2 ? VK_XBUTTON2 : VK_XBUTTON1;
+        winq_push(down ? WM_KEYDOWN : WM_KEYUP, vk, 0);
+        if (down) SetCapture(h);
+        else if (!(GET_KEYSTATE_WPARAM(wp) & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2))) ReleaseCapture();
+        return msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP ? TRUE : 0;
+    }
     case WM_SYSKEYDOWN:
         if (wp == VK_RETURN && (lp & (1 << 29))) { winq_push(msg, wp, lp); return 0; }   /* Alt+Enter */
         break;
@@ -637,6 +784,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == '\r') return 0;                                 /* no beep for Alt+Enter */
         break;
     case WM_SIZE:
+        if (g_mouse_held) mouse_hold(h, 1);
         winq_push(msg, wp, lp);
         web_overlay_post(WEB_POST_RESIZE);     /* the game thread may be in the page's own loop */
         return 0;
@@ -677,6 +825,10 @@ static DWORD WINAPI window_thread(LPVOID arg) {
                           NULL, NULL, wc->hInstance, NULL);
     SetEvent(g_win_ready);
     if (!g_wnd) return 1;
+    {   /* the mouse's raw movement, for MOUSE CAMERA */
+        RAWINPUTDEVICE rid = { 0x01, 0x02, 0, g_wnd };
+        RegisterRawInputDevices(&rid, 1, sizeof rid);
+    }
     MSG m;
     while (GetMessageA(&m, NULL, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageA(&m); }
     return 0;
@@ -1014,6 +1166,9 @@ static void ctrl_commit(void) {
     bits |= g_keys;
 #endif
     uint8_t ax = g_pad_ax, ay = g_pad_ay;
+#ifdef _WIN32
+    key_stick_apply(&ax, &ay);
+#endif
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     if (g_rep_on) { bits |= g_rep_bits; ax = g_rep_ax; ay = g_rep_ay; }
     /* The settings menu takes all input while open (menu_filter_game). */
@@ -1071,6 +1226,16 @@ static int display_load(void) {
         else if (!strncmp(line, "swap_circle_cross=", 18)) g_swap_oc = !strncmp(line + 18, "on", 2);
         else if (!strncmp(line, "rs_speed=", 9))       g_rs_saved = (float)atof(line + 9);
         else if (!strncmp(line, "right_stick=", 12))   g_rs_on = strncmp(line + 12, "off", 3) != 0;
+        else if (!strncmp(line, "stick_deadzone=", 15)) g_deadzone_pct = atoi(line + 15);
+        else if (!strncmp(line, "mouse_camera=", 13))  g_mouse_cam = !strncmp(line + 13, "on", 2);
+#ifdef _WIN32
+        else if (!strncmp(line, "key_", 4)) {
+            for (int i = 0; i < KB_N; i++) {
+                const size_t n = strlen(KEY_INI[i]);
+                if (!strncmp(line + 4, KEY_INI[i], n) && line[4 + n] == '=') { g_bind[i] = key_parse(line + 5 + n); break; }
+            }
+        }
+#endif
         else if (!strncmp(line, "test_tick_pacing=", 17)) g_test_ticks = !strncmp(line + 17, "on", 2);
         else if (!strncmp(line, "draw_distance=", 14))    g_draw_dist = !strncmp(line + 14, "far", 3);
         else if (!strncmp(line, "vertex_work=", 12))      g_gpu_vertex = strncmp(line + 12, "cpu", 3) != 0;
@@ -1114,6 +1279,16 @@ static void display_save(int res) {
     fprintf(f, "swap_circle_cross=%s\n", g_swap_oc ? "on" : "off");
     fprintf(f, "; the right stick: on = it turns the camera, off = it does nothing; rs_speed 1.00..2.00\n");
     fprintf(f, "right_stick=%s\nrs_speed=%.2f\n", g_rs_on ? "on" : "off", (double)menu_rs_speed(&g_menu));
+    fprintf(f, "; controller sticks: dead zone in %% (0 = the game's own); the mouse turns the camera (on/off)\n");
+    fprintf(f, "stick_deadzone=%d\nmouse_camera=%s\n", g_deadzone_pct, g_mouse_cam ? "on" : "off");
+#ifdef _WIN32
+    fprintf(f, "; the keys on the PSP's controls (menu CONTROLS > KEYBOARD): a letter, a digit, F1.., UP, ENTER, SPACE, NUM 5, MOUSE LEFT/RIGHT/MIDDLE/4/5, ...; none = no key\n");
+    for (int i = 0; i < KB_N; i++) {
+        char n[16];
+        key_name(g_bind[i], n, sizeof n);
+        fprintf(f, "key_%s=%s\n", KEY_INI[i], n[0] ? n : "none");
+    }
+#endif
     fprintf(f, "; menu TESTS at 60 / 120 fps (off by default): the game's tick counters paced as at 30; frame-counted logic at 30 Hz\n");
     fprintf(f, "test_tick_pacing=%s\ntest_30hz_logic=%s\n", g_test_ticks ? "on" : "off", g_test_logic ? "on" : "off");
     fprintf(f, "; far = the longer draw distance (off while saving), normal = the game's\n");
@@ -1175,6 +1350,9 @@ static void menu_step(void) {
     }
 #endif
     uint8_t ax = g_pad_ax, ay = g_pad_ay;
+#ifdef _WIN32
+    key_stick_apply(&ax, &ay);
+#endif
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     uint32_t held = menu_inputs(psp, ax, ay) | g_host_held;
     if (input_sdl_host_buttons() & (INPUT_HOST_GUIDE | INPUT_HOST_RSTICK)) held |= MI_TOGGLE;
@@ -1316,6 +1494,30 @@ static void menu_step(void) {
         if (!g_headless) display_save(g_res_saved);
         fprintf(stderr, "menu: right stick %s (saved)\n", g_rs_on ? "turns the camera" : "off");
     }
+    if (fx & MFX_DEADZONE) {
+        g_deadzone_pct = menu_deadzone_pct(&g_menu);
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: stick dead zone %d%% (saved)\n", g_deadzone_pct);
+    }
+    if (fx & MFX_MOUSE_CAM) {
+        g_mouse_cam = g_menu.mouse_cam;
+        if (!g_headless) display_save(g_res_saved);
+        fprintf(stderr, "menu: mouse camera %s (saved)\n", g_mouse_cam ? "on" : "off");
+    }
+#ifdef _WIN32
+    if (fx & MFX_KEYS_RESET) {
+        memcpy(g_bind, KEY_DEFAULTS, sizeof g_bind);
+        g_keys = 0;
+        g_kstick = 0;
+        keys_to_menu();
+        g_keys_save = 1;
+        fprintf(stderr, "menu: keyboard back to the default keys\n");
+    }
+    if (g_keys_save) {
+        g_keys_save = 0;
+        if (!g_headless) display_save(g_res_saved);
+    }
+#endif
     if (fx & MFX_RS_SPEED) {
         camera_set_speed(menu_rs_speed(&g_menu));
         if (!g_headless) display_save(g_res_saved);
@@ -1328,11 +1530,30 @@ static void menu_step(void) {
     }
 }
 
+#ifdef _WIN32
+/* MOUSE CAMERA, once per vblank: ask the window thread to hold the cursor
+ * while the game is being played, and hand the movement to the camera. */
+static void mouse_camera_step(void) {
+    static int asked = -1;
+    static uint64_t last_us;
+    const int want = g_menu.mouse_cam && !g_menu.open && g_login.state == LOGIN_CLOSED && !web_overlay_active() && !g_headless;
+    if (want != asked && g_wnd) { PostMessageA(g_wnd, WM_APP_MOUSECAP, (WPARAM)want, 0); asked = want; }
+    const uint64_t now = psp_sched_now_us();
+    const LONG dx = InterlockedExchange(&g_mouse_dx, 0), dy = InterlockedExchange(&g_mouse_dy, 0);
+    const int on = want && g_mouse_held;
+    camera_mouse(on ? (int)dx : 0, on ? (int)dy : 0, last_us ? (double)(now - last_us) / 1e6 : 0.0);
+    last_us = now;
+}
+#endif
+
 /* The right stick for the camera (camera.c): SDL, or --rstick in scripts;
  * centred while the settings menu is open or the stick is turned off there. */
 static void update_camera_stick(uint64_t vb) {
     uint8_t rx = 128, ry = 128;
-    if (g_sdl_on) input_sdl_right_stick(&rx, &ry);
+    if (g_sdl_on) { input_sdl_right_stick(&rx, &ry); stick_deadzone(&rx, &ry, g_deadzone_pct); }
+#ifdef _WIN32
+    mouse_camera_step();
+#endif
     for (int i = 0; i < g_nrstick; i++)
         if (vb >= g_rstick[i].at && vb < g_rstick[i].at + g_rstick[i].len) { rx = g_rstick[i].x; ry = g_rstick[i].y; }
     if (g_rep_on) { rx = g_rep_rx; ry = g_rep_ry; }
@@ -1346,6 +1567,7 @@ static void poll_controllers(void) {
     uint32_t b;
     uint8_t ax, ay;
     input_sdl_poll(&b, &ax, &ay);
+    stick_deadzone(&ax, &ay, g_deadzone_pct);
     if (b != g_pad_bits || ax != g_pad_ax || ay != g_pad_ay) {
         g_pad_bits = b; g_pad_ax = ax; g_pad_ay = ay;
         ctrl_commit();
@@ -2744,6 +2966,13 @@ int main(int argc, char **argv) {
     framerate_set_log(gamelog_note);
     menu_set_rs_speed(&g_menu, !rs_arg && g_rs_saved > 0.0f ? g_rs_saved : rs_speed);
     g_menu.rs_on = g_rs_on;
+    menu_set_deadzone_pct(&g_menu, g_deadzone_pct);
+    g_menu.mouse_cam = g_mouse_cam;
+#ifdef _WIN32
+    keys_to_menu();
+#else
+    g_menu.hidden |= MENU_BIT(MENU_KEYS);
+#endif
     g_menu.test_ticks = g_test_ticks;
     g_menu.draw_dist = g_draw_dist;
     if (g_vertex_arg >= 0) g_gpu_vertex = g_vertex_arg;

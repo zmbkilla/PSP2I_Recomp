@@ -247,6 +247,35 @@ static void hook_hud_show(void (*original)(void)) {
     original();
 }
 
+/* A slot's object called through its function table (0x08AC1BD8: a0 = the
+ * owner, a1 = the slot, 64 bytes from +24; the call is table[7]). Equipping
+ * NiGHTSdoog or Uransara left a slot pointing at memory reused for model
+ * data -- its "function table" a float (0x429ED92A) -- and the call went to
+ * address 0: the game aborted (tester's crash logs). A slot whose table or
+ * handler is not game code is passed over as the game passes an empty one
+ * (returns 0), and logged, so the effect is missed instead of the game. */
+static void (*g_log)(const char *fmt, ...);   /* the game log (framerate_set_log) */
+#define FN_SLOT_CALL 0x08AC1BD8u
+static int slot_code(uint32_t a) { return a >= 0x08804000u && a < 0x08E00000u && !(a & 3); }
+static int slot_data(uint32_t a) { return a >= 0x08800000u && a < 0x0A000000u && !(a & 3); }
+static void hook_slot_call(void (*original)(void)) {
+    const uint32_t owner = psp_cpu.r[4], slot = psp_cpu.r[5];
+    const uint32_t obj = slot_data(owner) ? psp_read32(owner + (slot << 6) + 24) : 0;
+    if (obj) {
+        const uint32_t table = slot_data(obj) ? psp_read32(obj) : 0;
+        const uint32_t fn = slot_data(table) ? psp_read32(table + 28) : 0;
+        if (!slot_code(fn)) {
+            static int logged;
+            if (g_log && logged++ < 20)
+                g_log("[slot] owner 0x%08X slot %u: object 0x%08X, table 0x%08X, handler 0x%08X -- not game code: "
+                      "passed over (from 0x%08X)", owner, slot, obj, table, fn, psp_cpu.r[31]);
+            psp_cpu.r[2] = 0;
+            return;
+        }
+    }
+    original();
+}
+
 /* ## The effects' clock
  *
  * Effects advance their time (effect+144) by the effect manager's step, +4,
@@ -304,7 +333,7 @@ static uint32_t g_fio_req;             /* ... that request */
 static int g_serving;                  /* the port is serving requests at a check */
 static int g_dlc_spin;                 /* a DLC file's stages run back to back (hook_load_wait) */
 static uint64_t g_served;
-static void (*g_log)(const char *fmt, ...);   /* the game log (framerate_set_log) */
+
 void framerate_set_log(void (*fn)(const char *fmt, ...)) { g_log = fn; }
 
 static void hook_fio_request(void (*original)(void)) {
@@ -632,6 +661,7 @@ void framerate_init(int fps) {
     psp_hook_set(FN_STEPPED_NEW, hook_stepped_new);
     psp_hook_set(FN_STEPPED_UPD, hook_stepped_update);
     psp_hook_set(FN_HUD_SHOW, hook_hud_show);
+    psp_hook_set(FN_SLOT_CALL, hook_slot_call);
     psp_hook_set(FN_FIO_REQUEST, hook_fio_request);
     psp_hook_set(FN_FIO_TAKE, hook_fio_take);
     psp_hook_set(FN_FIO_DONE_A, hook_fio_done);

@@ -24,6 +24,19 @@ float camera_speed(void);
 /* The right stick, once per vblank (PSP-style bytes). */
 void  camera_set_stick(uint8_t rx, uint8_t ry);
 
+/* The mouse, once per vblank: its movement (counts) over dt seconds. The
+ * camera turns at a rate that follows the mouse's speed -- the stick's full
+ * turn at MOUSE_FULL_SPEED counts a second, up to MOUSE_MAX times that --
+ * times the sensitivity, added to the stick's. */
+#define MOUSE_FULL_SPEED 1200.0f
+#define MOUSE_MAX        3.0f
+void  camera_mouse(int dx, int dy, double dt);
+
+/* A controller stick's dead zone (percent of full tilt, 0: none): inside it
+ * the stick is centred, beyond it the rest of the range is spread back to
+ * full, so a drifting stick stays still and full tilt is still full. */
+void  stick_deadzone(uint8_t *x, uint8_t *y, int pct);
+
 /* What the hooks apply, for tests and diagnostics. */
 float camera_x(void);
 float camera_y(void);

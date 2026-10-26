@@ -98,6 +98,16 @@ uint32_t menu_inputs_from_psp(uint32_t psp, uint8_t ax, uint8_t ay) {
 
 float menu_rs_speed(const menu_state *m) { return 1.0f + 0.25f * (float)m->rs_step; }
 
+int menu_deadzone_pct(const menu_state *m) { return 5 * m->deadzone; }
+void menu_set_deadzone_pct(menu_state *m, int pct) {
+    const int k = (pct + 2) / 5;
+    m->deadzone = k < 0 ? 0 : k >= MENU_DZ_STEPS ? MENU_DZ_STEPS - 1 : k;
+}
+
+void menu_key_done(menu_state *m) { m->key_wait = 0; }
+
+static int is_binding(int item) { return item >= MENU_KEY_FIRST && item < MENU_KEY_FIRST + KB_N; }
+
 void menu_set_rs_speed(menu_state *m, float speed) {
     int k = (int)((speed - 1.0f) / 0.25f + 0.5f);
     m->rs_step = k < 0 ? 0 : k >= MENU_RS_STEPS ? MENU_RS_STEPS - 1 : k;
@@ -131,6 +141,8 @@ static int change(menu_state *m, int dir) {
         return MFX_AUDIO;
     case MENU_SWAP_OC:     m->swap_oc = !m->swap_oc; return MFX_SWAP_OC;
     case MENU_RS_ON:       m->rs_on = !m->rs_on; return MFX_RS_ON;
+    case MENU_MOUSE_CAM:   m->mouse_cam = !m->mouse_cam; return MFX_MOUSE_CAM;
+    case MENU_KEYS_RESET:  return dir == 0 ? MFX_KEYS_RESET : 0;
     case MENU_DRAW_DIST:   m->draw_dist = !m->draw_dist; return MFX_DRAW_DIST;
     case MENU_VERTEX_WORK: m->gpu_vertex = !m->gpu_vertex; return MFX_VERTEX;
     case MENU_SCALING:     m->post.scaling = (m->post.scaling + (dir < 0 ? PF_FILTERS - 1 : 1)) % PF_FILTERS; return MFX_POSTFX;
@@ -170,6 +182,13 @@ static int change(menu_state *m, int dir) {
     case MENU_RESOLUTION:
         m->res = (m->res + (dir < 0 ? RES_MODES - 1 : 1)) % RES_MODES;
         return MFX_RES_CHANGED;
+    case MENU_DEADZONE: {                      /* Left/Right step and stop, Confirm cycles */
+        const int old = m->deadzone;
+        if (dir < 0)      { if (m->deadzone > 0) m->deadzone--; }
+        else if (dir > 0) { if (m->deadzone < MENU_DZ_STEPS - 1) m->deadzone++; }
+        else              m->deadzone = (m->deadzone + 1) % MENU_DZ_STEPS;
+        return m->deadzone != old ? MFX_DEADZONE : 0;
+    }
     case MENU_RS_SPEED: {
         const int old = m->rs_step;
         if (dir < 0)      { if (m->rs_step > 0) m->rs_step--; }
@@ -177,28 +196,32 @@ static int change(menu_state *m, int dir) {
         else              m->rs_step = (m->rs_step + 1) % MENU_RS_STEPS;
         return m->rs_step != old ? MFX_RS_SPEED : 0;
     }
-    default:               return 0;
+    default:
+        if (is_binding(m->sel) && dir == 0) { m->key_wait = m->sel; return MFX_KEY_WAIT; }
+        return 0;
     }
 }
 
 int menu_page_of(int item) {
-    return item >= MENU_FRAME_RATE ? MENU_PAGE_GRAPHICS : item >= MENU_TEST_TICKS ? MENU_PAGE_TESTS
+    return item >= MENU_KEY_FIRST ? MENU_PAGE_KEYS : item >= MENU_FRAME_RATE ? MENU_PAGE_GRAPHICS : item >= MENU_TEST_TICKS ? MENU_PAGE_TESTS
          : item >= MENU_RS_ON ? MENU_PAGE_CONTROLS : MENU_PAGE_MAIN;
 }
 
-/* The main page's item that opens a sub-page (where BACK returns to). */
+/* The item that opens a sub-page (where BACK returns to), and the page it is on. */
 static int page_item(int page) {
-    return page == MENU_PAGE_TESTS ? MENU_TESTS : page == MENU_PAGE_GRAPHICS ? MENU_GRAPHICS : MENU_CONTROLS;
+    return page == MENU_PAGE_TESTS ? MENU_TESTS : page == MENU_PAGE_GRAPHICS ? MENU_GRAPHICS
+         : page == MENU_PAGE_KEYS ? MENU_KEYS : MENU_CONTROLS;
 }
+static int parent_page(int page) { return page == MENU_PAGE_KEYS ? MENU_PAGE_CONTROLS : MENU_PAGE_MAIN; }
 
-/* The page a main-page item opens, or -1. */
+/* The page an item opens, or -1. */
 static int opens_page(int item) {
     return item == MENU_CONTROLS ? MENU_PAGE_CONTROLS : item == MENU_TESTS ? MENU_PAGE_TESTS
-         : item == MENU_GRAPHICS ? MENU_PAGE_GRAPHICS : -1;
+         : item == MENU_GRAPHICS ? MENU_PAGE_GRAPHICS : item == MENU_KEYS ? MENU_PAGE_KEYS : -1;
 }
 
 static int is_back(int item) {
-    return item == MENU_CONTROLS_BACK || item == MENU_TESTS_BACK || item == MENU_GRAPHICS_BACK;
+    return item == MENU_CONTROLS_BACK || item == MENU_TESTS_BACK || item == MENU_GRAPHICS_BACK || item == MENU_KEYS_BACK;
 }
 
 /* On the page shown, and not left out by this host. */
@@ -221,12 +244,17 @@ int menu_update(menu_state *m, uint32_t held, uint32_t latched) {
     int fx = 0;
 
     if (!m->open) {
+        m->key_wait = 0;
         if (press & MI_TOGGLE) { m->open = 1; go_page(m, MENU_PAGE_MAIN, -1); fx |= MFX_OPENED; }
         return fx;
     }
+    if (m->key_wait) {                          /* waiting for a key (the caller's): Back cancels */
+        if (press & (MI_BACK | MI_TOGGLE)) m->key_wait = 0;
+        return fx;
+    }
     if (press & MI_TOGGLE) { m->open = 0; return fx | MFX_CLOSED; }
-    if (press & MI_BACK) {                      /* a sub-page backs out to the main page */
-        if (m->page != MENU_PAGE_MAIN) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return fx; }
+    if (press & MI_BACK) {                      /* a sub-page backs out to the page it was opened from */
+        if (m->page != MENU_PAGE_MAIN) { go_page(m, parent_page(m->page), page_item(m->page)); return fx; }
         m->open = 0;
         return fx | MFX_CLOSED;
     }
@@ -255,7 +283,7 @@ int menu_update(menu_state *m, uint32_t held, uint32_t latched) {
         } else if (opens_page(m->sel) >= 0) {
             if (press & (MI_CONFIRM | MI_RIGHT)) go_page(m, opens_page(m->sel), -1);
         } else if (is_back(m->sel)) {
-            if (press & (MI_CONFIRM | MI_LEFT)) go_page(m, MENU_PAGE_MAIN, page_item(m->page));
+            if (press & (MI_CONFIRM | MI_LEFT)) go_page(m, parent_page(m->page), page_item(m->page));
         } else {
             fx |= change(m, (press & MI_LEFT) ? -1 : (press & MI_RIGHT) ? 1 : 0);
         }
@@ -398,7 +426,7 @@ static void frame(menu_image *img, int x, int y, int w, int h, uint32_t rgb) {
 #define ORANGE 0xFF9040u
 
 /* The box: 261 pixels tall with 16 items shown, one row more or less per
- * item on the page. */
+ * item on the page; KEYBOARD (18 rows) leaves out the two frame-rate lines. */
 static int shown_items(const menu_state *m) {
     int n = 0;
     for (int i = 0; i < MENU_ITEMS; i++) n += shown(m, i);
@@ -408,24 +436,28 @@ static int shown_items(const menu_state *m) {
 #define ROW_H (CELL_H + 2)
 #define ROWS_Y (8 + CELL_H + 8)     /* the first item's row, from the box's top */
 #define VALUE_X 130                 /* the values' column, from the box's left */
+#define KEYS_SAVED (2 * CELL_H + 6)  /* the frame-rate lines KEYBOARD does without */
 
 void menu_box(const menu_state *m, int w, int h, int *x, int *y, int *bw, int *bh) {
     *bw = BOX_W;
-    *bh = 261 + ROW_H * (shown_items(m) - 16);
+    *bh = 261 + ROW_H * (shown_items(m) - 16) - (m->page == MENU_PAGE_KEYS ? KEYS_SAVED : 0);
     *x = (w - *bw) / 2;
     *y = (h - *bh) / 2;
 }
 
+/* Items a tap activates (no step down / up). */
 static int is_editor(int item) {
-    return item == MENU_SEGA_SERVER || item == MENU_ADHOC_SERVER || item == MENU_MODERN_SERVER;
+    return item == MENU_SEGA_SERVER || item == MENU_ADHOC_SERVER || item == MENU_MODERN_SERVER
+        || item == MENU_KEYS_RESET || is_binding(item);
 }
 
 int menu_touch(menu_state *m, int w, int h, int x, int y) {
     if (!m->open) return 0;
+    if (m->key_wait) { m->key_wait = 0; return 0; }            /* a tap cancels the wait for a key */
     int x0, y0, bw, bh;
     menu_box(m, w, h, &x0, &y0, &bw, &bh);
     if (x < x0 || x >= x0 + bw || y < y0 || y >= y0 + bh) {    /* outside: back a page, or close */
-        if (m->page != MENU_PAGE_MAIN) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
+        if (m->page != MENU_PAGE_MAIN) { go_page(m, parent_page(m->page), page_item(m->page)); return 0; }
         m->open = 0;
         return MFX_CLOSED;
     }
@@ -442,7 +474,7 @@ int menu_touch(menu_state *m, int w, int h, int x, int y) {
     if (item == MENU_QUIT) { m->open = 0; return MFX_CLOSED | MFX_QUIT; }
     if (item == MENU_EXTRACT_MODELS) return MFX_EXTRACT;
     if (opens_page(item) >= 0) { go_page(m, opens_page(item), -1); return 0; }
-    if (is_back(item)) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
+    if (is_back(item)) { go_page(m, parent_page(m->page), page_item(m->page)); return 0; }
     if (is_editor(item)) return change(m, 0);
     return change(m, x < x0 + VALUE_X + 30 ? -1 : 1);
 }
@@ -457,6 +489,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
 
     int y = y0 + 8;
     menu_text(img, x0 + 10, y, m->page == MENU_PAGE_CONTROLS ? "SETTINGS > CONTROLS"
+                             : m->page == MENU_PAGE_KEYS ? "SETTINGS > CONTROLS > KEYBOARD/MOUSE"
                              : m->page == MENU_PAGE_TESTS ? "SETTINGS > TESTS (60 / 120 FPS)"
                              : m->page == MENU_PAGE_GRAPHICS ? "SETTINGS > GRAPHICS" : "SETTINGS", WHITE);
     y += CELL_H + 8;
@@ -466,13 +499,22 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
         [MENU_ADHOC_MODE] = "ADHOC MODE", [MENU_MODERN_SERVER] = "MODERN SERVER", [MENU_MASTER_VOL] = "MASTER VOLUME",
         [MENU_MUSIC_VOL] = "MUSIC VOLUME", [MENU_SFX_VOL] = "SFX VOLUME", [MENU_ATTENUATION] = "ATTENUATION",
         [MENU_FONT] = "FONT", [MENU_CONTROLS] = "CONTROLS", [MENU_TESTS] = "TESTS", [MENU_EXTRACT_MODELS] = "EXTRACT MODELS", [MENU_LOAD_MODELS] = "LOAD MODELS", [MENU_QUIT] = "QUIT GAME", [MENU_CLOSE] = "CLOSE",
-        [MENU_RS_ON] = "RIGHT STICK", [MENU_RS_SPEED] = "SENSITIVITY", [MENU_SWAP_OC] = "CIRCLE/CROSS",
+        [MENU_RS_ON] = "RIGHT STICK", [MENU_RS_SPEED] = "SENSITIVITY", [MENU_DEADZONE] = "STICK DEADZONE",
+        [MENU_MOUSE_CAM] = "MOUSE CAMERA", [MENU_KEYS] = "KEYBOARD/MOUSE", [MENU_SWAP_OC] = "CIRCLE/CROSS",
         [MENU_TOUCH_COLOR] = "TOUCH COLOR", [MENU_TOUCH_ALPHA] = "TOUCH OPACITY", [MENU_CONTROLS_BACK] = "BACK",
         [MENU_TEST_TICKS] = "TICK PACING", [MENU_TEST_LOGIC] = "30 HZ LOGIC", [MENU_TESTS_BACK] = "BACK",
         [MENU_FRAME_RATE] = "FRAME RATE", [MENU_FPS_COUNTER] = "FPS COUNTER", [MENU_RESOLUTION] = "RESOLUTION",
         [MENU_RENDERER] = "RENDERER", [MENU_DRAW_DIST] = "DRAW DISTANCE", [MENU_VERTEX_WORK] = "VERTEX WORK", [MENU_SCALING] = "SCALING",
         [MENU_FXAA] = "ANTI-ALIASING", [MENU_SHARPEN] = "SHARPEN", [MENU_SCANLINES] = "SCANLINES",
-        [MENU_BRIGHTNESS] = "BRIGHTNESS", [MENU_SATURATION] = "SATURATION", [MENU_GRAPHICS_BACK] = "BACK" };
+        [MENU_BRIGHTNESS] = "BRIGHTNESS", [MENU_SATURATION] = "SATURATION", [MENU_GRAPHICS_BACK] = "BACK",
+        [MENU_KEY_FIRST + KB_UP] = "UP", [MENU_KEY_FIRST + KB_DOWN] = "DOWN", [MENU_KEY_FIRST + KB_LEFT] = "LEFT",
+        [MENU_KEY_FIRST + KB_RIGHT] = "RIGHT", [MENU_KEY_FIRST + KB_TRIANGLE] = "TRIANGLE",
+        [MENU_KEY_FIRST + KB_CIRCLE] = "CIRCLE", [MENU_KEY_FIRST + KB_CROSS] = "CROSS",
+        [MENU_KEY_FIRST + KB_SQUARE] = "SQUARE", [MENU_KEY_FIRST + KB_L] = "L", [MENU_KEY_FIRST + KB_R] = "R",
+        [MENU_KEY_FIRST + KB_START] = "START", [MENU_KEY_FIRST + KB_SELECT] = "SELECT",
+        [MENU_KEY_FIRST + KB_STICK_UP] = "STICK UP", [MENU_KEY_FIRST + KB_STICK_DOWN] = "STICK DOWN",
+        [MENU_KEY_FIRST + KB_STICK_LEFT] = "STICK LEFT", [MENU_KEY_FIRST + KB_STICK_RIGHT] = "STICK RIGHT",
+        [MENU_KEYS_RESET] = "DEFAULT KEYS", [MENU_KEYS_BACK] = "BACK" };
     static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
     char adhoc[32];
     snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
@@ -504,9 +546,12 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     char tcol[24], talpha[24];
     snprintf(tcol, sizeof tcol, "< %s >", menu_touch_color_name(m->touch_color));
     snprintf(talpha, sizeof talpha, "< %d%% >", m->touch_alpha * 10);
+    char dz[16];
+    if (m->deadzone) snprintf(dz, sizeof dz, "< %d%% >", menu_deadzone_pct(m));
+    else snprintf(dz, sizeof dz, "< DEFAULT >");
     for (int i = 0; i < MENU_ITEMS; i++) {
         if (!shown(m, i)) continue;
-        const uint32_t col = i == m->sel ? YELLOW : WHITE;
+        const uint32_t col = i == m->key_wait ? ORANGE : i == m->sel ? YELLOW : WHITE;
         if (i == m->sel) menu_text(img, x0 + 10, y, ">", col);
         menu_text(img, x0 + 22, y, NAMES[i], col);
         const char *v = i == MENU_FRAME_RATE ? (m->fps == 120 ? "< 120 FPS >" : m->fps == 60 ? "< 60 FPS >" : "< 30 FPS >")
@@ -521,7 +566,9 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_GRAPHICS ? ">"
                       : i == MENU_TEST_TICKS ? (m->test_ticks ? "< ON >" : "< OFF >")
                       : i == MENU_TEST_LOGIC ? (m->test_logic ? "< ON >" : "< OFF >")
-                      : i == MENU_RS_ON ? (m->rs_on ? "< ON >" : "< OFF >") : i == MENU_CONTROLS || i == MENU_TESTS ? ">"
+                      : i == MENU_RS_ON ? (m->rs_on ? "< ON >" : "< OFF >") : i == MENU_CONTROLS || i == MENU_TESTS || i == MENU_KEYS ? ">"
+                      : i == m->key_wait ? "PRESS A KEY..."
+                      : is_binding(i) ? (m->key_name[i - MENU_KEY_FIRST][0] ? m->key_name[i - MENU_KEY_FIRST] : "NONE")
                       : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega : i == MENU_ADHOC_SERVER ? adhoc
                       : i == MENU_ADHOC_MODE ? ADHOC_MODES[m->adhoc_mode % 3]
                       : i == MENU_MODERN_SERVER ? modern
@@ -529,11 +576,20 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i >= MENU_MASTER_VOL && i <= MENU_SFX_VOL ? vol[i - MENU_MASTER_VOL]
                       : i == MENU_ATTENUATION ? att : i == MENU_FONT ? font
                       : i == MENU_SWAP_OC ? (m->swap_oc ? "< SWAPPED >" : "< NORMAL >")
+                      : i == MENU_DEADZONE ? dz : i == MENU_MOUSE_CAM ? (m->mouse_cam ? "< ON >" : "< OFF >")
                       : i == MENU_TOUCH_COLOR ? tcol : i == MENU_TOUCH_ALPHA ? talpha : "";
         menu_text(img, x0 + VALUE_X, y, v, col);
         y += ROW_H;
     }
     y += 4;
+    if (m->page == MENU_PAGE_KEYS) {
+        menu_text(img, x0 + 10, y, m->key_wait ? "PRESS A KEY OR MOUSE BUTTON   ESC: CANCEL"
+                                               : "ACCEPT: CHANGE   MOUSE MOVEMENT: CAMERA", m->key_wait ? ORANGE : GREY);
+        y += CELL_H + 2;
+        snprintf(line, sizeof line, "%s / R3: CLOSE   D-PAD / ARROWS: MOVE", hotkey ? hotkey : "F1");
+        menu_text(img, x0 + 10, y, line, GREY);
+        return;
+    }
     if (game_fps > 0) snprintf(line, sizeof line, "GAME TIMING NOW: %d FPS", game_fps);
     else              snprintf(line, sizeof line, "GAME TIMING NOW: NOT SET YET");
     menu_text(img, x0 + 10, y, line, GREY);
@@ -543,8 +599,12 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
         menu_text(img, x0 + 10, y, line, ORANGE);
     }
     y += CELL_H + 4;
-    menu_text(img, x0 + 10, y, m->swap_oc ? "CIRCLE (KEY Z): ACCEPT  CROSS (KEY X): BACK"
-                                          : "CIRCLE (KEY X): ACCEPT  CROSS (KEY Z): BACK", GREY);
+    /* the keys Circle and Cross are on (the bindings, as the caller named them) */
+    const char *ck = m->key_name[KB_CIRCLE][0] ? m->key_name[KB_CIRCLE] : "X";
+    const char *xk = m->key_name[KB_CROSS][0] ? m->key_name[KB_CROSS] : "Z";
+    if (m->swap_oc) { const char *t = ck; ck = xk; xk = t; }
+    snprintf(line, sizeof line, "CIRCLE (KEY %.8s): ACCEPT  CROSS (KEY %.8s): BACK", ck, xk);
+    menu_text(img, x0 + 10, y, line, GREY);
     y += CELL_H + 2;
     if (m->sel == MENU_MODERN_SERVER && m->share[0]) {
         snprintf(line, sizeof line, "JOIN AT %.38s", m->share);   /* what the others type */

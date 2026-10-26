@@ -31,6 +31,7 @@
 #include <psprecomp/dispatch.h>
 #include <psprecomp/mem.h>
 
+#include <math.h>
 #include <stdio.h>
 
 #define FN_CAMERA_INPUT  0x08A16794u   /* (?, float *yaw, float *pitch) */
@@ -40,6 +41,7 @@
 static float   g_speed = CAMERA_SPEED_MIN;
 static uint64_t n_input_calls, n_yaw_set, n_pitch_set, n_active_calls, n_active_set;
 static uint8_t g_rx = 128, g_ry = 128;
+static float   g_mx, g_my;            /* the mouse, as stick units (camera_mouse) */
 
 float camera_axis(uint8_t byte, float speed) {
     int v = (int)byte - 128;
@@ -47,8 +49,28 @@ float camera_axis(uint8_t byte, float speed) {
     return (float)v / 128.0f * speed;
 }
 
-float camera_x(void) { return camera_axis(g_rx, g_speed); }
-float camera_y(void) { return camera_axis(g_ry, g_speed); }
+float camera_x(void) { return camera_axis(g_rx, g_speed) + g_mx * g_speed; }
+float camera_y(void) { return camera_axis(g_ry, g_speed) + g_my * g_speed; }
+
+void camera_mouse(int dx, int dy, double dt) {
+    if (!(dt > 0.0 && dt < 0.25)) dt = 1.0 / 60.0;
+    float x = (float)((double)dx / dt) / MOUSE_FULL_SPEED, y = (float)((double)dy / dt) / MOUSE_FULL_SPEED;
+    g_mx = x > MOUSE_MAX ? MOUSE_MAX : x < -MOUSE_MAX ? -MOUSE_MAX : x;
+    g_my = y > MOUSE_MAX ? MOUSE_MAX : y < -MOUSE_MAX ? -MOUSE_MAX : y;
+}
+
+void stick_deadzone(uint8_t *x, uint8_t *y, int pct) {
+    if (pct <= 0) return;
+    const float fx = ((float)*x - 128.0f) / 127.0f, fy = ((float)*y - 128.0f) / 127.0f;
+    const float mag = sqrtf(fx * fx + fy * fy), dz = (float)pct / 100.0f;
+    if (mag <= dz) { *x = *y = 128; return; }
+    float k = (mag - dz) / (1.0f - dz) / mag;
+    float nx = fx * k, ny = fy * k;
+    if (nx > 1.0f) nx = 1.0f; else if (nx < -1.0f) nx = -1.0f;
+    if (ny > 1.0f) ny = 1.0f; else if (ny < -1.0f) ny = -1.0f;
+    *x = (uint8_t)lrintf(128.0f + nx * 127.0f);
+    *y = (uint8_t)lrintf(128.0f + ny * 127.0f);
+}
 
 void camera_set_stick(uint8_t rx, uint8_t ry) { g_rx = rx; g_ry = ry; }
 

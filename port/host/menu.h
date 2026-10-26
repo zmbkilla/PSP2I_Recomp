@@ -25,15 +25,22 @@ enum {
 
 /* Menu items, top to bottom: the main page, then the CONTROLS, TESTS and
  * GRAPHICS pages (opened from their items; BACK, or Cross, returns to the
- * main page). */
+ * main page), then KEYBOARD (opened from CONTROLS, and back to it). */
 enum { MENU_GRAPHICS, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE, MENU_MODERN_SERVER,
        MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION, MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_EXTRACT_MODELS, MENU_LOAD_MODELS, MENU_QUIT, MENU_CLOSE,
-       MENU_RS_ON, MENU_RS_SPEED, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
+       MENU_RS_ON, MENU_RS_SPEED, MENU_DEADZONE, MENU_MOUSE_CAM, MENU_KEYS, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
        MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK,
        MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RESOLUTION, MENU_RENDERER, MENU_DRAW_DIST, MENU_VERTEX_WORK,
        MENU_SCALING, MENU_FXAA, MENU_SHARPEN, MENU_SCANLINES, MENU_BRIGHTNESS, MENU_SATURATION, MENU_GRAPHICS_BACK,
+       MENU_KEY_FIRST, MENU_KEYS_RESET = MENU_KEY_FIRST + 16, MENU_KEYS_BACK,
        MENU_ITEMS };
-enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS, MENU_PAGE_GRAPHICS };
+enum { MENU_PAGE_MAIN, MENU_PAGE_CONTROLS, MENU_PAGE_TESTS, MENU_PAGE_GRAPHICS, MENU_PAGE_KEYS };
+
+/* KEYBOARD/MOUSE: the PSP controls a key or mouse button can be bound to, in
+ * the page's order (item MENU_KEY_FIRST + KB_*). The mouse's movement is not
+ * bound here: it turns the camera (MOUSE CAMERA), as the right stick. */
+enum { KB_UP, KB_DOWN, KB_LEFT, KB_RIGHT, KB_TRIANGLE, KB_CIRCLE, KB_CROSS, KB_SQUARE, KB_L, KB_R,
+       KB_START, KB_SELECT, KB_STICK_UP, KB_STICK_DOWN, KB_STICK_LEFT, KB_STICK_RIGHT, KB_N };
 int menu_page_of(int item);                      /* MENU_PAGE_* */
 #define MENU_BIT(i) (1ull << (i))
 
@@ -69,6 +76,8 @@ int  menu_ren_parse(const char *s);                  /* "d3d11" / "opengl" / "gl
 
 /* Right-stick camera sensitivity: 1.00x .. 2.00x in 0.25 steps. */
 #define MENU_RS_STEPS 5
+/* Controller stick dead zone: DEFAULT (the game's own), then 5% .. 30%. */
+#define MENU_DZ_STEPS 7
 
 /* What menu_update() changed, for the caller to act on. */
 enum {
@@ -95,6 +104,11 @@ enum {
     MFX_QUIT        = 1 << 20,  /* QUIT GAME: the caller ends the game (as closing the window) */
     MFX_LOAD_MODELS = 1 << 22,  /* load_models changed: models in Data/ replace the game's (modelx.c) */
     MFX_EXTRACT     = 1 << 21,  /* EXTRACT MODELS: the caller writes the loaded models (modelx.c), sets model_note */
+    MFX_DEADZONE    = 1 << 23,  /* deadzone changed: menu_deadzone_pct() */
+    MFX_MOUSE_CAM   = 1 << 24,  /* mouse_cam changed: the mouse turns the camera, or not */
+    MFX_KEY_WAIT    = 1 << 25,  /* a KEYBOARD row chosen: key_wait is set; the caller binds the next key
+                                   (menu_key_done), Escape cancels */
+    MFX_KEYS_RESET  = 1 << 26,  /* KEYBOARD > DEFAULT KEYS: the caller restores the bindings and key_name */
 };
 
 typedef struct {
@@ -105,6 +119,10 @@ typedef struct {
     int      show_fps;     /* the FPS counter */
     int      rs_step;      /* right-stick sensitivity, 0..MENU_RS_STEPS-1 (1.00x + 0.25x each) */
     int      rs_on;        /* the right stick turns the camera (off: it does nothing) */
+    int      deadzone;     /* STICK DEADZONE: 0..MENU_DZ_STEPS-1 (0: the game's own, else 5% each) */
+    int      mouse_cam;    /* MOUSE CAMERA: the mouse turns the camera (the cursor held in the window) */
+    int      key_wait;     /* KEYBOARD: the row waiting for a key (MENU_KEY_FIRST + KB_*), 0 = none */
+    char     key_name[KB_N][16]; /* the keys bound, shown; set by the caller ("" = none) */
     int      draw_dist;    /* DRAW DISTANCE: the longer far distances (switches.txt 0) */
     int      gpu_vertex;   /* VERTEX WORK: 3D vertices transformed and lit on the GPU (1) or the CPU */
     postfx   post;         /* GRAPHICS: scaling, FXAA, sharpen, scanlines, brightness, saturation */
@@ -140,7 +158,13 @@ void menu_init(menu_state *m, int fps, int show_fps);
 /* Right-stick sensitivity as a multiplier (1.00..2.00), and setting it from
  * one (rounded to the nearest step, clamped). */
 float menu_rs_speed(const menu_state *m);
+int   menu_deadzone_pct(const menu_state *m);    /* 0 (DEFAULT) or 5..30 */
+void  menu_set_deadzone_pct(menu_state *m, int pct);
 void  menu_set_rs_speed(menu_state *m, float speed);
+
+/* KEYBOARD: the waiting row got its key (or was cancelled); the caller has
+ * updated key_name. */
+void  menu_key_done(menu_state *m);
 
 /* PSP buttons (and the analog stick, 0..255) as menu inputs, following the
  * game's own conventions: Circle accepts, Cross goes back; the D-pad, or the

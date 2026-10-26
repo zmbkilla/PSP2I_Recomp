@@ -1078,12 +1078,65 @@ static int is_redirect_address(const char *host) {
     return addr[0] && !strcmp(host, addr);
 }
 
+/* Servers not open yet (temporary, until their owners open them): kept from
+ * the game by name or address, as if they did not answer. The names are
+ * stored scrambled (byte i XOR (0xA5 + 7i)), not as text in the program. */
+static const unsigned char HELD[][32] = {
+    { 14, 0xC2, 0xCD, 0xDE, 0xDF, 0xEF, 0xBA, 0xAA, 0xA0, 0xA8, 0x96, 0x89, 0xDC, 0x8C, 0x73 },
+};
+#define HELD_N (sizeof HELD / sizeof HELD[0])
+
+static void held_name(size_t k, char *out) {
+    const unsigned n = HELD[k][0];
+    for (unsigned i = 0; i < n; i++) out[i] = (char)(HELD[k][1 + i] ^ (unsigned char)(0xA5 + 7 * i));
+    out[n] = '\0';
+}
+
+/* host's IPv4 address as text ("" if it does not resolve). */
+static void ipv4_of(const char *host, char *out, size_t cap) {
+    out[0] = '\0';
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    if (getaddrinfo(host, NULL, &hints, &res) == 0 && res) {
+        const unsigned char *b = (const unsigned char *)&((struct sockaddr_in *)res->ai_addr)->sin_addr;
+        snprintf(out, cap, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+        freeaddrinfo(res);
+    }
+}
+
+static int is_held(const char *host) {
+    static char addrs[HELD_N][64];
+    static struct { char host[128]; int held; } seen[8];          /* hosts already looked up */
+    static int looked, next;
+    if (!host || !host[0]) return 0;
+    char name[64];
+    for (size_t k = 0; k < HELD_N; k++) {
+        held_name(k, name);
+        if (!_stricmp(host, name)) return 1;
+    }
+    for (int i = 0; i < 8; i++) if (seen[i].host[0] && !_stricmp(host, seen[i].host)) return seen[i].held;
+    if (!looked) { for (size_t k = 0; k < HELD_N; k++) { held_name(k, name); ipv4_of(name, addrs[k], sizeof addrs[k]); } looked = 1; }
+    char a[64];
+    ipv4_of(host, a, sizeof a);
+    int held = 0;
+    for (size_t k = 0; k < HELD_N; k++) if (a[0] && !strcmp(a, addrs[k])) held = 1;
+    snprintf(seen[next].host, sizeof seen[next].host, "%s", host);
+    seen[next].held = held;
+    next = (next + 1) % 8;
+    return held;
+}
+
 static const char *resolve_redirect(const char *host) {
     static char target[256];
-    if (!g_sega_redirect[0] || !is_sega_host(host)) return NULL;
-    uint32_t port;
-    redirect_target(target, sizeof target, &port);
-    return target;
+    if (g_sega_redirect[0] && is_sega_host(host)) {
+        uint32_t port;
+        redirect_target(target, sizeof target, &port);
+    } else {
+        snprintf(target, sizeof target, "%s", host ? host : "");
+    }
+    if (is_held(target)) return "x.invalid";                      /* no record */
+    return g_sega_redirect[0] && is_sega_host(host) ? target : NULL;
 }
 
 /* ---- HTTP: log, stub or live ---------------------------------------------------------------- */
@@ -1355,6 +1408,16 @@ static int http_send(const psp_http_request *q, psp_http_response *r) {
     online_log("http:   User-Agent: %s", q->user_agent);
     log_body("request body", q->body, q->body_len);
     int rc = -1;
+    {
+        char to[256];
+        uint32_t port;
+        if (g_sega_redirect[0] && (is_sega_host(q->host) || is_redirect_address(q->host))) redirect_target(to, sizeof to, &port);
+        else snprintf(to, sizeof to, "%s", q->host);
+        if (is_held(to)) {
+            online_log("http:   no answer: reporting the server unreachable");
+            return (int)0x80431063u;
+        }
+    }
     if (g_sega_redirect[0] && (is_sega_host(q->host) || is_redirect_address(q->host))) {
         /* The game's own server, pointed at the replacement in the settings file. */
         char host[256];

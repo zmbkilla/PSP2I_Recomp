@@ -266,6 +266,71 @@ static void test_values(void) {
     menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_RS_SPEED);
+    /* STICK DEADZONE: DEFAULT first; Left stops there, Right steps 5% to 30% and stops, Confirm cycles */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_DEADZONE && m.deadzone == 0 && menu_deadzone_pct(&m) == 0);
+    CHECK(menu_update(&m, MI_LEFT, 0) == 0 && m.deadzone == 0);
+    menu_update(&m, 0, 0);
+    for (int i = 1; i < MENU_DZ_STEPS; i++) {
+        CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_DEADZONE && menu_deadzone_pct(&m) == 5 * i);
+        menu_update(&m, 0, 0);
+    }
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0 && menu_deadzone_pct(&m) == 30);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_DEADZONE && m.deadzone == 0);   /* wraps */
+    menu_update(&m, 0, 0);
+    menu_set_deadzone_pct(&m, 14); CHECK(menu_deadzone_pct(&m) == 15);
+    menu_set_deadzone_pct(&m, 99); CHECK(menu_deadzone_pct(&m) == 30);
+    menu_set_deadzone_pct(&m, -3); CHECK(menu_deadzone_pct(&m) == 0);
+    /* MOUSE CAMERA: off by default; Right, Left and Confirm each flip it */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_MOUSE_CAM && !m.mouse_cam);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_MOUSE_CAM && m.mouse_cam);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_MOUSE_CAM && !m.mouse_cam);
+    menu_update(&m, 0, 0);
+    /* KEYBOARD: its page, under CONTROLS */
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_KEYS);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == 0 && m.page == MENU_PAGE_KEYS && m.sel == MENU_KEY_FIRST + KB_UP);
+    menu_update(&m, 0, 0);
+    {
+        int x, y, bw, bh;
+        menu_box(&m, 480, 272, &x, &y, &bw, &bh);
+        CHECK(bh == 261 + 11 * (18 - 16) - 24 && bh <= 272);     /* 18 rows, without the frame-rate lines */
+    }
+    /* a row: Left/Right do nothing, Confirm waits for a key; meanwhile nothing moves, Back cancels */
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0 && !m.key_wait);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_KEY_FIRST + KB_DOWN);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_KEY_WAIT && m.key_wait == MENU_KEY_FIRST + KB_DOWN);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_KEY_FIRST + KB_DOWN && m.key_wait && m.open);
+    CHECK(menu_update(&m, MI_BACK, 0) == 0 && !m.key_wait && m.open && m.page == MENU_PAGE_KEYS);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_KEY_WAIT);
+    menu_update(&m, 0, 0);
+    menu_key_done(&m);                                            /* the caller bound one */
+    CHECK(!m.key_wait);
+    /* Up from the top wraps to BACK; DEFAULT KEYS above it */
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_KEYS_BACK);
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_KEYS_RESET && menu_update(&m, MI_RIGHT, 0) == 0);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_KEYS_RESET);
+    menu_update(&m, 0, 0);
+    /* Back (Cross, or BACK) returns to CONTROLS, at KEYBOARD */
+    CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.open && m.page == MENU_PAGE_CONTROLS && m.sel == MENU_KEYS);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == 0 && m.page == MENU_PAGE_KEYS);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_KEYS_BACK && menu_update(&m, MI_CONFIRM, 0) == 0 && m.page == MENU_PAGE_CONTROLS && m.sel == MENU_KEYS);
+    menu_update(&m, 0, 0);
     /* Circle/Cross: Right, Left and Confirm each flip it */
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_SWAP_OC && !m.swap_oc);
@@ -908,13 +973,14 @@ static void test_touch_host(void) {
     CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 + 3) == MFX_ADHOC_MODE && m.adhoc_mode == 1);
     CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 7 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS */
 
-    /* the CONTROLS page with the touch items: RIGHT STICK, SENSITIVITY, CIRCLE/CROSS, COLOR, OPACITY, BACK */
+    /* the CONTROLS page with the touch items: RIGHT STICK, SENSITIVITY, STICK DEADZONE, MOUSE CAMERA,
+     * KEYBOARD, CIRCLE/CROSS, COLOR, OPACITY, BACK */
     m.hidden = 0;
     menu_box(&m, 480, 272, &x, &y, &bw, &bh);
-    CHECK(bh == 261 + 11 * (6 - 16));
+    CHECK(bh == 261 + 11 * (9 - 16));
     row0 = y + 8 + 9 + 8;
     CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 3) == MFX_RS_ON && !m.rs_on);
-    const int alpha_row = row0 + 11 * 4, color_row = row0 + 11 * 3;
+    const int alpha_row = row0 + 11 * 7, color_row = row0 + 11 * 6;
     CHECK(menu_touch(&m, 480, 272, x + 200, alpha_row + 3) == MFX_TOUCH && m.touch_alpha == TOUCH_ALPHA_DEFAULT + 1);
     CHECK(menu_touch(&m, 480, 272, x + 140, alpha_row + 3) == MFX_TOUCH && m.touch_alpha == TOUCH_ALPHA_DEFAULT);
     for (int i = 0; i < 12; i++) menu_touch(&m, 480, 272, x + 140, alpha_row + 3);
@@ -922,7 +988,18 @@ static void test_touch_host(void) {
     CHECK(menu_touch(&m, 480, 272, x + 200, color_row + 3) == MFX_TOUCH && m.touch_color == TOUCH_WHITE);
     CHECK(menu_touch(&m, 480, 272, x + 140, color_row + 3) == MFX_TOUCH && m.touch_color == TOUCH_DEFAULT);
     CHECK(menu_touch_color_parse("yellow") == TOUCH_YELLOW && menu_touch_color_parse("nope") < 0);
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 5 + 3) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_CONTROLS);  /* BACK */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 3 + 3) == MFX_MOUSE_CAM && m.mouse_cam);
+    /* KEYBOARD: a tap opens it; on a row, a tap waits for a key (another tap cancels); outside: back to CONTROLS */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 4 + 3) == 0 && m.page == MENU_PAGE_KEYS);
+    menu_box(&m, 480, 272, &x, &y, &bw, &bh);
+    row0 = y + 8 + 9 + 8;
+    CHECK(menu_touch(&m, 480, 272, x + 140, row0 + 11 * KB_CROSS + 3) == MFX_KEY_WAIT && m.key_wait == MENU_KEY_FIRST + KB_CROSS);
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 3) == 0 && !m.key_wait);
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 16 + 3) == MFX_KEYS_RESET);
+    CHECK(menu_touch(&m, 480, 272, 2, 2) == 0 && m.page == MENU_PAGE_CONTROLS && m.sel == MENU_KEYS);
+    menu_box(&m, 480, 272, &x, &y, &bw, &bh);
+    row0 = y + 8 + 9 + 8;
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 8 + 3) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_CONTROLS);  /* BACK */
     menu_box(&m, 480, 272, &x, &y, &bw, &bh);                    /* the main page's box again */
     row0 = y + 8 + 9 + 8;
     CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 10 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS, nothing hidden */
