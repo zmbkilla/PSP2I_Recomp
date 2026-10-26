@@ -5,9 +5,9 @@
  *
  *   rpcn_host=bl00d3dg3.xyz      server for sign-in and tickets (RPCN protocol)
  *   rpcn_port=31313
- *   rpcn_cert_sha256=            pinned certificate fingerprint; empty = trust
- *                                on first use and record it here; a later
- *                                mismatch refuses to connect
+ *   rpcn_cert_sha256=            the certificate fingerprint seen last (for the
+ *                                log only: whatever certificate the server
+ *                                presents is accepted, as PPSSPP does)
  *   rpcn_user=                   remembered username (the password is never
  *                                stored)
  *   http_mode=log                log  : log the game's requests, answer
@@ -32,9 +32,9 @@
  *                                requests to them are sent to it (WinHTTP,
  *                                system TLS) whatever http_mode says
  *   sega_server_scheme=          empty = the game's own scheme; or http / https
- *   sega_server_ignore_cert=0    1 = accept the replacement's certificate even
- *                                if self-signed or for another name (test
- *                                servers only)
+ *   sega_server_ignore_cert=     no longer used: the replacement's certificate
+ *                                is accepted whatever it is (self-signed,
+ *                                another name, PSP-era MD5)
  *
  *   Ad hoc play over the internet (psprecomp adhoc.c, PPSSPP's protocol):
  *   adhoc_server=socom.cc        ad hoc server: host or host:port (port 27312
@@ -72,6 +72,7 @@
 #include "online.h"
 #include "rpcn.h"
 #include "rpcn_rooms.h"
+#include "tls.h"
 
 #include <psprecomp/net.h>
 
@@ -88,8 +89,29 @@
 #include <windows.h>
 #include <winhttp.h>
 #else
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <strings.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#define _stricmp strcasecmp
+#define _strnicmp strncasecmp
 #endif
+
+/* Milliseconds on a steady clock (request timing in the log). */
+static unsigned long long now_ms(void) {
+#ifdef _WIN32
+    return (unsigned long long)GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)ts.tv_nsec / 1000000ull;
+#endif
+}
 
 /* ---- configuration ---------------------------------------------------------------- */
 
@@ -334,16 +356,17 @@ static CRITICAL_SECTION g_rpcn_lock;     /* one request at a time on the session
 #define RPCN_LOCK()   EnterCriticalSection(&g_rpcn_lock)
 #define RPCN_UNLOCK() LeaveCriticalSection(&g_rpcn_lock)
 #else
-#define LOCK()
-#define UNLOCK()
-#define RPCN_LOCK()
-#define RPCN_UNLOCK()
+static pthread_mutex_t g_lock, g_rpcn_lock;   /* recursive, as Windows' critical sections */
+#define LOCK()   pthread_mutex_lock(&g_lock)
+#define UNLOCK() pthread_mutex_unlock(&g_lock)
+#define RPCN_LOCK()   pthread_mutex_lock(&g_rpcn_lock)
+#define RPCN_UNLOCK() pthread_mutex_unlock(&g_rpcn_lock)
 #endif
 
-enum { JOB_NONE, JOB_SIGNIN, JOB_TICKET };
+enum { JOB_NONE, JOB_SIGNIN, JOB_TICKET, JOB_REGISTER };
 static struct {
     int  kind, busy, done, ok;
-    char user[64], pass[64];
+    char user[64], pass[64], token[64], email[96];
     int  slot;
     char service[64];
     uint8_t cookie[256];
@@ -406,8 +429,12 @@ static CRITICAL_SECTION g_nlock;
 #define NUNLOCK() LeaveCriticalSection(&g_nlock)
 static HANDLE g_net_thread;
 #else
-#define NLOCK()
-#define NUNLOCK()
+static pthread_mutex_t g_nlock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_ncond = PTHREAD_COND_INITIALIZER;   /* a request answered */
+#define NLOCK()   pthread_mutex_lock(&g_nlock)
+#define NUNLOCK() pthread_mutex_unlock(&g_nlock)
+static pthread_t g_net_thread;
+static int g_net_thread_up;
 #endif
 static volatile int g_net_run, g_net_up;
 static njob *g_out_head, *g_out_tail, *g_wait;
@@ -444,6 +471,8 @@ static void job_finish(njob *j, uint8_t *payload, uint32_t len, int failed) {
     j->reply = payload; j->reply_len = len; j->failed = failed; j->finished = 1;
 #ifdef _WIN32
     SetEvent(j->done);
+#else
+    pthread_cond_broadcast(&g_ncond);
 #endif
     NUNLOCK();
 }
@@ -458,6 +487,9 @@ static void net_enqueue(njob *j) {
 
 #ifdef _WIN32
 static DWORD WINAPI net_main(LPVOID arg) {
+#else
+static void *net_main(void *arg) {
+#endif
     rpcn *s = (rpcn *)arg;
     online_log("rpcn: session thread running (requests and notifications)");
     while (g_net_run) {
@@ -506,7 +538,6 @@ static DWORD WINAPI net_main(LPVOID arg) {
     }
     return 0;
 }
-#endif
 
 static void net_start(rpcn *s) {
 #ifdef _WIN32
@@ -515,7 +546,10 @@ static void net_start(rpcn *s) {
     g_net_thread = CreateThread(NULL, 0, net_main, s, 0, NULL);
     if (!g_net_thread) { g_net_run = 0; g_net_up = 0; }
 #else
-    (void)s;
+    g_net_run = 1;
+    g_net_up = 1;
+    g_net_thread_up = pthread_create(&g_net_thread, NULL, net_main, s) == 0;
+    if (!g_net_thread_up) { g_net_run = 0; g_net_up = 0; }
 #endif
 }
 
@@ -526,6 +560,11 @@ static void net_stop(void) {
     WaitForSingleObject(g_net_thread, 5000);
     CloseHandle(g_net_thread);
     g_net_thread = NULL;
+#else
+    if (!g_net_thread_up) return;
+    g_net_run = 0;
+    pthread_join(g_net_thread, NULL);
+    g_net_thread_up = 0;
 #endif
 }
 
@@ -556,8 +595,30 @@ static int net_call(uint16_t cmd, const uint8_t *data, uint32_t len, uint8_t **r
     if (failed) { free(*reply); *reply = NULL; *rlen = 0; return -1; }
     return 0;
 #else
-    (void)cmd; (void)data; (void)len; (void)timeout_ms;
-    return -1;
+    if (!g_net_up) return -1;
+    njob *j = (njob *)calloc(1, sizeof *j);
+    if (!j) return -1;
+    j->cmd = cmd;
+    j->data = (uint8_t *)malloc(len ? len : 1);
+    if (!j->data) { free(j); return -1; }
+    memcpy(j->data, data, len);
+    j->len = len;
+    net_enqueue(j);
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += timeout_ms / 1000;
+    until.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
+    NLOCK();
+    while (!j->finished && pthread_cond_timedwait(&g_ncond, &g_nlock, &until) != ETIMEDOUT) {}
+    if (!j->finished) { j->abandoned = 1; NUNLOCK(); return -1; }   /* freed by the thread when it answers */
+    NUNLOCK();
+    const int failed = j->failed;
+    *reply = j->reply; *rlen = j->reply_len;
+    free(j->data);
+    free(j);
+    if (failed) { free(*reply); *reply = NULL; *rlen = 0; return -1; }
+    return 0;
 #endif
 }
 
@@ -572,32 +633,56 @@ static int pin_matches(const uint8_t fp[32]) {
     return 1;
 }
 
-static void run_signin(void) {
+/* A connection to the RPCN server whose certificate is the pinned one (the
+ * first one seen is pinned); NULL with g_job.msg set otherwise. */
+static rpcn *connect_pinned(void) {
     char err[200] = "";
     uint8_t fp[32];
     rpcn *r = NULL;
-    online_log("signing in: connecting to %s:%d", g_host, g_port);
-    int rc = rpcn_connect(&r, g_host, g_port, 8000, fp, err, sizeof err);
+    online_log("connecting to %s:%d", g_host, g_port);
+    const int rc = rpcn_connect(&r, g_host, g_port, 8000, fp, err, sizeof err);
     if (rc != RPCN_OK) {
         snprintf(g_job.msg, sizeof g_job.msg, rc == RPCN_ERR_PROTOCOL ? "Incompatible server: %s" : "Could not reach the server: %s", err);
-        return;
+        return NULL;
     }
     char fphex[65];
     for (int i = 0; i < 32; i++) snprintf(fphex + 2 * i, 3, "%02x", fp[i]);
-    const int pm = pin_matches(fp);
-    if (pm == 0) {
-        rpcn_close(r);
-        snprintf(g_job.msg, sizeof g_job.msg, "Server certificate changed (expected %.16s..., got %.16s...). Not connecting.", g_pin, fphex);
+    /* Whatever certificate the server presents is accepted (servers are
+     * rebuilt and re-keyed); a change is only noted, and the new one kept. */
+    if (pin_matches(fp) == 0) online_log("the server's certificate changed (was %.16s..., now %.16s...): accepted", g_pin, fphex);
+    snprintf(g_pin, sizeof g_pin, "%s", fphex);
+    online_log("connected: TLS, RPCN protocol %u, certificate sha256 %s", rpcn_server_version(r), fphex);
+    return r;
+}
+
+/* A new account (RPCN Create) on a connection of its own; the game signs in after. */
+static void run_register(void) {
+    char err[200] = "";
+    rpcn *r = connect_pinned();
+    if (!r) { memset(g_job.pass, 0, sizeof g_job.pass); return; }
+    const int rc = rpcn_create_account(r, g_job.user, g_job.pass, g_job.user,
+                                       "https://rpcs3.net/cdn/netplay/DefaultAvatar.png", g_job.email, err, sizeof err);
+    memset(g_job.pass, 0, sizeof g_job.pass);
+    rpcn_close(r);
+    cfg_save();                                               /* (a newly pinned certificate) */
+    if (rc != RPCN_OK) {
+        snprintf(g_job.msg, sizeof g_job.msg, "Could not register: %s.", err);
+        online_log("registration of %s failed: %s", g_job.user, err);
         return;
     }
-    if (pm < 0) {
-        snprintf(g_pin, sizeof g_pin, "%s", fphex);           /* trust on first use */
-        online_log("pinned the server certificate (first use): sha256 %s", fphex);
-    }
-    online_log("connected: TLS, RPCN protocol %u, certificate sha256 %s", rpcn_server_version(r), fphex);
+    g_job.ok = 1;
+    snprintf(g_job.msg, sizeof g_job.msg, "Account %s created on %s. SIGN IN to play.", g_job.user, g_host);
+    online_log("registered %s (email %s)", g_job.user, g_job.email);
+}
+
+static void run_signin(void) {
+    char err[200] = "";
+    online_log("signing in as %s", g_job.user);
+    rpcn *r = connect_pinned();
+    if (!r) { memset(g_job.pass, 0, sizeof g_job.pass); return; }
     char name[64] = "";
     int64_t user_id = 0;
-    rc = rpcn_login(r, g_job.user, g_job.pass, "", name, sizeof name, &user_id, err, sizeof err);
+    int rc = rpcn_login(r, g_job.user, g_job.pass, g_job.token, name, sizeof name, &user_id, err, sizeof err);
     memset(g_job.pass, 0, sizeof g_job.pass);
     if (rc != RPCN_OK) {
         rpcn_close(r);
@@ -679,8 +764,12 @@ static void run_ticket(void) {
 
 #ifdef _WIN32
 static DWORD WINAPI worker(LPVOID unused) {
+#else
+static void *worker(void *unused) {
+#endif
     (void)unused;
     if (g_job.kind == JOB_SIGNIN) run_signin();
+    else if (g_job.kind == JOB_REGISTER) run_register();
     else if (g_job.kind == JOB_TICKET) run_ticket();
     LOCK();
     g_job.busy = 0;
@@ -688,20 +777,20 @@ static DWORD WINAPI worker(LPVOID unused) {
     UNLOCK();
     return 0;
 }
-#endif
 
 static int start_job(int kind) {
-#ifdef _WIN32
     if (g_job.busy) return -1;
     g_job.kind = kind; g_job.busy = 1; g_job.done = 0; g_job.ok = 0; g_job.msg[0] = '\0';
+#ifdef _WIN32
     HANDLE h = CreateThread(NULL, 0, worker, NULL, 0, NULL);
     if (!h) { g_job.busy = 0; return -1; }
     CloseHandle(h);
-    return 0;
 #else
-    (void)kind;
-    return -1;
+    pthread_t t;
+    if (pthread_create(&t, NULL, worker, NULL) != 0) { g_job.busy = 0; return -1; }
+    pthread_detach(t);
 #endif
+    return 0;
 }
 
 /* ---- the sign-in screen and the NP backend ---------------------------------------------- */
@@ -712,9 +801,22 @@ int online_login_submit(void) {
     if (!g_login) return -1;
     snprintf(g_job.user, sizeof g_job.user, "%s", g_login->user);
     snprintf(g_job.pass, sizeof g_job.pass, "%s", g_login->pass);
+    g_job.token[0] = '\0';
     memset(g_login->pass, 0, sizeof g_login->pass);
     online_log("sign-in submitted for user %s (password not logged)", g_job.user);
     if (start_job(JOB_SIGNIN) != 0) { login_finish(g_login, 0, "Busy -- try again."); return -1; }
+    return 0;
+}
+
+/* REGISTER: a new account. The password stays in the screen, so SIGN IN
+ * can follow straight away. */
+int online_register_submit(void) {
+    if (!g_login) return -1;
+    snprintf(g_job.user, sizeof g_job.user, "%s", g_login->user);
+    snprintf(g_job.pass, sizeof g_job.pass, "%s", g_login->pass);
+    snprintf(g_job.email, sizeof g_job.email, "%s", g_login->email);
+    online_log("registration submitted for user %s (password not logged)", g_job.user);
+    if (start_job(JOB_REGISTER) != 0) { login_register_finish(g_login, 0, "Busy -- try again."); return -1; }
     return 0;
 }
 
@@ -922,6 +1024,7 @@ void online_poll(void) {
         login_finish(g_login, ok, msg);
         if (!ok) online_log("sign-in failed: %s", msg);
     }
+    if (done && kind == JOB_REGISTER && g_login) login_register_finish(g_login, ok, msg);
     if (done && kind == JOB_TICKET) status("%s", msg);
     psp_np_poll();
 }
@@ -1042,6 +1145,147 @@ static int stub_answer(const psp_http_request *q, psp_http_response *r) {
     return 0;
 }
 
+/* An HTTPS request over the PSP-era TLS a replacement server may speak (TLS 1.0,
+ * an MD5-signed 1024-bit certificate: game.revurb.us), which WinHTTP refuses
+ * (error 12175) even when told to ignore the certificate. The certificate is
+ * not checked: whatever the server presents is accepted.
+ *
+ * The connection is kept for the next request (keep-alive): a TLS 1.0
+ * handshake costs about a second, and the game polls the server every
+ * second -- answers that slow let the server's packets (the lobby's) arrive
+ * while the game is still busy with earlier ones. */
+static tls_conn *g_keep;                     /* the kept connection, its server and mode */
+static char g_keep_host[256];
+static uint32_t g_keep_port;
+static int g_keep_mode;
+#ifdef _WIN32
+static SRWLOCK g_keep_lock = SRWLOCK_INIT;
+#define KEEP_LOCK()   AcquireSRWLockExclusive(&g_keep_lock)
+#define KEEP_UNLOCK() ReleaseSRWLockExclusive(&g_keep_lock)
+#else
+static pthread_mutex_t g_keep_lock = PTHREAD_MUTEX_INITIALIZER;
+#define KEEP_LOCK()   pthread_mutex_lock(&g_keep_lock)
+#define KEEP_UNLOCK() pthread_mutex_unlock(&g_keep_lock)
+#endif
+
+/* Read one HTTP answer from t: 0 ok (status, body, and whether the server
+ * closes after it), -1 the connection failed. */
+static int read_answer(tls_conn *t, int *status, uint8_t **body, size_t *blen, int *closes) {
+    uint8_t *a = NULL;
+    size_t an = 0, acap = 0, hl = 0;
+    long clen = -1;
+    int chunked = 0;
+    *closes = 0;
+    for (;;) {
+        if (acap - an < 4096) {
+            const size_t cap = acap ? acap * 2 : 16384;
+            uint8_t *nb = (uint8_t *)realloc(a, cap);
+            if (!nb) { free(a); return -1; }
+            a = nb; acap = cap;
+        }
+        const int k = tls_recv_some(t, a + an, acap - an);
+        if (k <= 0) {                                              /* closed: an answer without a length ends here */
+            if (hl && clen < 0 && !chunked) { *closes = 1; break; }
+            free(a);
+            return -1;
+        }
+        an += (size_t)k;
+        if (!hl) {
+            for (size_t i = 3; i < an && !hl; i++) if (!memcmp(a + i - 3, "\r\n\r\n", 4)) hl = i + 1;
+            if (!hl) continue;
+            a[hl - 1] = 0;                                         /* (the final LF: headers as one string) */
+            if (sscanf((const char *)a, "HTTP/%*d.%*d %d", status) != 1) { free(a); return -1; }
+            for (const char *c = (const char *)a; (c = strstr(c, "\r\n")) != NULL; c += 2) {
+                if (!_strnicmp(c + 2, "Content-Length:", 15)) clen = strtol(c + 17, NULL, 10);
+                else if (!_strnicmp(c + 2, "Transfer-Encoding: chunked", 26)) chunked = 1;
+                else if (!_strnicmp(c + 2, "Connection: close", 17)) *closes = 1;
+            }
+            a[hl - 1] = '\n';
+        }
+        if (clen >= 0 && an - hl >= (size_t)clen) break;
+        if (chunked && an - hl >= 5 && !memcmp(a + an - 5, "0\r\n\r\n", 5)) break;
+    }
+    size_t bl = an - hl;
+    uint8_t *out = (uint8_t *)malloc(bl ? bl : 1);
+    if (!out) { free(a); return -1; }
+    if (chunked) {                                                 /* size CRLF data CRLF ... 0 */
+        const uint8_t *c = a + hl, *end = a + an;
+        size_t o = 0;
+        while (c < end) {
+            char *x;
+            const unsigned long n = strtoul((const char *)c, &x, 16);
+            const uint8_t *d = (const uint8_t *)strstr(x, "\r\n");
+            if (!n || !d || d + 2 + n > end) break;
+            memcpy(out + o, d + 2, n);
+            o += n;
+            c = d + 2 + n + 2;
+        }
+        bl = o;
+    } else {
+        if (clen >= 0 && (size_t)clen < bl) bl = (size_t)clen;
+        memcpy(out, a + hl, bl);
+    }
+    free(a);
+    *body = out;
+    *blen = bl;
+    return 0;
+}
+
+/* mode: 1 = TLS (the PSP-era kind allowed), TLS_PLAIN = plain HTTP. */
+static int sock_http_send(const psp_http_request *q, psp_http_response *r, int mode) {
+    const unsigned long long t0 = now_ms();
+    char head[1536];
+    const int hn = snprintf(head, sizeof head,
+                            "%s %s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: %s\r\nContent-Length: %u\r\nConnection: keep-alive\r\n\r\n",
+                            q->method, q->path[0] ? q->path : "/", q->host, q->port, q->user_agent, q->body_len);
+    if (hn <= 0 || hn >= (int)sizeof head) return (int)0x80431063u;
+    KEEP_LOCK();
+    if (g_keep && (strcmp(g_keep_host, q->host) || g_keep_port != q->port || g_keep_mode != mode)) { tls_close(g_keep); g_keep = NULL; }
+    int rc = (int)0x80431063u;
+    for (int attempt = 0; attempt < 2; attempt++) {              /* a kept connection the server dropped: once more, fresh */
+        const int reused = g_keep != NULL;
+        if (!g_keep) {
+            uint8_t sha[32];
+            char err[160] = "";
+            g_keep = tls_connect_ex(q->host, (int)q->port, 10000, mode, sha, err, sizeof err);
+            if (!g_keep) { online_log("http:   live request failed (%s: %s)", mode == TLS_PLAIN ? "TCP" : "TLS", err); break; }
+            snprintf(g_keep_host, sizeof g_keep_host, "%s", q->host);
+            g_keep_port = q->port;
+            g_keep_mode = mode;
+        }
+        int status = 0, closes = 0;
+        uint8_t *body = NULL;
+        size_t bl = 0;
+        /* headers and body in one send: as two, the second waits on the first's
+         * acknowledgement (Nagle / delayed ACK, ~200 ms) */
+        uint8_t *msg = (uint8_t *)malloc((size_t)hn + q->body_len);
+        if (!msg) break;
+        memcpy(msg, head, (size_t)hn);
+        if (q->body_len) memcpy(msg + hn, q->body, q->body_len);
+        const int sent = tls_send(g_keep, msg, (size_t)hn + q->body_len);
+        free(msg);
+        if (sent != 0 || read_answer(g_keep, &status, &body, &bl, &closes) != 0) {
+            tls_close(g_keep);
+            g_keep = NULL;
+            if (reused) continue;
+            online_log("http:   live request failed (TLS: the connection failed)");
+            break;
+        }
+        if (closes) { tls_close(g_keep); g_keep = NULL; }
+        r->status = status;
+        r->body = body;
+        r->len = (uint32_t)bl;
+        rc = 0;
+        online_log("http:   answered in %llu ms (%s%s)", now_ms() - t0, mode == TLS_PLAIN ? "plain HTTP" : "PSP-era TLS",
+                   reused ? ", kept connection" : "");
+        break;
+    }
+    KEEP_UNLOCK();
+    return rc;
+}
+
+static int legacy_https_send(const psp_http_request *q, psp_http_response *r) { return sock_http_send(q, r, 1); }
+
 #ifdef _WIN32
 /* One WinHTTP session for every request (its handles are thread-safe): the
  * session keeps connections alive, so the game's polling (a POST every few
@@ -1064,6 +1308,7 @@ static HINTERNET http_session(const wchar_t *ua) {
 }
 
 static int live_send(const psp_http_request *q, psp_http_response *r) {
+    if (!strcmp(q->scheme, "https") && g_in_redirect) return legacy_https_send(q, r);   /* any certificate */
     wchar_t host[256], path[1024], ua[256], verb[8];
     MultiByteToWideChar(CP_UTF8, 0, q->host, -1, host, 256);
     MultiByteToWideChar(CP_UTF8, 0, q->path[0] ? q->path : "/", -1, path, 1024);
@@ -1096,7 +1341,8 @@ static int live_send(const psp_http_request *q, psp_http_response *r) {
         rc = 0;
         online_log("http:   answered in %llu ms", (unsigned long long)(GetTickCount64() - t0));
     } else {
-        online_log("http:   live request failed (WinHTTP error %lu)", (unsigned long)GetLastError());
+        const DWORD we = GetLastError();
+        online_log("http:   live request failed (WinHTTP error %lu)", (unsigned long)we);
     }
     if (h) WinHttpCloseHandle(h);
     if (c) WinHttpCloseHandle(c);                       /* the session (and its pooled connection) stays */
@@ -1127,6 +1373,9 @@ static int http_send(const psp_http_request *q, psp_http_response *r) {
         g_in_redirect = 1;
         rc = live_send(&rq, r);
         g_in_redirect = 0;
+#else
+        if (strcmp(rq.scheme, "https")) rc = sock_http_send(&rq, r, TLS_PLAIN);
+        else rc = sock_http_send(&rq, r, 1);                       /* any certificate */
 #endif
         if (rc != 0) {
             online_log("http:   the redirect target did not answer: reporting the server unreachable");
@@ -1139,6 +1388,8 @@ static int http_send(const psp_http_request *q, psp_http_response *r) {
     if (!strcmp(g_http_mode, "stub")) rc = stub_answer(q, r);
 #ifdef _WIN32
     else if (!strcmp(g_http_mode, "live")) rc = live_send(q, r);
+#else
+    else if (!strcmp(g_http_mode, "live") && strcmp(q->scheme, "https")) rc = sock_http_send(q, r, TLS_PLAIN);
 #endif
     if (rc != 0) {
         online_log("http:   not sent (http_mode=%s): reporting the server unreachable (SCE_HTTP_ERROR_NETWORK)", g_http_mode);
@@ -1160,6 +1411,13 @@ void online_init(const char *exe_dir, login_state *login) {
     InitializeCriticalSection(&g_lock);
     InitializeCriticalSection(&g_rpcn_lock);
     InitializeCriticalSection(&g_nlock);
+#else
+    pthread_mutexattr_t ma;
+    pthread_mutexattr_init(&ma);
+    pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_lock, &ma);
+    pthread_mutex_init(&g_rpcn_lock, &ma);
+    pthread_mutexattr_destroy(&ma);
 #endif
     cfg_load();
     g_login = login;

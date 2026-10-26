@@ -17,6 +17,7 @@ void log_path(char *out, size_t cap, const char *base, const char *name);
 
 /* From the sign-in screen's actions. */
 int  online_login_submit(void);
+int  online_register_submit(void);           /* the screen's REGISTER page: a new account */
 void online_login_cancel(void);
 void online_login_closed_ok(void);
 

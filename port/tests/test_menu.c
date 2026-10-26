@@ -305,6 +305,16 @@ static void test_values(void) {
     menu_update(&m, 0, 0);
     m.test_ticks = m.test_logic = 0;
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_EXTRACT_MODELS);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_EXTRACT && m.open);   /* an action: the menu stays open */
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
+    CHECK(m.sel == MENU_LOAD_MODELS && !m.load_models);
+    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_LOAD_MODELS && m.load_models);
+    menu_update(&m, 0, 0);
+    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_LOAD_MODELS && !m.load_models);
+    menu_update(&m, 0, 0);
+    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_QUIT);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);
@@ -429,6 +439,8 @@ static void test_rs_speed(void) {
     menu_update(&m, MI_TOGGLE, 0); menu_update(&m, 0, 0);
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Close */
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Quit game */
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Load models */
+    menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Extract models */
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Tests */
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);       /* Controls */
     menu_update(&m, MI_CONFIRM, 0); menu_update(&m, 0, 0);  /* its page: RIGHT STICK */
@@ -488,7 +500,7 @@ static void test_login(void) {
     login_draw(&l, &img);
     login_update(&l, 0, 0);
     login_update(&l, MI_DOWN, 0); login_update(&l, 0, 0);
-    CHECK(l.sel == LOGIN_BTN_SIGNIN);
+    CHECK(l.sel == LOGIN_BTN_SIGNIN);                                   /* no third field on SIGN IN */
     CHECK(login_update(&l, MI_CONFIRM, 0x2000) == LOGIN_ACT_SUBMIT && l.state == LOGIN_WORKING);   /* Circle */
     login_finish(&l, 0, "sign-in refused: invalid password");
     CHECK(l.state == LOGIN_EDITING && l.error && l.pass[0] == 0);       /* stays open, password cleared */
@@ -511,6 +523,29 @@ static void test_login(void) {
     int act = LOGIN_ACT_NONE, n = 0;
     while (act == LOGIN_ACT_NONE && n++ < 200) act = login_update(&l, 0, 0);
     CHECK(act == LOGIN_ACT_CLOSE_OK);
+
+    /* REGISTER: its page, the email required, CREATE asks to register, success back to SIGN IN */
+    login_open(&l, "s", "newuser");
+    l.sel = LOGIN_BTN_REGISTER;
+    login_update(&l, 0, 0);
+    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_NONE && l.page == LOGIN_PAGE_REGISTER);
+    login_update(&l, 0, 0);
+    l.sel = LOGIN_FIELD_PASS; login_type(&l, 'p'); login_type(&l, 'w');
+    l.sel = LOGIN_BTN_OK;
+    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_NONE && l.error);   /* no email yet */
+    login_update(&l, 0, 0);
+    l.sel = LOGIN_FIELD_EXTRA;
+    for (const char *c = "a@b.c"; *c; c++) login_type(&l, *c);
+    CHECK(!strcmp(l.email, "a@b.c"));
+    l.sel = LOGIN_BTN_OK;
+    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_REGISTER && l.state == LOGIN_WORKING);
+    login_register_finish(&l, 1, "created");
+    CHECK(l.state == LOGIN_EDITING && l.page == LOGIN_PAGE_SIGNIN && !strcmp(l.pass, "pw") && !l.error);
+    login_update(&l, 0, 0);
+    l.sel = LOGIN_BTN_REGISTER;                                          /* Cross on REGISTER: back to SIGN IN */
+    login_update(&l, MI_CONFIRM, 0); login_update(&l, 0, 0);
+    CHECK(l.page == LOGIN_PAGE_REGISTER);
+    CHECK(login_update(&l, MI_BACK, 0) == LOGIN_ACT_NONE && l.page == LOGIN_PAGE_SIGNIN);
 }
 
 /* The password field shows one '*' per typed character (the font had no
@@ -640,8 +675,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 16, 384, 255));            /* the centred 288x239 box (14 items) */
-    CHECK(!changed_outside(96, 16, 384, 255));
+    CHECK(changed_inside(96, 5, 384, 266));             /* the centred 288x261 box (16 items) */
+    CHECK(!changed_outside(96, 5, 384, 266));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */
@@ -867,7 +902,7 @@ static void test_touch_host(void) {
     /* the main page's taps: rows in shown order, 11 pixels apart */
     int x, y, bw, bh;
     menu_box(&m, 480, 272, &x, &y, &bw, &bh);
-    CHECK(bh == 261 + 11 * (11 - 16));                           /* 14 main items, 3 hidden */
+    CHECK(bh == 261 + 11 * (13 - 16));                           /* 16 main items, 3 hidden */
     int row0 = y + 8 + 9 + 8;
     CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 3) == MFX_EDIT_SEGA && m.sel == MENU_SEGA_SERVER);   /* editors open */
     CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 + 3) == MFX_ADHOC_MODE && m.adhoc_mode == 1);

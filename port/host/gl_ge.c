@@ -41,6 +41,242 @@
 #include <psprecomp/mem.h>
 #include <psprecomp/render.h>
 
+/* ---- GL state cache ---------------------------------------------------------------------
+ * Every draw sets its whole state -- target, viewport, scissor, blending,
+ * depth, program, uniforms, texture, sampler -- about 20 calls, ~450 draws a
+ * frame. Most of them repeat what the previous draw set, and each still
+ * costs the driver (at 120 fps the driver's thread fell behind: the swap
+ * waited ~4.5 ms a frame for it). So the state-setting calls of this file go
+ * through this cache and reach GL only when they change something. The
+ * cache is this file's view of the context: code elsewhere that sets state
+ * on it calls gl_ge_state_reset afterwards. */
+static struct {
+    int valid;
+    int en_scissor, en_blend, en_depth, en_cull;         /* -1 unknown */
+    GLint vp[4], sc[4];
+    GLboolean cmask[4];
+    int dmask;
+    GLenum dfunc, bf[4], beq[2];
+    GLfloat bcol[4];
+    GLuint prog, rfbo, dfbo, vao, abuf, tbuf, pbuf;
+    GLenum unit;
+    GLuint tex2d[4], texbuf[4], samp[4];
+    GLenum front, cullf;
+} S;
+static uint64_t n_gl_calls, n_gl_skipped;
+
+void gl_ge_state_reset(void) { memset(&S, 0, sizeof S); }
+void gl_ge_state_counts(uint64_t *made, uint64_t *skipped) { *made = n_gl_calls; *skipped = n_gl_skipped; }
+static void sc_valid(void) {
+    if (S.valid) return;
+    memset(&S, 0xFF, sizeof S);                           /* every cached value unknown */
+    S.valid = 1;
+}
+#define SC_SAME(cond) do { sc_valid(); if (cond) { n_gl_skipped++; return; } n_gl_calls++; } while (0)
+
+static int *sc_cap(GLenum cap) {
+    switch (cap) {
+    case GL_SCISSOR_TEST: return &S.en_scissor;
+    case GL_BLEND:        return &S.en_blend;
+    case GL_DEPTH_TEST:   return &S.en_depth;
+    case GL_CULL_FACE:    return &S.en_cull;
+    default:              return NULL;
+    }
+}
+static void sc_enable(GLenum cap) {
+    sc_valid();
+    int *c = sc_cap(cap);
+    if (c && *c == 1) { n_gl_skipped++; return; }
+    n_gl_calls++;
+    if (c) *c = 1;
+    p_glEnable(cap);
+}
+static void sc_disable(GLenum cap) {
+    sc_valid();
+    int *c = sc_cap(cap);
+    if (c && *c == 0) { n_gl_skipped++; return; }
+    n_gl_calls++;
+    if (c) *c = 0;
+    p_glDisable(cap);
+}
+static void sc_viewport(GLint x, GLint y, GLsizei w, GLsizei h) {
+    SC_SAME(S.vp[0] == x && S.vp[1] == y && S.vp[2] == w && S.vp[3] == h);
+    S.vp[0] = x; S.vp[1] = y; S.vp[2] = w; S.vp[3] = h;
+    p_glViewport(x, y, w, h);
+}
+static void sc_scissor(GLint x, GLint y, GLsizei w, GLsizei h) {
+    SC_SAME(S.sc[0] == x && S.sc[1] == y && S.sc[2] == w && S.sc[3] == h);
+    S.sc[0] = x; S.sc[1] = y; S.sc[2] = w; S.sc[3] = h;
+    p_glScissor(x, y, w, h);
+}
+static void sc_color_mask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
+    SC_SAME(S.cmask[0] == r && S.cmask[1] == g && S.cmask[2] == b && S.cmask[3] == a);
+    S.cmask[0] = r; S.cmask[1] = g; S.cmask[2] = b; S.cmask[3] = a;
+    p_glColorMask(r, g, b, a);
+}
+static void sc_depth_mask(GLboolean m) { SC_SAME(S.dmask == (int)m); S.dmask = m; p_glDepthMask(m); }
+static void sc_depth_func(GLenum f) { SC_SAME(S.dfunc == f); S.dfunc = f; p_glDepthFunc(f); }
+static void sc_blend_func(GLenum a, GLenum b, GLenum c, GLenum d) {
+    SC_SAME(S.bf[0] == a && S.bf[1] == b && S.bf[2] == c && S.bf[3] == d);
+    S.bf[0] = a; S.bf[1] = b; S.bf[2] = c; S.bf[3] = d;
+    p_glBlendFuncSeparate(a, b, c, d);
+}
+static void sc_blend_eq(GLenum a, GLenum b) {
+    SC_SAME(S.beq[0] == a && S.beq[1] == b);
+    S.beq[0] = a; S.beq[1] = b;
+    p_glBlendEquationSeparate(a, b);
+}
+static void sc_blend_color(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
+    SC_SAME(!memcmp(S.bcol, (GLfloat[4]){ r, g, b, a }, sizeof S.bcol));
+    S.bcol[0] = r; S.bcol[1] = g; S.bcol[2] = b; S.bcol[3] = a;
+    p_glBlendColor(r, g, b, a);
+}
+static void sc_front_face(GLenum m) { SC_SAME(S.front == m); S.front = m; p_glFrontFace(m); }
+static void sc_cull_face(GLenum m) { SC_SAME(S.cullf == m); S.cullf = m; p_glCullFace(m); }
+
+/* Uniforms, per program and location (the small locations of the draw
+ * programs; others go straight through). */
+#define SC_PROGS 16
+#define SC_LOCS  64
+static GLuint g_sc_prog_id[SC_PROGS];
+static uint32_t g_sc_uni[SC_PROGS][SC_LOCS][5];           /* 4 words + 1 = set */
+static int sc_prog_slot(GLuint prog) {
+    for (int i = 0; i < SC_PROGS; i++) if (g_sc_prog_id[i] == prog) return i;
+    for (int i = 0; i < SC_PROGS; i++)
+        if (!g_sc_prog_id[i]) { g_sc_prog_id[i] = prog; memset(g_sc_uni[i], 0, sizeof g_sc_uni[i]); return i; }
+    return -1;
+}
+static int g_sc_slot = -1;
+static void sc_use_program(GLuint p) {
+    SC_SAME(S.prog == p);
+    S.prog = p;
+    g_sc_slot = p ? sc_prog_slot(p) : -1;
+    p_glUseProgram(p);
+}
+static int sc_uni_same(GLint loc, const uint32_t w[4]) {
+    sc_valid();
+    if (g_sc_slot < 0 || S.prog == (GLuint)-1 || loc < 0 || loc >= SC_LOCS) return 0;
+    uint32_t *c = g_sc_uni[g_sc_slot][loc];
+    if (c[4] && !memcmp(c, w, 16)) return 1;
+    memcpy(c, w, 16); c[4] = 1;
+    return 0;
+}
+static void sc_uniform4f(GLint loc, GLfloat a, GLfloat b, GLfloat c, GLfloat d) {
+    const GLfloat v[4] = { a, b, c, d };
+    uint32_t w[4];
+    memcpy(w, v, 16);
+    if (sc_uni_same(loc, w)) { n_gl_skipped++; return; }
+    n_gl_calls++;
+    p_glUniform4f(loc, a, b, c, d);
+}
+static void sc_uniform4ui(GLint loc, GLuint a, GLuint b, GLuint c, GLuint d) {
+    const uint32_t w[4] = { a, b, c, d };
+    if (sc_uni_same(loc, w)) { n_gl_skipped++; return; }
+    n_gl_calls++;
+    p_glUniform4ui(loc, a, b, c, d);
+}
+
+static void sc_bind_framebuffer(GLenum target, GLuint f) {
+    sc_valid();
+    const int r = target != GL_DRAW_FRAMEBUFFER, d = target != GL_READ_FRAMEBUFFER;
+    if ((!r || S.rfbo == f) && (!d || S.dfbo == f)) { n_gl_skipped++; return; }
+    n_gl_calls++;
+    if (r) S.rfbo = f;
+    if (d) S.dfbo = f;
+    p_glBindFramebuffer(target, f);
+}
+static void sc_bind_vertex_array(GLuint v) { SC_SAME(S.vao == v); S.vao = v; p_glBindVertexArray(v); }
+static void sc_bind_buffer(GLenum target, GLuint b) {
+    sc_valid();
+    GLuint *c = target == GL_ARRAY_BUFFER ? &S.abuf : target == GL_TEXTURE_BUFFER ? &S.tbuf
+              : target == GL_PIXEL_PACK_BUFFER ? &S.pbuf : NULL;   /* the element buffer is the VAO's */
+    if (c && *c == b) { n_gl_skipped++; return; }
+    n_gl_calls++;
+    if (c) *c = b;
+    p_glBindBuffer(target, b);
+}
+static void sc_active_texture(GLenum u) { SC_SAME(S.unit == u); S.unit = u; p_glActiveTexture(u); }
+static void sc_bind_texture(GLenum target, GLuint t) {
+    sc_valid();
+    const GLuint u = S.unit == (GLenum)-1 ? 99u : S.unit - GL_TEXTURE0;
+    GLuint *c = u < 4 ? (target == GL_TEXTURE_2D ? &S.tex2d[u] : target == GL_TEXTURE_BUFFER ? &S.texbuf[u] : NULL) : NULL;
+    if (c && *c == t) { n_gl_skipped++; return; }
+    n_gl_calls++;
+    if (c) *c = t;
+    p_glBindTexture(target, t);
+}
+static void sc_bind_sampler(GLuint unit, GLuint s) {
+    sc_valid();
+    if (unit < 4 && S.samp[unit] == s) { n_gl_skipped++; return; }
+    n_gl_calls++;
+    if (unit < 4) S.samp[unit] = s;
+    p_glBindSampler(unit, s);
+}
+
+/* Deleting a bound object unbinds it: forget those bindings. */
+static void sc_forget(GLuint *slot, GLuint name) { if (*slot == name) *slot = (GLuint)-1; }
+static void sc_delete_textures(GLsizei n, const GLuint *t) {
+    for (GLsizei i = 0; i < n; i++) for (int u = 0; u < 4; u++) { sc_forget(&S.tex2d[u], t[i]); sc_forget(&S.texbuf[u], t[i]); }
+    p_glDeleteTextures(n, t);
+}
+static void sc_delete_framebuffers(GLsizei n, const GLuint *f) {
+    for (GLsizei i = 0; i < n; i++) { sc_forget(&S.rfbo, f[i]); sc_forget(&S.dfbo, f[i]); }
+    p_glDeleteFramebuffers(n, f);
+}
+static void sc_delete_buffers(GLsizei n, const GLuint *b) {
+    for (GLsizei i = 0; i < n; i++) { sc_forget(&S.abuf, b[i]); sc_forget(&S.tbuf, b[i]); sc_forget(&S.pbuf, b[i]); }
+    p_glDeleteBuffers(n, b);
+}
+
+#undef glEnable
+#undef glDisable
+#undef glViewport
+#undef glScissor
+#undef glColorMask
+#undef glDepthMask
+#undef glDepthFunc
+#undef glBlendFuncSeparate
+#undef glBlendEquationSeparate
+#undef glBlendColor
+#undef glFrontFace
+#undef glCullFace
+#undef glUseProgram
+#undef glUniform4f
+#undef glUniform4ui
+#undef glBindFramebuffer
+#undef glBindVertexArray
+#undef glBindBuffer
+#undef glActiveTexture
+#undef glBindTexture
+#undef glBindSampler
+#undef glDeleteTextures
+#undef glDeleteFramebuffers
+#undef glDeleteBuffers
+#define glEnable                sc_enable
+#define glDisable               sc_disable
+#define glViewport              sc_viewport
+#define glScissor               sc_scissor
+#define glColorMask             sc_color_mask
+#define glDepthMask             sc_depth_mask
+#define glDepthFunc             sc_depth_func
+#define glBlendFuncSeparate     sc_blend_func
+#define glBlendEquationSeparate sc_blend_eq
+#define glBlendColor            sc_blend_color
+#define glFrontFace             sc_front_face
+#define glCullFace              sc_cull_face
+#define glUseProgram            sc_use_program
+#define glUniform4f             sc_uniform4f
+#define glUniform4ui            sc_uniform4ui
+#define glBindFramebuffer       sc_bind_framebuffer
+#define glBindVertexArray       sc_bind_vertex_array
+#define glBindBuffer            sc_bind_buffer
+#define glActiveTexture         sc_active_texture
+#define glBindTexture           sc_bind_texture
+#define glBindSampler           sc_bind_sampler
+#define glDeleteTextures        sc_delete_textures
+#define glDeleteFramebuffers    sc_delete_framebuffers
+#define glDeleteBuffers         sc_delete_buffers
+
 #define VRAM_SIZE 0x200000u
 #define MAX_RT    32
 #define MAX_DEPTH 8
@@ -632,7 +868,52 @@ static tex_entry *tex_find(uint64_t key) {
     return NULL;
 }
 
+/* Texture replacement (gl_ge_set_texture_source): the host's RGBA for a
+ * texture's pixel address, at any size -- uploaded once per image and used in
+ * place of the GE texture. UVs are in the GE texture's texels (texture_view
+ * scales by its size), so a bigger image maps the same. */
+static const uint8_t *(*g_tex_source)(uint32_t addr, int *w, int *h);
+static unsigned (*g_tex_source_gen)(void);
+void gl_ge_set_texture_source(const uint8_t *(*fn)(uint32_t addr, int *w, int *h), unsigned (*gen)(void)) {
+    g_tex_source = fn;
+    g_tex_source_gen = gen;
+}
+#define REP_CACHE 1024
+static struct { const uint8_t *img; GLuint tex; } g_rep_tex[REP_CACHE];
+static unsigned g_rep_seen_gen;
+static uint64_t n_tex_replaced;
+
+static tex_entry *tex_replacement(const psp_gpu_state *st) {
+    int w = 0, h = 0;
+    const uint8_t *img = g_tex_source(st->tex_addr, &w, &h);
+    if (!img || w <= 0 || h <= 0) return NULL;
+    const unsigned gen = g_tex_source_gen ? g_tex_source_gen() : 0;
+    if (gen != g_rep_seen_gen) {                         /* images replaced or moved: upload again */
+        for (int i = 0; i < REP_CACHE; i++) { if (g_rep_tex[i].tex) glDeleteTextures(1, &g_rep_tex[i].tex); g_rep_tex[i].tex = 0; g_rep_tex[i].img = NULL; }
+        g_rep_seen_gen = gen;
+    }
+    static tex_entry e;
+    int slot = -1;
+    for (int i = 0; i < REP_CACHE && slot < 0; i++) if (g_rep_tex[i].img == img) slot = i;
+    if (slot < 0) {
+        for (int i = 0; i < REP_CACHE && slot < 0; i++) if (!g_rep_tex[i].img) slot = i;
+        if (slot < 0) return NULL;
+        g_rep_tex[slot].img = img;
+        g_rep_tex[slot].tex = new_texture((uint32_t)w, (uint32_t)h);
+        glBindTexture(GL_TEXTURE_2D, g_rep_tex[slot].tex);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, img);
+        n_tex_replaced++;
+    }
+    e.tex = g_rep_tex[slot].tex;
+    e.w = (uint32_t)w; e.h = (uint32_t)h;
+    return &e;
+}
+
 static tex_entry *tex_get(const psp_gpu_state *st) {
+    if (g_tex_source) {
+        tex_entry *r = tex_replacement(st);
+        if (r) return r;
+    }
     tex_entry *e = tex_find(st->tex_key);
     uint64_t f = frame_no();
     if (e && e->check_frame == f) { e->last_use = ++g_use; return e; }
@@ -743,6 +1024,7 @@ static GLuint sampler(int linear, int cu, int cv) {
 
 static int rt_resolve_copy(rt_entry *r);
 static int xfer_enabled(void);
+static int g_tex_self;                  /* the last texture_view sampled the target being drawn to */
 
 /* A copy of target t to sample while t is being drawn to. */
 static GLuint scratch_copy(const rt_entry *t) {
@@ -772,6 +1054,7 @@ static GLuint texture_view(const psp_gpu_state *st, rt_entry *target, float scal
                 n_rt_tex++;
                 scale[0] = 1.0f / (float)r->w;
                 scale[1] = 1.0f / (float)r->h;
+                if (r == target) g_tex_self = 1;
                 return r != target ? r->tex : scratch_copy(r);
             }
         }
@@ -783,6 +1066,7 @@ static GLuint texture_view(const psp_gpu_state *st, rt_entry *target, float scal
                 n_rt_tex++;
                 scale[0] = 1.0f / (float)t->w;
                 scale[1] = 1.0f / (float)t->h;
+                if (t == target) g_tex_self = 1;
                 return t != target ? t->tex : scratch_copy(t);
             }
             if (t->dirty && overlaps(toff, tend, row_addr(t, t->dy0), row_addr(t, t->dy1))) { g_rb_reason = 3; rt_readback(t); }
@@ -993,7 +1277,9 @@ static void draw_rows(rt_entry *t, const psp_gpu_state *st, float ymin, float ym
     if (y0 < y1) rows_mark(t, (uint32_t)y0, (uint32_t)y1);
 }
 
+static void tl_flush(void);
 static int gl_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts) {
+    tl_flush();
     if (nverts <= 0 || (uint32_t)nverts > VB_VERTS) return 1;
     depth_entry *d;
     GLuint tex;
@@ -1050,24 +1336,48 @@ static int gl_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts)
 /* A transformed triangle draw with the vertex work in TLVS_SRC (render.h
  * psp_gpu_tl): the game's vertex bytes and the triangle list into their
  * rings, the GE state as uniforms, culling by GL. Where the triangles land
- * is not known here, so the whole scissor counts as written. */
-static int gl_draw_tl(const psp_gpu_state *st, const psp_gpu_tl *tl) {
-    if (!g_tlp.prog || tl->nidx <= 0) return 1;
-    const uint32_t vb = tl->vbytes, ib = (uint32_t)tl->nidx * 4u;
-    if (vb > g_tlvb_bytes || ib > TLIB_BYTES) return 1;
+ * is not known here, so the whole scissor counts as written.
+ *
+ * Draws are merged, as PPSSPP's draw engine does: a draw whose state,
+ * matrices, lights and culling equal the previous draw's is appended to it
+ * -- its vertex bytes after the previous ones (placed a whole number of
+ * vertices on, so one base address serves both), its indices moved by that
+ * many vertices -- and the batch becomes one GL draw when something differs
+ * or something is about to look at the targets (tl_flush). GL draws a draw's
+ * triangles in order, so the pixels are the same; what goes is the per-draw
+ * cost (target and texture lookups, uploads, ~20 GL calls): the shops, with
+ * the lobby in view, made ~520 draws of ~57 triangles a frame. A draw that
+ * samples the target it draws into (texture_view's scratch copy) is never
+ * merged: the next one must see what it drew. */
+#define TLB_VBYTES (4u << 20)
+#define TLB_IDX    (1u << 20)
+static uint8_t  g_tlb_v[TLB_VBYTES];
+static uint32_t g_tlb_i[TLB_IDX];
+static struct {
+    int on, self, cull;
+    psp_gpu_state st;
+    float u[PSP_TL_NU * 4];
+    int32_t i[PSP_TL_NI * 4];            /* with the misalignment (LAYOUT0.y) zeroed */
+    rt_entry *t;
     depth_entry *d;
     GLuint tex;
     float uvs[2];
-    rt_entry *t = draw_target(st, &d, &tex, uvs);
-    if (!t) return 1;
+    uint32_t base, stride, vend;         /* staging: the byte vertex 0 is at; vertex size; bytes used */
+    int nidx;
+} B;
+static uint64_t n_tl_gl_draws, n_tl_merged;
 
+static void tl_flush(void) {
+    if (!B.on) return;
+    B.on = 0;
+    const uint32_t vb = (B.vend + 3u) & ~3u, ib = (uint32_t)B.nidx * 4u;
     /* Sub-data uploads into rings, orphaned on wrap (as gl_draw's vertices). */
     glBindBuffer(GL_TEXTURE_BUFFER, g_tlvb);
     if (g_tlvb_pos + vb > g_tlvb_bytes) {
         glBufferData(GL_TEXTURE_BUFFER, (GLsizeiptr)g_tlvb_bytes, NULL, GL_STREAM_DRAW);
         g_tlvb_pos = 0;
     }
-    glBufferSubData(GL_TEXTURE_BUFFER, (GLintptr)g_tlvb_pos, (GLsizeiptr)vb, tl->vdata);
+    glBufferSubData(GL_TEXTURE_BUFFER, (GLintptr)g_tlvb_pos, (GLsizeiptr)vb, g_tlb_v);
     const uint32_t vfirst = g_tlvb_pos;
     g_tlvb_pos += vb;
     glBindVertexArray(g_tlvao);                     /* holds the index buffer binding */
@@ -1075,20 +1385,20 @@ static int gl_draw_tl(const psp_gpu_state *st, const psp_gpu_tl *tl) {
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)TLIB_BYTES, NULL, GL_STREAM_DRAW);
         g_tlib_pos = 0;
     }
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)g_tlib_pos, (GLsizeiptr)ib, tl->idx);
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)g_tlib_pos, (GLsizeiptr)ib, g_tlb_i);
     const uint32_t ifirst = g_tlib_pos;
     g_tlib_pos += ib;
 
-    draw_state(st, t, d, tex, &g_tlp, uvs);
+    draw_state(&B.st, B.t, B.d, B.tex, &g_tlp, B.uvs);
     GLint li[PSP_TL_NI * 4];
-    memcpy(li, tl->i, sizeof li);
-    li[4 * PSP_TL_I_LAYOUT0 + 1] += (GLint)vfirst;   /* the misalignment, plus where these bytes are in the ring */
+    memcpy(li, B.i, sizeof li);
+    li[4 * PSP_TL_I_LAYOUT0 + 1] = (GLint)(vfirst + B.base);   /* where vertex 0 is in the ring */
     for (int k = 0; k < 4; k++) {
         const int first = TL_GROUPS[k][0], n = TL_GROUPS[k][1];
         const size_t bytes = (size_t)n * 4 * sizeof(float);
-        if (g_tl_sent && !memcmp(g_tl_sent_u + 4 * first, tl->u + 4 * first, bytes)) continue;
-        glUniform4fv(u_tl_group[k], n, tl->u + 4 * first);
-        memcpy(g_tl_sent_u + 4 * first, tl->u + 4 * first, bytes);
+        if (g_tl_sent && !memcmp(g_tl_sent_u + 4 * first, B.u + 4 * first, bytes)) continue;
+        glUniform4fv(u_tl_group[k], n, B.u + 4 * first);
+        memcpy(g_tl_sent_u + 4 * first, B.u + 4 * first, bytes);
     }
     if (!g_tl_sent || memcmp(g_tl_sent_i, li, sizeof li)) {
         glUniform4iv(u_tl_li, PSP_TL_NI, li);
@@ -1100,14 +1410,75 @@ static int gl_draw_tl(const psp_gpu_state *st, const psp_gpu_tl *tl) {
     glActiveTexture(GL_TEXTURE0);
     /* GL's window y is PSP y here (no flip), so GL's counter-clockwise --
      * positive signed area -- is render.h's cull 1. */
-    if (tl->cull) {
+    if (B.cull) {
         glEnable(GL_CULL_FACE);
         glFrontFace(GL_CCW);
-        glCullFace(tl->cull == 1 ? GL_FRONT : GL_BACK);
+        glCullFace(B.cull == 1 ? GL_FRONT : GL_BACK);
     }
-    glDrawElements(GL_TRIANGLES, tl->nidx, GL_UNSIGNED_INT, (const void *)(uintptr_t)ifirst);
-    if (tl->cull) glDisable(GL_CULL_FACE);
+    glDrawElements(GL_TRIANGLES, B.nidx, GL_UNSIGNED_INT, (const void *)(uintptr_t)ifirst);
+    if (B.cull) glDisable(GL_CULL_FACE);
+    n_tl_gl_draws++;
+}
 
+/* Where the next draw's vertex bytes go in the batch so that its vertex 0 is
+ * vertex *k of the batch: a word-aligned byte offset past what is there. */
+static int tl_place(uint32_t misalign, uint32_t vbytes, uint32_t *off, uint32_t *k) {
+    const uint32_t s = B.stride;
+    uint32_t kk = (B.vend + misalign - B.base + s - 1) / s;
+    for (int t = 0; t < 4; t++, kk++) {
+        const uint32_t o = B.base + kk * s - misalign;
+        if ((o & 3u) == 0 && o >= B.vend && o + vbytes <= TLB_VBYTES) { *off = o; *k = kk; return 1; }
+    }
+    return 0;
+}
+
+static int gl_draw_tl(const psp_gpu_state *st, const psp_gpu_tl *tl) {
+    if (!g_tlp.prog || tl->nidx <= 0) return 1;
+    const uint32_t vb = tl->vbytes, ib = (uint32_t)tl->nidx * 4u;
+    if (vb > g_tlvb_bytes || vb > TLB_VBYTES || ib > TLIB_BYTES || (uint32_t)tl->nidx > TLB_IDX) return 1;
+    const uint32_t misalign = (uint32_t)tl->i[4 * PSP_TL_I_LAYOUT0 + 1], stride = (uint32_t)tl->i[4 * PSP_TL_I_LAYOUT0 + 0];
+    if (B.on) {
+        int same = !B.self && B.cull == tl->cull && B.stride == stride && stride &&
+                   (uint32_t)(B.nidx + tl->nidx) <= TLB_IDX && !memcmp(&B.st, st, sizeof *st) &&
+                   !memcmp(B.u, tl->u, sizeof B.u);
+        if (same) {
+            int32_t ci[PSP_TL_NI * 4];
+            memcpy(ci, tl->i, sizeof ci);
+            ci[4 * PSP_TL_I_LAYOUT0 + 1] = 0;
+            same = !memcmp(B.i, ci, sizeof ci);
+        }
+        uint32_t off, k;
+        if (same && tl_place(misalign, vb, &off, &k)) {
+            memcpy(g_tlb_v + off, tl->vdata, vb);
+            B.vend = off + vb;
+            for (int j = 0; j < tl->nidx; j++) g_tlb_i[B.nidx + j] = tl->idx[j] + k;
+            B.nidx += tl->nidx;
+            n_draws++;
+            n_tl_draws++;
+            n_tl_merged++;
+            n_tris += (uint64_t)tl->nidx / 3;
+            return 0;
+        }
+        tl_flush();
+    }
+    depth_entry *d;
+    GLuint tex;
+    float uvs[2];
+    g_tex_self = 0;
+    rt_entry *t = draw_target(st, &d, &tex, uvs);
+    if (!t) return 1;
+    B.on = 1;
+    B.self = g_tex_self;
+    B.cull = tl->cull;
+    B.st = *st;
+    memcpy(B.u, tl->u, sizeof B.u);
+    memcpy(B.i, tl->i, sizeof B.i);
+    B.i[4 * PSP_TL_I_LAYOUT0 + 1] = 0;
+    B.t = t; B.d = d; B.tex = tex; B.uvs[0] = uvs[0]; B.uvs[1] = uvs[1];
+    memcpy(g_tlb_v, tl->vdata, vb);
+    B.base = misalign; B.stride = stride; B.vend = vb;
+    memcpy(g_tlb_i, tl->idx, ib);
+    B.nidx = tl->nidx;
     draw_rows(t, st, (float)st->sy0, (float)st->sy1);
     n_draws++;
     n_tl_draws++;
@@ -1116,6 +1487,7 @@ static int gl_draw_tl(const psp_gpu_state *st, const psp_gpu_tl *tl) {
 }
 
 static void gl_sync_vram(uint32_t addr, uint32_t bytes) {
+    tl_flush();
     if ((addr & 0x0F000000u) != 0x04000000u) return;
     uint32_t a0 = vram_off(addr), a1 = a0 + bytes;
     for (int i = 0; i < MAX_RT; i++)
@@ -1124,6 +1496,7 @@ static void gl_sync_vram(uint32_t addr, uint32_t bytes) {
 }
 
 static void gl_vram_written(uint32_t addr, uint32_t bytes) {
+    tl_flush();
     if ((addr & 0x0F000000u) != 0x04000000u) return;
     uint32_t a0 = vram_off(addr), a1 = a0 + bytes;
     for (int i = 0; i < MAX_RT; i++)
@@ -1138,6 +1511,7 @@ static void gl_cpu_access(uint32_t off, uint32_t size) {
     int dirty = 0, armed = 0;
     for (uint32_t p = p0; p <= p1; p++) { dirty |= g_pg_dirty[p]; armed |= g_pg_armed[p]; }
     if (!dirty && !armed) return;
+    tl_flush();
     const uint32_t q0 = p0 << PG_SHIFT, q1 = (p1 + 1) << PG_SHIFT;
     if (dirty) {
         for (int i = 0; i < MAX_RT; i++)
@@ -1169,6 +1543,56 @@ static void gl_cpu_access(uint32_t off, uint32_t size) {
     }
 }
 
+/* With the GE thread (psp_ge_thread_start) the targets live there: a game
+ * access to VRAM first waits for the GE to finish what it was handed -- what
+ * it would have seen without the thread -- and then, if it touches a target's
+ * pages, has the readback done there. The GE's own VRAM reads (textures) are
+ * on that thread already. */
+static void cpu_access_job(void *p) { const uint32_t *a = (const uint32_t *)p; gl_cpu_access(a[0], a[1]); }
+static uint64_t n_cpu_access_calls, n_vram_waits, vram_wait_us;
+static struct { uint32_t ra; uint64_t n, us; } g_vw[8];
+
+/* For the perf line: game VRAM accesses that waited for the GE thread
+ * (count, us) and the 3 call sites that waited longest, "ra:ms" each. */
+void gl_ge_vram_waits(uint64_t *n, uint64_t *us, char *top, size_t cap) {
+    *n = n_vram_waits; *us = vram_wait_us;
+    top[0] = 0;
+    int used[8] = { 0 };
+    size_t len = 0;
+    for (int r = 0; r < 3; r++) {
+        int b = -1;
+        for (int k = 0; k < 8; k++) if (g_vw[k].ra && !used[k] && (b < 0 || g_vw[k].us > g_vw[b].us)) b = k;
+        if (b < 0) break;
+        used[b] = 1;
+        len += (size_t)snprintf(top + len, len < cap ? cap - len : 0, "%s%08X:%.0f", r ? " " : "", g_vw[b].ra, g_vw[b].us / 1000.0);
+        if (len >= cap) break;
+    }
+}
+static void gl_vram_hook(uint32_t off, uint32_t size) {
+    if (!psp_ge_threaded() || psp_ge_on_thread()) { gl_cpu_access(off, size); return; }
+    {   /* how long game accesses to VRAM wait for the GE thread, and from where (perf line) */
+        const uint64_t t0 = psp_sched_now_us();
+        psp_ge_wait_idle();
+        const uint64_t dt = psp_sched_now_us() - t0;
+        if (dt >= 20) {
+            const uint32_t ra = psp_cpu.r[31];
+            n_vram_waits++; vram_wait_us += dt;
+            int k = 0;
+            while (k < 8 && g_vw[k].ra && g_vw[k].ra != ra) k++;
+            if (k == 8) { k = 0; for (int j = 1; j < 8; j++) if (g_vw[j].us < g_vw[k].us) k = j; g_vw[k].ra = ra; g_vw[k].n = 0; g_vw[k].us = 0; }
+            g_vw[k].ra = ra; g_vw[k].n++; g_vw[k].us += dt;
+        }
+    }
+    const uint32_t a1 = off + size > VRAM_SIZE ? VRAM_SIZE : off + size;
+    if (off >= a1) return;
+    int hit = 0;
+    for (uint32_t p = off >> PG_SHIFT; p <= (a1 - 1) >> PG_SHIFT; p++) hit |= g_pg_dirty[p] | g_pg_armed[p];
+    if (!hit) return;
+    uint32_t a[2] = { off, size };
+    n_cpu_access_calls++;
+    psp_ge_call(cpu_access_job, a, 1);
+}
+
 /* ---- presenting without a stall (as d3d11_present) ------------------------------------------------
  * While the display target is ahead of VRAM, each vblank queues an
  * asynchronous read of it into one of PRESENT_RING pixel buffers, with a
@@ -1190,6 +1614,7 @@ static const rt_entry *g_q_t;                  /* the target and its stamp at th
 static uint64_t g_q_stamp;
 
 int gl_ge_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
+    tl_flush();
     if (!g_ok || (addr & 0x0F000000u) != 0x04000000u) return 0;
     rt_entry *t = rt_find(vram_off(addr), stride, fmt);
     const int ahead = t && t->dirty && t->stride == stride && t->fmt == fmt && t->w >= (uint32_t)w;
@@ -1391,6 +1816,7 @@ static void blit_draw(float sx, float sy, int tw, int th, int fw, int x, int y, 
  * current one (e.g. a video); use gl_ge_present + gl_blit_frame. */
 int gl_ge_present_direct(uint32_t addr, uint32_t stride, int fmt, int w, int h,
                          int x, int y, int vw, int vh, int cw, int ch) {
+    tl_flush();
     if (!blit_ready() || (addr & 0x0F000000u) != 0x04000000u) return 0;
     rt_entry *t = rt_find(vram_off(addr), stride, fmt);
     if (!t || !t->dirty || t->w < (uint32_t)w || t->h < (uint32_t)h) return 0;
@@ -1404,6 +1830,7 @@ int gl_ge_present_direct(uint32_t addr, uint32_t stride, int fmt, int w, int h,
 /* A small 0xAARRGGBB image drawn over the window at x, y (top-left origin),
  * scaled to vw x vh, without clearing (the FPS counter). */
 int gl_draw_overlay(const uint32_t *px, int w, int h, int x, int y, int vw, int vh, int cw, int ch) {
+    tl_flush();
     static GLuint tex;
     static int tw, th;
     if (!blit_ready()) return -1;
@@ -1435,6 +1862,7 @@ int gl_draw_overlay(const uint32_t *px, int w, int h, int x, int y, int vw, int 
 }
 
 int gl_blit_frame(const uint32_t *px, int w, int h, int x, int y, int vw, int vh, int cw, int ch) {
+    tl_flush();
     if (!blit_ready()) return -1;
     if (!g_btex || g_btex_w != w || g_btex_h != h) {
         if (g_btex) glDeleteTextures(1, &g_btex);
@@ -1562,7 +1990,7 @@ int gl_ge_init(void) {
     tl_init();
     g_ok = 1;
     psp_gpu_set_backend(&GL_BACKEND);
-    psp_mem_set_vram_hook(gl_cpu_access);
+    psp_mem_set_vram_hook(gl_vram_hook);
     fprintf(stderr, "gl: rendering on the GPU (%s; %s)\n", (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION));
     return 0;
 }
@@ -1576,10 +2004,15 @@ void gl_ge_report(FILE *out) {
             (unsigned long long)n_rt_tex, (unsigned long long)n_approx);
     fprintf(out, "  gl vertex work      %llu draws transformed and lit on the GPU%s\n", (unsigned long long)n_tl_draws,
             g_tlp.prog ? "" : " (unavailable: on the CPU)");
+    fprintf(out, "  gl merged draws     %llu merged into the draw before; %llu GL draws for them\n",
+            (unsigned long long)n_tl_merged, (unsigned long long)n_tl_gl_draws);
     fprintf(out, "  gl readbacks by cause: relayout %llu, evict %llu, grow %llu, texture %llu, overlap %llu, sync %llu, cpu access %llu\n",
             (unsigned long long)n_rb_reason[0], (unsigned long long)n_rb_reason[1], (unsigned long long)n_rb_reason[2],
             (unsigned long long)n_rb_reason[3], (unsigned long long)n_rb_reason[4], (unsigned long long)n_rb_reason[5],
             (unsigned long long)n_rb_reason[6]);
+    if (psp_ge_threaded())
+        fprintf(out, "  gl on the GE thread %llu game accesses to VRAM handed to it\n", (unsigned long long)n_cpu_access_calls);
+    fprintf(out, "  gl state calls      %llu made, %llu skipped as unchanged\n", (unsigned long long)n_gl_calls, (unsigned long long)n_gl_skipped);
     fprintf(out, "  gl transfers        %llu GPU-side target-to-target transfers\n", (unsigned long long)n_xfer);
     fprintf(out, "  gl present          %llu frames from asynchronous copies, %llu from VRAM, %llu vblanks kept the last picture\n",
             (unsigned long long)n_present_async, (unsigned long long)n_present_vram, (unsigned long long)n_present_kept);

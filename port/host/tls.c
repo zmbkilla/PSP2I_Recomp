@@ -98,6 +98,10 @@ void tls_close(tls_conn *t) {
 }
 
 tls_conn *tls_connect(const char *host, int port, int timeout_ms, uint8_t cert_sha256[32], char *err, size_t errcap) {
+    return tls_connect_ex(host, port, timeout_ms, 0, cert_sha256, err, errcap);
+}
+
+tls_conn *tls_connect_ex(const char *host, int port, int timeout_ms, int legacy, uint8_t cert_sha256[32], char *err, size_t errcap) {
     static int wsa;
     if (!wsa) { WSADATA w; wsa = WSAStartup(MAKEWORD(2, 2), &w) == 0; }
     tls_conn *t = (tls_conn *)calloc(1, sizeof *t);
@@ -108,10 +112,12 @@ tls_conn *tls_connect(const char *host, int port, int timeout_ms, uint8_t cert_s
     SCHANNEL_CRED sc;
     memset(&sc, 0, sizeof sc);
     sc.dwVersion = SCHANNEL_CRED_VERSION;
-    sc.grbitEnabledProtocols = SP_PROT_TLS1_2_CLIENT;
     /* The certificate is checked by the caller (pinned fingerprint): the
-     * test server's is self-signed, which the system store rejects. */
-    sc.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
+     * test server's is self-signed, which the system store rejects. Legacy:
+     * a server for the PSP itself -- TLS 1.0 and an MD5-signed 1024-bit
+     * certificate, which Windows' own validation (WinHTTP) refuses. */
+    sc.grbitEnabledProtocols = legacy ? SP_PROT_TLS1_0_CLIENT | SP_PROT_TLS1_1_CLIENT | SP_PROT_TLS1_2_CLIENT : SP_PROT_TLS1_2_CLIENT;
+    sc.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | (legacy ? 0 : SCH_USE_STRONG_CRYPTO);
     TimeStamp ts;
     if (AcquireCredentialsHandleA(NULL, UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL, &sc, NULL, NULL, &t->cred, &ts) != SEC_E_OK) {
         set_err(err, errcap, "TLS is unavailable on this system (%ld)", (long)GetLastError());
@@ -244,6 +250,18 @@ int tls_wait_readable(tls_conn *t, int timeout_ms) {
     return k < 0 ? -1 : k > 0;
 }
 
+int tls_recv_some(tls_conn *t, void *out, size_t cap) {
+    if (t->plain_off >= t->plain_len) {
+        t->plain_off = t->plain_len = 0;
+        if (fill_plain(t) != 0) return -1;
+    }
+    size_t n = t->plain_len - t->plain_off;
+    if (n > cap) n = cap;
+    memcpy(out, t->plain + t->plain_off, n);
+    t->plain_off += n;
+    return (int)n;
+}
+
 int tls_recv(tls_conn *t, void *out, size_t len) {
     uint8_t *o = (uint8_t *)out;
     size_t got = 0;
@@ -261,15 +279,192 @@ int tls_recv(tls_conn *t, void *out, size_t len) {
     return 0;
 }
 
-#else  /* !_WIN32 */
-struct tls_conn { int unused; };
-tls_conn *tls_connect(const char *host, int port, int timeout_ms, uint8_t sha[32], char *err, size_t cap) {
-    (void)host; (void)port; (void)timeout_ms; (void)sha;
-    if (err && cap) snprintf(err, cap, "TLS is only implemented on Windows so far");
-    return NULL;
+#else  /* !_WIN32: mbedTLS (port/third_party/mbedtls) over BSD sockets */
+
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/net_sockets.h"           /* (its error codes only) */
+#include "mbedtls/sha256.h"
+#include "mbedtls/ssl.h"
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+struct tls_conn {
+    int fd;
+    int plain;                  /* TLS_PLAIN: no TLS, the socket as it is */
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config conf;
+    mbedtls_ctr_drbg_context drbg;
+    mbedtls_entropy_context entropy;
+    int have_ssl;
+};
+
+static void set_err(char *err, size_t cap, const char *fmt, long code) {
+    if (err && cap) snprintf(err, cap, fmt, code);
 }
-int  tls_send(tls_conn *t, const void *d, size_t n) { (void)t; (void)d; (void)n; return -1; }
-int  tls_recv(tls_conn *t, void *o, size_t n) { (void)t; (void)o; (void)n; return -1; }
-int  tls_wait_readable(tls_conn *t, int ms) { (void)t; (void)ms; return -1; }
-void tls_close(tls_conn *t) { (void)t; }
+
+static int tcp_connect(const char *host, int port, int timeout_ms, char *err, size_t cap) {
+    char ps[16];
+    snprintf(ps, sizeof ps, "%d", port);
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    const int g = getaddrinfo(host, ps, &hints, &res);
+    if (g != 0 || !res) { set_err(err, cap, "could not resolve the server name (%ld)", (long)g); return -1; }
+    int fd = -1;
+    for (struct addrinfo *a = res; a && fd < 0; a = a->ai_next) {
+        fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        if (fd < 0) continue;
+        const int fl = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        int ok = connect(fd, a->ai_addr, a->ai_addrlen) == 0;
+        if (!ok && errno == EINPROGRESS) {
+            struct pollfd pf = { fd, POLLOUT, 0 };
+            int e = 0;
+            socklen_t el = sizeof e;
+            ok = poll(&pf, 1, timeout_ms) == 1 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) == 0 && e == 0;
+        }
+        if (!ok) { close(fd); fd = -1; continue; }
+        fcntl(fd, F_SETFL, fl);
+        struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    }
+    freeaddrinfo(res);
+    if (fd < 0) set_err(err, cap, "could not connect to the server (timed out or refused)%.0ld", 0);
+    return fd;
+}
+
+static int bio_send(void *ctx, const unsigned char *buf, size_t len) {
+    const int k = (int)send(*(int *)ctx, buf, len, MSG_NOSIGNAL);
+    if (k < 0) return errno == EAGAIN || errno == EWOULDBLOCK ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
+    return k;
+}
+static int bio_recv(void *ctx, unsigned char *buf, size_t len) {
+    const int k = (int)recv(*(int *)ctx, buf, len, 0);
+    if (k < 0) return errno == EAGAIN || errno == EWOULDBLOCK ? MBEDTLS_ERR_SSL_TIMEOUT : MBEDTLS_ERR_NET_RECV_FAILED;
+    if (k == 0) return MBEDTLS_ERR_NET_CONN_RESET;
+    return k;
+}
+
+void tls_close(tls_conn *t) {
+    if (!t) return;
+    if (t->have_ssl) {
+        mbedtls_ssl_close_notify(&t->ssl);
+        mbedtls_ssl_free(&t->ssl);
+        mbedtls_ssl_config_free(&t->conf);
+        mbedtls_ctr_drbg_free(&t->drbg);
+        mbedtls_entropy_free(&t->entropy);
+    }
+    if (t->fd >= 0) close(t->fd);
+    free(t);
+}
+
+tls_conn *tls_connect(const char *host, int port, int timeout_ms, uint8_t cert_sha256[32], char *err, size_t errcap) {
+    return tls_connect_ex(host, port, timeout_ms, 0, cert_sha256, err, errcap);
+}
+
+tls_conn *tls_connect_ex(const char *host, int port, int timeout_ms, int legacy, uint8_t cert_sha256[32], char *err, size_t errcap) {
+    tls_conn *t = (tls_conn *)calloc(1, sizeof *t);
+    if (!t) return NULL;
+    t->fd = tcp_connect(host, port, timeout_ms, err, errcap);
+    if (t->fd < 0) { tls_close(t); return NULL; }
+    if (legacy == TLS_PLAIN) { t->plain = 1; if (cert_sha256) memset(cert_sha256, 0, 32); return t; }
+
+    mbedtls_ssl_init(&t->ssl);
+    mbedtls_ssl_config_init(&t->conf);
+    mbedtls_ctr_drbg_init(&t->drbg);
+    mbedtls_entropy_init(&t->entropy);
+    t->have_ssl = 1;
+    static const char pers[] = "psp2i";
+    int rc = mbedtls_ctr_drbg_seed(&t->drbg, mbedtls_entropy_func, &t->entropy, (const unsigned char *)pers, sizeof pers - 1);
+    if (rc == 0) rc = mbedtls_ssl_config_defaults(&t->conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+    if (rc != 0) { set_err(err, errcap, "TLS is unavailable (mbedTLS -0x%04lX)", (long)-rc); tls_close(t); return NULL; }
+    /* The certificate is checked by the caller (pinned fingerprint): the
+     * test server has a self-signed one. Legacy: a server made for the PSP
+     * itself -- TLS 1.0 and an MD5-signed 1024-bit certificate. */
+    mbedtls_ssl_conf_authmode(&t->conf, MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_rng(&t->conf, mbedtls_ctr_drbg_random, &t->drbg);
+    mbedtls_ssl_conf_min_version(&t->conf, MBEDTLS_SSL_MAJOR_VERSION_3, legacy ? MBEDTLS_SSL_MINOR_VERSION_1 : MBEDTLS_SSL_MINOR_VERSION_3);
+    mbedtls_ssl_conf_read_timeout(&t->conf, (uint32_t)timeout_ms);
+    if ((rc = mbedtls_ssl_setup(&t->ssl, &t->conf)) != 0 || (rc = mbedtls_ssl_set_hostname(&t->ssl, host)) != 0) {
+        set_err(err, errcap, "TLS setup failed (mbedTLS -0x%04lX)", (long)-rc);
+        tls_close(t);
+        return NULL;
+    }
+    mbedtls_ssl_set_bio(&t->ssl, &t->fd, bio_send, bio_recv, NULL);
+    while ((rc = mbedtls_ssl_handshake(&t->ssl)) != 0) {
+        if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        set_err(err, errcap, "TLS handshake failed (mbedTLS -0x%04lX)", (long)-rc);
+        tls_close(t);
+        return NULL;
+    }
+    const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&t->ssl);
+    if (!crt) { set_err(err, errcap, "the server sent no certificate%.0ld", 0); tls_close(t); return NULL; }
+    if (cert_sha256 && mbedtls_sha256_ret(crt->raw.p, crt->raw.len, cert_sha256, 0) != 0) {
+        set_err(err, errcap, "could not fingerprint the server certificate%.0ld", 0);
+        tls_close(t);
+        return NULL;
+    }
+    return t;
+}
+
+int tls_send(tls_conn *t, const void *data, size_t len) {
+    const unsigned char *p = (const unsigned char *)data;
+    while (len) {
+        int k;
+        if (t->plain) k = (int)send(t->fd, p, len, MSG_NOSIGNAL);
+        else {
+            k = mbedtls_ssl_write(&t->ssl, p, len);
+            if (k == MBEDTLS_ERR_SSL_WANT_READ || k == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        }
+        if (k <= 0) return -1;
+        p += k; len -= (size_t)k;
+    }
+    return 0;
+}
+
+int tls_recv_some(tls_conn *t, void *out, size_t cap) {
+    for (;;) {
+        int k;
+        if (t->plain) k = (int)recv(t->fd, out, cap, 0);
+        else {
+            k = mbedtls_ssl_read(&t->ssl, (unsigned char *)out, cap);
+            if (k == MBEDTLS_ERR_SSL_WANT_READ || k == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        }
+        return k > 0 ? k : -1;               /* 0: closed (close_notify or EOF) */
+    }
+}
+
+int tls_recv(tls_conn *t, void *out, size_t len) {
+    uint8_t *o = (uint8_t *)out;
+    size_t got = 0;
+    while (got < len) {
+        const int k = tls_recv_some(t, o + got, len - got);
+        if (k <= 0) return -1;
+        got += (size_t)k;
+    }
+    return 0;
+}
+
+int tls_wait_readable(tls_conn *t, int timeout_ms) {
+    if (!t || t->fd < 0) return -1;
+    if (!t->plain && mbedtls_ssl_get_bytes_avail(&t->ssl) > 0) return 1;
+    struct pollfd pf = { t->fd, POLLIN, 0 };
+    const int k = poll(&pf, 1, timeout_ms);
+    if (k < 0) return errno == EINTR ? 0 : -1;
+    if (k > 0 && (pf.revents & (POLLERR | POLLNVAL))) return -1;
+    return k > 0;
+}
 #endif

@@ -229,6 +229,24 @@ static void hook_stepped_update(void (*original)(void)) {
     original();
 }
 
+/* ## The HUD's show / hide timer
+ *
+ * 0x089EC5D4(obj, show) counts a timer (obj+44, when >= 0) down by the
+ * frame's ticks and closes the HUD element when it runs out, else shows it
+ * when asked. A timer of 0 runs out on the next tick: at 30 fps every frame
+ * has ticks, so it closes each frame and stays closed. Above 60 fps ticks
+ * come 2 every 4th frame (pace_ticks), and on the frames between, 0 - 0 is
+ * not "out": the show path opened it again -- open, close, open, each time
+ * restarting the element's fade (the area name panel flickered). Frames
+ * whose ticks are 0 have no tick to count, so the timer's decision waits for
+ * the next one, as at 30 fps. */
+#define FN_HUD_SHOW 0x089EC5D4u
+static void hook_hud_show(void (*original)(void)) {
+    const uint32_t obj = psp_cpu.r[4];
+    if (g_ticks_ours && g_ticks_now == 0 && obj && (int32_t)psp_read32(obj + 44) >= 0) return;
+    original();
+}
+
 /* ## The effects' clock
  *
  * Effects advance their time (effect+144) by the effect manager's step, +4,
@@ -578,7 +596,18 @@ static void hook_frame(void (*original)(void)) {
     /* A frame at 120 Hz that missed its vblank: counted (see the top). */
     const uint32_t before = psp_read32(FRAME_END_VCOUNT);
     if (before && rate_for(g_target) == 2 && (uint32_t)psp_sched_vblank_count() != before) g_late_frames++;
+    /* Variable refresh at 120 Hz: the vblanks were held while the frame ran
+     * (below), so a frame that took 10 ms gets its vblank now -- after a 1 ms
+     * gap in which the game's other threads run -- and is shown at ~90 fps,
+     * not at the next fixed tick (16.7 ms: 60 fps). The game counts vblanks
+     * only in this pacing, and each frame's step comes from the real time
+     * (adapt), so nothing else changes. */
+    static int vrr = -1;
+    if (vrr < 0) { const char *e = getenv("PSP2I_VRR"); vrr = !(e && *e == '0'); }
+    const int hold = vrr && rate_for(g_target) == 2;
+    psp_sched_hold_vblank(0, 1000);
     original();                               /* the frame's wait: it ends at a vblank */
+    if (hold) psp_sched_hold_vblank(1, 1000);
     const uint64_t now = psp_sched_now_us();
     if (g_frame_end_us) adapt((double)(now - g_frame_end_us) / 1e6);
     g_frame_end_us = now;
@@ -602,6 +631,7 @@ void framerate_init(int fps) {
     psp_hook_set(FN_HAZARD_UPDATE, hook_hazard_update);
     psp_hook_set(FN_STEPPED_NEW, hook_stepped_new);
     psp_hook_set(FN_STEPPED_UPD, hook_stepped_update);
+    psp_hook_set(FN_HUD_SHOW, hook_hud_show);
     psp_hook_set(FN_FIO_REQUEST, hook_fio_request);
     psp_hook_set(FN_FIO_TAKE, hook_fio_take);
     psp_hook_set(FN_FIO_DONE_A, hook_fio_done);

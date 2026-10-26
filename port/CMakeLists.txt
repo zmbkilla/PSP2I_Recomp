@@ -49,6 +49,8 @@ add_executable(psp2i
     host/rpcn_rooms.c
     host/savecrypt.c
     host/gamelog.c
+    host/modelx.c
+    host/glbread.c
     host/functrace.c
     host/rateaudit.c
     host/prod.c

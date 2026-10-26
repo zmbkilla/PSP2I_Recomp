@@ -156,15 +156,102 @@ void d3d11_report(FILE *out);
 int  d3d11_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h);
 #endif
 #include "gl_ge.h"
+#include "modelx.h"
+static void exe_dir(char *out, size_t cap);
 
 /* The renderer (menu RENDERER, psp2i_display.ini renderer=, --renderer):
  * REN_D3D11 / REN_GL draw the GE on the GPU, REN_SOFTWARE is the reference. */
 static int g_renderer = REN_D3D11;        /* what runs now */
 static int g_gl_window;                   /* OpenGL presents into the window */
+static int g_ge_thread;                   /* OpenGL on the GE thread (ge_thread=on/off, --ge-thread; off by default) */
+static int g_ge_thread_arg = -1;
+static int g_load_models;                 /* LOAD MODELS (load_models=on/off) */
+
+#ifdef _WIN32
+/* With the GE thread (OpenGL), the renderer is on that thread, so presenting
+ * is work handed to it: each vblank asks it for the displayed frame and
+ * takes the newest one it finished (a vblank later than without the thread),
+ * and the composed picture goes to it to be drawn and swapped. The game
+ * thread only copies pictures. (Showing the picture through present.c's swap
+ * chain instead left OpenGL without a swap to pace it: its driver queue grew
+ * to ~900 MB and the picture stalled.) */
+static SRWLOCK g_pr_lock = SRWLOCK_INIT;
+static struct { uint32_t addr, stride; int fmt, w, h; } g_pr_req;
+static volatile int g_pr_queued, g_sh_queued;
+static uint32_t *g_pr_buf, *g_pr_pub, *g_sh_buf, *g_sh_work;
+static int g_pr_result;                    /* the GE thread's last answer: 0 from VRAM, 1 new, 2 keep */
+static uint64_t g_pr_seq, g_pr_taken;
+static struct { int w, h, x, y, vw, vh, cw, ch; } g_sh_req;
+
+static void present_job(void *p) {
+    (void)p;
+    AcquireSRWLockExclusive(&g_pr_lock);
+    const uint32_t addr = g_pr_req.addr, stride = g_pr_req.stride;
+    const int fmt = g_pr_req.fmt, w = g_pr_req.w, h = g_pr_req.h;
+    g_pr_queued = 0;
+    ReleaseSRWLockExclusive(&g_pr_lock);
+    const int r = gl_ge_present(addr, stride, fmt, g_pr_buf, w, h);
+    AcquireSRWLockExclusive(&g_pr_lock);
+    if (r == 1) { memcpy(g_pr_pub, g_pr_buf, (size_t)w * (size_t)h * 4); g_pr_seq++; }
+    g_pr_result = r;
+    ReleaseSRWLockExclusive(&g_pr_lock);
+}
+
+static int gl_present_mt(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
+    if (!g_pr_buf) {
+        g_pr_buf = (uint32_t *)calloc((size_t)w * h, 4);
+        g_pr_pub = (uint32_t *)calloc((size_t)w * h, 4);
+        if (!g_pr_buf || !g_pr_pub) return 0;
+    }
+    AcquireSRWLockExclusive(&g_pr_lock);
+    g_pr_req.addr = addr; g_pr_req.stride = stride; g_pr_req.fmt = fmt; g_pr_req.w = w; g_pr_req.h = h;
+    const int queue = !g_pr_queued;
+    g_pr_queued = 1;
+    int r = g_pr_result == 0 ? 0 : 2;
+    if (g_pr_seq != g_pr_taken) { memcpy(out, g_pr_pub, (size_t)w * (size_t)h * 4); g_pr_taken = g_pr_seq; r = 1; }
+    ReleaseSRWLockExclusive(&g_pr_lock);
+    if (queue) psp_ge_call(present_job, NULL, 0);
+    return r;
+}
+
+static void show_job(void *p) {
+    (void)p;
+    AcquireSRWLockExclusive(&g_pr_lock);
+    const int w = g_sh_req.w, h = g_sh_req.h;
+    memcpy(g_sh_work, g_sh_buf, (size_t)w * (size_t)h * 4);
+    const int x = g_sh_req.x, y = g_sh_req.y, vw = g_sh_req.vw, vh = g_sh_req.vh, cw = g_sh_req.cw, ch = g_sh_req.ch;
+    g_sh_queued = 0;
+    ReleaseSRWLockExclusive(&g_pr_lock);
+    if (gl_blit_frame(g_sh_work, w, h, x, y, vw, vh, cw, ch) == 0) gl_platform_swap();
+}
+
+static void gl_show_mt(const uint32_t *px, int w, int h, int x, int y, int vw, int vh, int cw, int ch) {
+    if (!g_sh_buf) {
+        g_sh_buf = (uint32_t *)calloc((size_t)w * h, 4);
+        g_sh_work = (uint32_t *)calloc((size_t)w * h, 4);
+        if (!g_sh_buf || !g_sh_work) return;
+    }
+    AcquireSRWLockExclusive(&g_pr_lock);
+    memcpy(g_sh_buf, px, (size_t)w * (size_t)h * 4);
+    g_sh_req.w = w; g_sh_req.h = h; g_sh_req.x = x; g_sh_req.y = y;
+    g_sh_req.vw = vw; g_sh_req.vh = vh; g_sh_req.cw = cw; g_sh_req.ch = ch;
+    const int queue = !g_sh_queued;
+    g_sh_queued = 1;
+    ReleaseSRWLockExclusive(&g_pr_lock);
+    if (queue) psp_ge_call(show_job, NULL, 0);
+}
+
+static void ge_thread_gl_init(void) {
+    if (gl_platform_bind() != 0) fprintf(stderr, "gl: the GE thread could not take the context\n");
+}
+#endif
 
 /* The displayed frame from the GPU renderer's asynchronous copy (1), keep the
  * last picture (2), or read VRAM (0). */
 static int gpu_present(uint32_t addr, uint32_t stride, int fmt, uint32_t *out, int w, int h) {
+#ifdef _WIN32
+    if (g_renderer == REN_GL && psp_ge_threaded()) return gl_present_mt(addr, stride, fmt, out, w, h);
+#endif
     if (g_renderer == REN_GL) return gl_ge_present(addr, stride, fmt, out, w, h);
 #ifdef _WIN32
     if (g_renderer == REN_D3D11) return d3d11_present(addr, stride, fmt, out, w, h);
@@ -668,6 +755,7 @@ static int window_show(void) {
         if (rc.right <= 0 || rc.bottom <= 0) return 0;      /* minimised */
         int x, y, w, h;
         present_fit(rc.right, rc.bottom, SCREEN_W, SCREEN_H, &x, &y, &w, &h);
+        if (psp_ge_threaded()) { gl_show_mt(g_rgba, SCREEN_W, SCREEN_H, x, y, w, h, rc.right, rc.bottom); return 0; }
         if (gl_blit_frame(g_rgba, SCREEN_W, SCREEN_H, x, y, w, h, rc.right, rc.bottom) != 0) return -1;
         gl_platform_swap();
         return 0;
@@ -836,6 +924,15 @@ static void ctrl_commit(void);
 static void replay_step(void) {
     if (!g_rep_on) return;
     const uint64_t f = psp_display_flips();
+    {   /* PSP2I_FLIP_MARKS=N: the time every N game frames (tests compare a stretch of the route) */
+        static long long every = -2;
+        static uint64_t last;
+        if (every == -2) { const char *e = getenv("PSP2I_FLIP_MARKS"); every = e ? atoll(e) : -1; }
+        if (every > 0 && f / (uint64_t)every != last / (uint64_t)every) {
+            fprintf(stderr, "flip-mark: frame %llu at %.3f s\n", (unsigned long long)f, psp_sched_now_us() / 1e6);
+            last = f;
+        }
+    }
     int pad = 0;
     while (g_rep_pos < g_nrep && g_rep[g_rep_pos].flip <= f) {
         const rep_event *e = &g_rep[g_rep_pos++];
@@ -977,6 +1074,8 @@ static int display_load(void) {
         else if (!strncmp(line, "test_tick_pacing=", 17)) g_test_ticks = !strncmp(line + 17, "on", 2);
         else if (!strncmp(line, "draw_distance=", 14))    g_draw_dist = !strncmp(line + 14, "far", 3);
         else if (!strncmp(line, "vertex_work=", 12))      g_gpu_vertex = strncmp(line + 12, "cpu", 3) != 0;
+        else if (!strncmp(line, "load_models=", 12))      g_load_models = !strncmp(line + 12, "on", 2);
+        else if (!strncmp(line, "ge_thread=", 10))        g_ge_thread = !strncmp(line + 10, "on", 2);
         else if (!strncmp(line, "scaling=", 8))  { const int v = postfx_scaling_parse(line + 8); if (v >= 0) g_post.scaling = v; }
         else if (!strncmp(line, "fxaa=", 5))     g_post.fxaa = !strncmp(line + 5, "on", 2);
         else if (!strncmp(line, "sharpen=", 8))  { const int v = postfx_level_parse(line + 8); if (v >= 0) g_post.sharpen = v; }
@@ -1021,6 +1120,10 @@ static void display_save(int res) {
     fprintf(f, "draw_distance=%s\n", g_draw_dist ? "far" : "normal");
     fprintf(f, "; gpu = 3D vertices transformed and lit on the graphics card, cpu = on the processor (as before)\n");
     fprintf(f, "vertex_work=%s\n", g_gpu_vertex ? "gpu" : "cpu");
+    fprintf(f, "; OpenGL: on = drawing and presenting run on a thread of their own, beside the game (used from the next start)\n");
+    fprintf(f, "ge_thread=%s\n", g_ge_thread ? "on" : "off");
+    fprintf(f, "; on = models in the Data folder (EXTRACT MODELS writes them) replace the game's as they load\n");
+    fprintf(f, "load_models=%s\n", g_load_models ? "on" : "off");
     fprintf(f, "; post-processing: scaling nearest / bilinear / sharp_bilinear; fxaa on/off; sharpen and scanlines\n"
                "; off / low / high; brightness 70..130 and saturation 0..200 (%%)\n");
     char sc[24];
@@ -1166,6 +1269,17 @@ static void menu_step(void) {
         postfx_set(&g_post);
         if (!g_headless) display_save(g_res_saved);
     }
+    if (fx & MFX_LOAD_MODELS) {         /* used as models load: from the next area */
+        g_load_models = g_menu.load_models;
+        modelx_set_load(g_load_models);
+        if (!g_headless) display_save(g_res_saved);
+    }
+    if (fx & MFX_EXTRACT) {             /* EXTRACT MODELS: the loaded models to Data/<group>/ */
+        char dir[600];
+        exe_dir(dir, sizeof dir);
+        snprintf(g_menu.model_note, sizeof g_menu.model_note, "WORKING...");
+        modelx_extract(dir, g_menu.model_note, sizeof g_menu.model_note);
+    }
     if (fx & MFX_QUIT) {
         /* QUIT GAME: gone at once and silent; the game stops at its next
          * check, the report and the profile are written in full out of sight
@@ -1265,14 +1379,36 @@ static void perf_minute(double fps) {
     PROCESS_MEMORY_COUNTERS pmc;
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) mb = (double)pmc.PagefileUsage / (1024.0 * 1024.0);
 #endif
-    online_log("perf: %.1f min, fps avg %.1f min %.1f; frames <16.7ms %llu, <25 %llu, <33 %llu, <50 %llu, 50+ %llu; "
-               "GE %.1f%%, idle %.1f%%; memory %.0f MB",
+    char ge_line[300] = "";
+    {   /* the GE thread: what the game waited for it (all, of which VRAM accesses), its host work */
+        static uint64_t lw, lwu, lj, lvn, lvu;
+        uint64_t w, wu, j, vn, vu;
+        char top[96];
+        psp_ge_thread_stats(&w, &wu, &j);
+        gl_ge_vram_waits(&vn, &vu, top, sizeof top);
+        if (psp_ge_threaded())
+            snprintf(ge_line, sizeof ge_line, "; GE thread: waits %llu (%.0f ms), of which VRAM %llu (%.0f ms; %s), host work %.1f%%",
+                     (unsigned long long)(w - lw), (wu - lwu) / 1000.0, (unsigned long long)(vn - lvn), (vu - lvu) / 1000.0, top,
+                     (last_us ? 100.0 * (double)(j - lj) / (double)(now - last_us) : 0.0));
+        lw = w; lwu = wu; lj = j; lvn = vn; lvu = vu;
+        static uint64_t lm, ls;
+        uint64_t m, sk;
+        gl_ge_state_counts(&m, &sk);
+        if (g_renderer == REN_GL) {
+            const size_t len = strlen(ge_line);
+            snprintf(ge_line + len, sizeof ge_line - len, "; GL state calls %llu, skipped %llu",
+                     (unsigned long long)(m - lm), (unsigned long long)(sk - ls));
+        }
+        lm = m; ls = sk;
+    }
+    online_log("perf: %.1f min, fps avg %.1f min %.1f; frames <8ms %llu, <16.7 %llu, <25 %llu, <33 %llu, <50 %llu, 50+ %llu; "
+               "GE %.1f%%, idle %.1f%%; memory %.0f MB%s",
                now / 60e6, sum / n, mn,
-               (unsigned long long)(fb[0] + fb[1] - last_fb[0] - last_fb[1]), (unsigned long long)(fb[2] - last_fb[2]),
+               (unsigned long long)(fb[0] - last_fb[0]), (unsigned long long)(fb[1] - last_fb[1]), (unsigned long long)(fb[2] - last_fb[2]),
                (unsigned long long)(fb[3] - last_fb[3]), (unsigned long long)(fb[4] - last_fb[4]),
                (unsigned long long)(fb[5] - last_fb[5]),
                span > 0 ? 100.0 * (double)(ge - last_ge) / span : 0.0,
-               span > 0 ? 100.0 * (double)(idle - last_idle) / span : 0.0, mb);
+               span > 0 ? 100.0 * (double)(idle - last_idle) / span : 0.0, mb, ge_line);
     memcpy(last_fb, fb, sizeof fb);
     last_ge = ge; last_idle = idle; last_us = now;
     sum = 0; n = 0; mn = 1e9;
@@ -1403,11 +1539,26 @@ static uint64_t g_prof_from, g_prof_to;
 static void on_vblank(void) {
     uint64_t vb = psp_sched_vblank_count();
     g_prof_on = g_prof_keyed ? g_prof_keyon : vb >= g_prof_from && (!g_prof_to || vb < g_prof_to);
+    {   /* PSP2I_DRAW_DUMP_AT=VBLANK: F12's dump at that vblank (scripted runs) */
+        static long long at = -2;
+        if (at == -2) { const char *e = getenv("PSP2I_DRAW_DUMP_AT"); at = e ? atoll(e) : -1; }
+        if (at >= 0 && vb == (uint64_t)at) g_dump_key = 1;
+    }
     if (g_dump_key) { g_dump_key = 0; take_dump(vb); }
+    {   /* PSP2I_EXTRACT_AT=VBLANK: EXTRACT MODELS at that vblank (scripted runs) */
+        static long long at = -2;
+        if (at == -2) { const char *e = getenv("PSP2I_EXTRACT_AT"); at = e ? atoll(e) : -1; }
+        if (at >= 0 && vb == (uint64_t)at) {
+            char dir[600], note[32];
+            exe_dir(dir, sizeof dir);
+            modelx_extract(dir, note, sizeof note);
+        }
+    }
 #ifndef PSP2I_PROD
     rateaudit_vblank();
 #endif
     draw_dist_apply();
+    modelx_vblank();                      /* LOAD MODELS: replaced textures not placed yet */
     if (g_find_vblank && vb == g_find_vblank) find_word();
     if (g_watch_late_addr && psp_display_flips() >= g_watch_late_flip) {
         /* --watch-from-flip: arm the write watch only once the game is there. */
@@ -1435,6 +1586,7 @@ static void on_vblank(void) {
         const uint32_t held = menu_inputs_from_psp(psp & 0xFFFF, ax, ay) | g_login_keys;
         switch (login_update(&g_login, held, psp)) {
         case LOGIN_ACT_SUBMIT:   online_login_submit(); break;
+        case LOGIN_ACT_REGISTER: online_register_submit(); break;
         case LOGIN_ACT_CANCEL:   online_login_cancel(); break;
         case LOGIN_ACT_CLOSE_OK: online_login_closed_ok(); break;
         default: break;
@@ -1566,6 +1718,7 @@ static void report(void) {
     d3d11_report(stderr);
 #endif
     gl_ge_report(stderr);
+    psp_ge_thread_report(stderr);
 #ifdef _WIN32
     prof_report();
 #endif
@@ -1982,6 +2135,51 @@ static void bad_access_hit(uint32_t addr, int write, int width) {
                  (unsigned long long)psp_sched_vblank_count(), k, line);
 }
 
+/* PSP2I_TRACE_VALUE=V (PSP2I_TRACE_FROM=vblank): every distinct stack that
+ * writes a word whose low 24 bits are V -- e.g. a colour going into a display
+ * list, to find the code that computes it. Dev runs only (every write is
+ * checked). */
+static uint32_t g_tv_value;
+static uint64_t g_tv_from;
+static void value_trace(uint32_t addr, uint32_t width, uint32_t value) {
+    static uint32_t last_at;
+    if (width != 4 && last_at && addr >= last_at && addr < last_at + 4) {   /* a part of that word written next (an alpha byte) */
+        static int n;
+        if (n++ < 40) {
+            void *frames[62];
+            const USHORT k = CaptureStackBackTrace(1, 62, frames, NULL);
+            char line[900];
+            stack_names(frames, k, line, sizeof line);
+            fprintf(stderr, "value-trace:   then %u-byte 0x%X to 0x%08X at vblank %llu; stack:%s\n", width, value, addr,
+                    (unsigned long long)psp_sched_vblank_count(), line);
+        }
+        last_at = 0;
+        return;
+    }
+    if (width != 4 || (value & 0xFFFFFFu) != g_tv_value || psp_sched_vblank_count() < g_tv_from) return;
+    last_at = addr;
+    static uint64_t keys[32];
+    static int nkeys;
+    void *frames[62];
+    const USHORT n = CaptureStackBackTrace(1, 62, frames, NULL);
+    uint64_t key = 0;
+    for (USHORT i = 0; i < n; i++) key = key * 1000003u ^ (uint64_t)(uintptr_t)frames[i];
+    for (int k = 0; k < nkeys; k++) if (keys[k] == key) return;
+    if (nkeys == 32) return;
+    keys[nkeys++] = key;
+    char line[900];
+    stack_names(frames, n, line, sizeof line);
+    fprintf(stderr, "value-trace: 0x%08X to 0x%08X at vblank %llu; stack:%s\n", value, addr,
+            (unsigned long long)psp_sched_vblank_count(), line);
+}
+static void value_trace_init(void) {
+    const char *v = getenv("PSP2I_TRACE_VALUE"), *f = getenv("PSP2I_TRACE_FROM");
+    if (!v) return;
+    g_tv_value = (uint32_t)strtoul(v, NULL, 0) & 0xFFFFFFu;
+    g_tv_from = f ? strtoull(f, NULL, 0) : 0;
+    psp_mem_trace_writes(value_trace);
+}
+
 static void watch_backtrace(uint32_t addr, uint32_t value) {
     void *frames[24];
     const USHORT n = CaptureStackBackTrace(1, 24, frames, NULL);
@@ -2328,6 +2526,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--hide-fps"))                      show_fps = 0;
         else if (!strcmp(argv[i], "--shot-by-flip"))                  g_shot_by_flip = 1;
         else if (!strcmp(argv[i], "--vertex-work") && i + 1 < argc)   g_vertex_arg = strcmp(argv[++i], "cpu") != 0;
+        else if (!strcmp(argv[i], "--ge-thread") && i + 1 < argc)     g_ge_thread_arg = strcmp(argv[++i], "off") != 0;
         else if (!strcmp(argv[i], "--overlay-shot") && i + 1 < argc && g_noverlay_shot < MAX_OVERLAY_SHOT)
             g_overlay_shot[g_noverlay_shot++] = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--menu-key") && i + 1 < argc) {
@@ -2437,9 +2636,15 @@ int main(int argc, char **argv) {
      * costing about 20 fps in the lobby at 60 fps. Only --profile set this
      * before, which is why profiled runs looked faster. */
     timeBeginPeriod(1);
+    /* No screensaver, display off or sleep while the game runs: a gamepad
+     * doesn't count as activity to Windows, and a replay has no input at all
+     * (the screensaver broke replays). */
+    SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
     sym_start();                          /* symbols for the logs' game stacks, loaded in the background */
 #ifndef PSP2I_PROD                        /* test hooks (--watch, the HP probe's read watch, bad accesses) */
     psp_mem_set_watch_hook(watch_backtrace);
+    value_trace_init();
+    { const char *rw = getenv("PSP2I_READ_WATCH"); if (rw) psp_mem_watch_read((uint32_t)strtoul(rw, NULL, 0)); }   /* dev: who reads this word */
     psp_mem_set_read_watch_hook(read_watch_hit);
     psp_mem_set_bad_hook(bad_access_hit);
 #endif
@@ -2484,9 +2689,14 @@ int main(int argc, char **argv) {
     }
 #ifdef _WIN32
     if (!g_headless) window_open(res);
+    if (g_ge_thread_arg >= 0) g_ge_thread = g_ge_thread_arg;
     if (g_renderer == REN_GL && g_wnd) {
         g_gl_window = gl_platform_attach(g_wnd) == 0;
         if (!g_gl_window) present_init(g_wnd);
+    }
+    if (g_renderer == REN_GL && g_ge_thread) {          /* the context goes with the lists */
+        gl_platform_release();
+        if (psp_ge_thread_start(ge_thread_gl_init) != 0) { gl_platform_bind(); fprintf(stderr, "gl: no GE thread\n"); }
     }
     if (g_renderer == REN_D3D11 && d3d11_init() != 0) {
         fprintf(stderr, "psp2i: falling back to the software renderer\n");
@@ -2554,6 +2764,14 @@ int main(int argc, char **argv) {
     psp_savedata_set_crypto(&SAVE_CRYPTO);
     online_init(dir, &g_login);
     gamelog_init(dir);
+    modelx_init();                        /* model names as packages load (EXTRACT MODELS) */
+    {
+        char xd[600];
+        exe_dir(xd, sizeof xd);
+        modelx_start(xd, g_load_models);  /* LOAD MODELS: Data/ models in place of the game's */
+        g_menu.load_models = g_load_models;
+        if (g_renderer == REN_GL) gl_ge_set_texture_source(modelx_texture, modelx_texture_gen);
+    }
     functrace_init(dir);
 #ifndef PSP2I_PROD
     rateaudit_init(dir);                  /* the vblank-use census, and F7's frame-rate audit */

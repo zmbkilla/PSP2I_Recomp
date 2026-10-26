@@ -50,3 +50,6 @@
 0x08D3F470   # game: hang loop (j self) after fatal(): logged, thread parked like a PSP (was a stack overflow)
 0x08D4C604   # game: hang loop (j self) after "Large PatternIndex Error.": logged, thread parked
 0x08B8D840   # game: break + hang loop after a failed check: logged, thread parked
+0x089EC5D4   # HUD show / hide timer: only on frames whose ticks pass (host/framerate.c)
+0x08D57B48   # package loader: one file's resource (names for model extraction, host/modelx.c)
+0x08D59624   # model resource setup: LOAD MODELS replaces the object at +0x10 (host/modelx.c)

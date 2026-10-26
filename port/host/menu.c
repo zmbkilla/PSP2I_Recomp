@@ -112,6 +112,7 @@ static int change(menu_state *m, int dir) {
         m->fps = dir < 0 ? (m->fps == 30 ? 120 : m->fps == 120 ? 60 : 30) : (m->fps == 30 ? 60 : m->fps == 60 ? 120 : 30);
         return MFX_FPS_CHANGED;
     case MENU_FPS_COUNTER: m->show_fps = !m->show_fps;      return MFX_SHOW_FPS;
+    case MENU_LOAD_MODELS: m->load_models = !m->load_models; return MFX_LOAD_MODELS;
     case MENU_SEGA_SERVER: return dir == 0 ? MFX_EDIT_SEGA : 0;
     case MENU_ADHOC_SERVER: return dir == 0 ? MFX_EDIT_ADHOC : 0;
     case MENU_MODERN_SERVER: return dir == 0 ? MFX_EDIT_MODERN : 0;
@@ -249,6 +250,8 @@ int menu_update(menu_state *m, uint32_t held, uint32_t latched) {
             if (press & MI_CONFIRM) { m->open = 0; fx |= MFX_CLOSED; }
         } else if (m->sel == MENU_QUIT) {
             if (press & MI_CONFIRM) { m->open = 0; fx |= MFX_CLOSED | MFX_QUIT; }
+        } else if (m->sel == MENU_EXTRACT_MODELS) {
+            if (press & MI_CONFIRM) fx |= MFX_EXTRACT;
         } else if (opens_page(m->sel) >= 0) {
             if (press & (MI_CONFIRM | MI_RIGHT)) go_page(m, opens_page(m->sel), -1);
         } else if (is_back(m->sel)) {
@@ -437,6 +440,7 @@ int menu_touch(menu_state *m, int w, int h, int x, int y) {
     m->sel = item;
     if (item == MENU_CLOSE) { m->open = 0; return MFX_CLOSED; }
     if (item == MENU_QUIT) { m->open = 0; return MFX_CLOSED | MFX_QUIT; }
+    if (item == MENU_EXTRACT_MODELS) return MFX_EXTRACT;
     if (opens_page(item) >= 0) { go_page(m, opens_page(item), -1); return 0; }
     if (is_back(item)) { go_page(m, MENU_PAGE_MAIN, page_item(m->page)); return 0; }
     if (is_editor(item)) return change(m, 0);
@@ -461,7 +465,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
         [MENU_GRAPHICS] = "GRAPHICS", [MENU_SEGA_SERVER] = "SEGA SERVER", [MENU_ADHOC_SERVER] = "ADHOC SERVER",
         [MENU_ADHOC_MODE] = "ADHOC MODE", [MENU_MODERN_SERVER] = "MODERN SERVER", [MENU_MASTER_VOL] = "MASTER VOLUME",
         [MENU_MUSIC_VOL] = "MUSIC VOLUME", [MENU_SFX_VOL] = "SFX VOLUME", [MENU_ATTENUATION] = "ATTENUATION",
-        [MENU_FONT] = "FONT", [MENU_CONTROLS] = "CONTROLS", [MENU_TESTS] = "TESTS", [MENU_QUIT] = "QUIT GAME", [MENU_CLOSE] = "CLOSE",
+        [MENU_FONT] = "FONT", [MENU_CONTROLS] = "CONTROLS", [MENU_TESTS] = "TESTS", [MENU_EXTRACT_MODELS] = "EXTRACT MODELS", [MENU_LOAD_MODELS] = "LOAD MODELS", [MENU_QUIT] = "QUIT GAME", [MENU_CLOSE] = "CLOSE",
         [MENU_RS_ON] = "RIGHT STICK", [MENU_RS_SPEED] = "SENSITIVITY", [MENU_SWAP_OC] = "CIRCLE/CROSS",
         [MENU_TOUCH_COLOR] = "TOUCH COLOR", [MENU_TOUCH_ALPHA] = "TOUCH OPACITY", [MENU_CONTROLS_BACK] = "BACK",
         [MENU_TEST_TICKS] = "TICK PACING", [MENU_TEST_LOGIC] = "30 HZ LOGIC", [MENU_TESTS_BACK] = "BACK",
@@ -509,6 +513,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_FPS_COUNTER ? (m->show_fps ? "< ON >" : "< OFF >")
                       : i == MENU_DRAW_DIST ? (m->draw_dist ? "< FAR >" : "< NORMAL >")
                       : i == MENU_VERTEX_WORK ? (m->gpu_vertex ? "< GPU >" : "< CPU >")
+                      : i == MENU_EXTRACT_MODELS ? m->model_note
+                      : i == MENU_LOAD_MODELS ? (m->load_models ? "< ON >" : "< OFF >")
                       : i == MENU_SCALING ? scaling : i == MENU_FXAA ? (m->post.fxaa ? "< FXAA >" : "< OFF >")
                       : i == MENU_SHARPEN ? sharpen : i == MENU_SCANLINES ? scanlines
                       : i == MENU_BRIGHTNESS ? bright : i == MENU_SATURATION ? satur

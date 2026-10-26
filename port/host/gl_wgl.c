@@ -125,4 +125,8 @@ int gl_platform_attach(void *window) {
 
 void gl_platform_swap(void) { if (g_wnd) SwapBuffers(g_dc); }
 
+/* The context moves to the GE thread (main.c): off this thread, onto that one. */
+void gl_platform_release(void) { wglMakeCurrent(NULL, NULL); }
+int  gl_platform_bind(void) { return wglMakeCurrent(g_dc, g_rc) ? 0 : -1; }
+
 #endif

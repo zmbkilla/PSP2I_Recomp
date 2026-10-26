@@ -60,10 +60,11 @@ add_library(main SHARED
     ${PORT}/host/framerate.c
     ${PORT}/host/menu.c
     ${PORT}/host/postfx.c
+    ${PORT}/host/h264_mediacodec.c
     ${GAME_SOURCES})
 target_include_directories(main PRIVATE ${PORT}/host ${PORT}/gen ${CMAKE_BINARY_DIR}/gen_split)
 target_compile_definitions(main PRIVATE PSP2I_GLES)
 if(NOT HAVE_GAME_CODE)
     target_compile_definitions(main PRIVATE PSP2I_NO_GAME_CODE)
 endif()
-target_link_libraries(main PRIVATE psprecomp SDL3::SDL3 android log m dl)
+target_link_libraries(main PRIVATE psprecomp SDL3::SDL3 android log m dl mediandk)

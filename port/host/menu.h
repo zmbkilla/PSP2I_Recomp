@@ -27,7 +27,7 @@ enum {
  * GRAPHICS pages (opened from their items; BACK, or Cross, returns to the
  * main page). */
 enum { MENU_GRAPHICS, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE, MENU_MODERN_SERVER,
-       MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION, MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_QUIT, MENU_CLOSE,
+       MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION, MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_EXTRACT_MODELS, MENU_LOAD_MODELS, MENU_QUIT, MENU_CLOSE,
        MENU_RS_ON, MENU_RS_SPEED, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
        MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK,
        MENU_FRAME_RATE, MENU_FPS_COUNTER, MENU_RESOLUTION, MENU_RENDERER, MENU_DRAW_DIST, MENU_VERTEX_WORK,
@@ -93,6 +93,8 @@ enum {
     MFX_POSTFX      = 1 << 18,  /* a post-processing value changed: postfx_set(&post) */
     MFX_VERTEX      = 1 << 19,  /* gpu_vertex changed (psp_gpu_set_gpu_transform) */
     MFX_QUIT        = 1 << 20,  /* QUIT GAME: the caller ends the game (as closing the window) */
+    MFX_LOAD_MODELS = 1 << 22,  /* load_models changed: models in Data/ replace the game's (modelx.c) */
+    MFX_EXTRACT     = 1 << 21,  /* EXTRACT MODELS: the caller writes the loaded models (modelx.c), sets model_note */
 };
 
 typedef struct {
@@ -121,6 +123,8 @@ typedef struct {
     int      font;         /* the game's text font, 0..font_n-1; the caller's list (system, PSP, fonts/) */
     int      font_n;       /* choices; under 2 the item only shows font_name */
     char     font_name[40];/* the chosen font, shown; set by the caller */
+    int      load_models;  /* LOAD MODELS: models in Data/ replace the game's as they load */
+    char     model_note[32];/* EXTRACT MODELS: the last result, shown; set by the caller */
     int      swap_oc;      /* Circle and Cross exchanged (the help line follows) */
     int      touch_color;  /* TOUCH_*: the touch controls' colour */
     int      touch_alpha;  /* their opacity in tenths, TOUCH_ALPHA_MIN..10 */

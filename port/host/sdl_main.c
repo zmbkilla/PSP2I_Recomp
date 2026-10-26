@@ -55,6 +55,9 @@
 #include <psprecomp/net.h>
 
 #include "atrac_at3.h"
+#ifdef SDL_PLATFORM_ANDROID
+#include "h264_mediacodec.h"
+#endif
 #ifdef PSP2I_LIBAV
 #include "h264_libav.h"
 #endif
@@ -472,6 +475,7 @@ static void draw_controls(int cw, int ch) {
     draw_shape(cw, ch, SH_DISC, s->cx + g_knob_x * s->rx * 0.6f, s->cy + g_knob_y * s->ry * 0.6f,
                s->rx * 0.45f, s->ry * 0.45f, kr, kg, kb, base * 1.4f > 1.0f ? 1.0f : base * 1.4f);
     glDisable(GL_BLEND);
+    gl_ge_state_reset();                                 /* the state set here is not in gl_ge.c's cache */
 }
 
 /* The settings menu over the picture: drawn at the PSP's 480x272 like on
@@ -1012,12 +1016,15 @@ int main(int argc, char **argv) {
 #ifdef PSP2I_LIBAV
     if (h264_libav_init() != 0) fprintf(stderr, "video: FFmpeg H.264 unavailable; movies will be black\n");
 #endif
+#ifdef SDL_PLATFORM_ANDROID
+    h264_mediacodec_init();                                  /* the system's decoder: movie video */
+#endif
     framerate_init(fps);
     fps_meter_init(&g_fm);
     /* the settings menu, with psp2i.ini's choices; what this host cannot do is left out */
     menu_init(&g_menu, fps, g_fps_on);
     g_menu.hidden = MENU_BIT(MENU_SEGA_SERVER) | MENU_BIT(MENU_RESOLUTION) | MENU_BIT(MENU_RENDERER)
-                  | MENU_BIT(MENU_ATTENUATION) | MENU_BIT(MENU_FONT) | MENU_BIT(MENU_TESTS) | MENU_BIT(MENU_QUIT) | MENU_BIT(MENU_DRAW_DIST) | MENU_BIT(MENU_VERTEX_WORK)
+                  | MENU_BIT(MENU_ATTENUATION) | MENU_BIT(MENU_FONT) | MENU_BIT(MENU_TESTS) | MENU_BIT(MENU_QUIT) | MENU_BIT(MENU_EXTRACT_MODELS) | MENU_BIT(MENU_LOAD_MODELS) | MENU_BIT(MENU_DRAW_DIST) | MENU_BIT(MENU_VERTEX_WORK)
                   | MENU_BIT(MENU_SCALING) | MENU_BIT(MENU_FXAA) | MENU_BIT(MENU_SHARPEN) | MENU_BIT(MENU_SCANLINES)
                   | MENU_BIT(MENU_BRIGHTNESS) | MENU_BIT(MENU_SATURATION);   /* post-processing: Windows for now */
 #ifndef SDL_PLATFORM_ANDROID
