@@ -44,7 +44,6 @@ Current issues include:
 
 - 60 fps is not properly implemented
 - Adhoc not supported properly (relay has best support)
-- Infrastructure online is host only (Fix untested as fan sega server is offline)
 
 ## Building
 
