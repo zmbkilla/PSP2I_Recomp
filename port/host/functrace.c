@@ -11,7 +11,8 @@
  * function entry); in a normal build the recording comes out empty and says
  * so. */
 #include "functrace.h"
-#include "online.h"
+#include "gamelog.h"
+#include "logfile.h"
 
 #include <psprecomp/dispatch.h>
 #include <psprecomp/hle.h>
@@ -144,7 +145,7 @@ static void stop_and_write(void) {
     free(list);
     psp_trace_set_mark_hook(NULL);
     if (g_la) { fclose(g_la); g_la = NULL; }
-    online_log("functrace: recording %d stopped after %.1f s (%u functions) -> %s", g_files, secs, n, path);
+    gamelog_note("functrace: recording %d stopped after %.1f s (%u functions) -> %s", g_files, secs, n, path);
 }
 
 void functrace_toggle(void) {
@@ -168,7 +169,7 @@ void functrace_toggle(void) {
         psp_trace_set_mark_hook(lookat_mark);
     }
     g_on = 1;
-    online_log("functrace: recording %d started (F9 again to stop)", g_files + 1);
+    gamelog_note("functrace: recording %d started (F9 again to stop)", g_files + 1);
 }
 
 int functrace_recording(void) { return g_on; }

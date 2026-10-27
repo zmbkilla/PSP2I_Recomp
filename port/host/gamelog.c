@@ -4,16 +4,15 @@
  * the function is a stub that discards them. Hooked at entry (port/hooks.txt),
  * the message is formatted here from the game's arguments and written to
  * game_log.txt next to the exe -- the game narrating what it is doing, e.g.
- * "TPspNpMatching2::getWorldInfoListCb(): ...". Lines about the online
- * client (matching, NP, the infra/SEGA client, rooms) also go to
- * online_log.txt. A line repeated back to back is written once with a count.
+ * "TPspNpMatching2::getWorldInfoListCb(): ...". A line repeated back to back
+ * is written once with a count.
  *
  * Arguments follow the PSP EABI: a1..a3, t0..t3, then the caller's stack; a
  * 64-bit value takes an even/odd register pair (or an 8-byte-aligned stack
  * slot). */
 
 #include "gamelog.h"
-#include "online.h"
+#include "logfile.h"
 
 #include <psprecomp/cpu.h>
 #include <psprecomp/dispatch.h>
@@ -117,13 +116,6 @@ static void format(char *out, size_t cap, uint32_t fmt_addr) {
     out[n] = '\0';
 }
 
-static int is_online_line(const char *s) {
-    static const char *const KEYS[] = { "Matching", "matching", "Np", "Infra", "infra", "Room", "room", "Lobby", "lobby",
-                                        "Signaling", "signaling", "World", "world", "Server", "server", "Login", "login" };
-    for (size_t i = 0; i < sizeof KEYS / sizeof KEYS[0]; i++) if (strstr(s, KEYS[i])) return 1;
-    return 0;
-}
-
 static void emit(const char *line, unsigned repeat) {
     if (!g_file) {
         char p[700];
@@ -138,7 +130,6 @@ static void emit(const char *line, unsigned repeat) {
         else fprintf(g_file, "[%02d:%02d:%02d] %s\n", tm->tm_hour, tm->tm_min, tm->tm_sec, line);
         fflush(g_file);
     }
-    if (repeat <= 1 && is_online_line(line)) online_log("game: %s", line);
 }
 
 static void hook_printf(void (*original)(void)) {
@@ -165,7 +156,6 @@ static void logf_line(const char *fmt, ...) {
     vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
     emit(line, 1);
-    online_log("game: %s", line);
 }
 
 void gamelog_note(const char *fmt, ...) {

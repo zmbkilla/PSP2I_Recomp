@@ -9,8 +9,6 @@
 #include "framerate.h"
 #include <psprecomp/hle.h>
 #include "camera.h"
-#include "login.h"
-#include "textedit.h"
 
 #include <psprecomp/cpu.h>
 #include <psprecomp/dispatch.h>
@@ -179,38 +177,6 @@ static void test_values(void) {
     CHECK(menu_update(&m, MI_BACK, 0) == 0 && m.open && m.page == MENU_PAGE_MAIN && m.sel == MENU_GRAPHICS);  /* Cross: back */
     menu_update(&m, 0, 0);
 
-    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_SEGA_SERVER);
-    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_EDIT_SEGA && m.open);   /* Circle opens the editor */
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_RIGHT, 0) == 0);                           /* Left/Right do nothing there */
-    menu_update(&m, 0, 0);
-    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_ADHOC_SERVER);
-    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_EDIT_ADHOC && m.open);  /* Circle opens its editor */
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_LEFT, 0) == 0);
-    menu_update(&m, 0, 0);
-    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_ADHOC_MODE && m.adhoc_mode == 0);               /* PPSSPP direct by default */
-    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 1);   /* PPSSPP relay */
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 2); /* modern */
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_RIGHT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 0);   /* wraps */
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 2);    /* Left goes back */
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 1);
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_LEFT, 0) == MFX_ADHOC_MODE && m.adhoc_mode == 0);
-    menu_update(&m, 0, 0);
-    menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_MODERN_SERVER);
-    CHECK(menu_update(&m, MI_CONFIRM, 0) == MFX_EDIT_MODERN);             /* Circle opens its editor */
-    menu_update(&m, 0, 0);
-    CHECK(menu_update(&m, MI_RIGHT, 0) == 0);
-    menu_update(&m, 0, 0);
     /* volumes: 100% by default, 10% steps, Left/Right stop at the ends, Confirm wraps */
     for (int k = 0; k < VOL_N; k++) {
         menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
@@ -470,7 +436,7 @@ static void test_buttons(void) {
     }
     CHECK(STEP(CIRCLE) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_GRAPHICS);   /* BACK */
     CHECK(STEP(0) == 0);
-    for (int k = MENU_SEGA_SERVER; k <= MENU_QUIT; k++) {
+    for (int k = MENU_MASTER_VOL; k <= MENU_QUIT; k++) {
         CHECK(STEP(DOWN) == 0 && m.sel == k);
         CHECK(STEP(0) == 0);
     }
@@ -550,123 +516,6 @@ static void test_camera_axis(void) {
 
 /* The sign-in screen: Circle accepts, Cross backs out; the password is never
  * drawn; submitting needs both fields; a failure keeps the screen open. */
-static void test_login(void) {
-    login_state l;
-    login_open(&l, "test.server", "remembered");
-    CHECK(l.state == LOGIN_EDITING && !strcmp(l.user, "remembered") && l.sel == LOGIN_FIELD_PASS);
-    login_type(&l, 's'); login_type(&l, 'e'); login_type(&l, 'c');
-    CHECK(!strcmp(l.pass, "sec"));
-    login_backspace(&l);
-    CHECK(!strcmp(l.pass, "se"));
-    /* the password is not drawn: render and look for its letters' absence is
-     * impractical; check the field shows asterisks via the drawn width instead */
-    static uint32_t px[480 * 272];
-    menu_image img = { px, 480, 272 };
-    login_draw(&l, &img);
-    login_update(&l, 0, 0);
-    login_update(&l, MI_DOWN, 0); login_update(&l, 0, 0);
-    CHECK(l.sel == LOGIN_BTN_SIGNIN);                                   /* no third field on SIGN IN */
-    CHECK(login_update(&l, MI_CONFIRM, 0x2000) == LOGIN_ACT_SUBMIT && l.state == LOGIN_WORKING);   /* Circle */
-    login_finish(&l, 0, "sign-in refused: invalid password");
-    CHECK(l.state == LOGIN_EDITING && l.error && l.pass[0] == 0);       /* stays open, password cleared */
-    login_update(&l, 0, 0);
-    CHECK(login_update(&l, MI_BACK, 0x4000) == LOGIN_ACT_CANCEL);       /* Cross */
-    login_open(&l, "s", "");
-    l.sel = LOGIN_BTN_SIGNIN;
-    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_NONE && l.error);   /* empty fields refused */
-    login_open(&l, "s", "");
-    login_update(&l, 0, 0);
-    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_NONE && l.osk);  /* Circle on a field: keyboard */
-    login_update(&l, 0, 0);
-    login_update(&l, MI_DOWN, 0); login_update(&l, 0, 0);              /* to row "abcdefghij" */
-    login_update(&l, MI_CONFIRM, 0x2000);                               /* types 'a' */
-    login_update(&l, 0, 0);
-    CHECK(!strcmp(l.user, "a"));
-    CHECK(login_update(&l, MI_BACK, 0) == LOGIN_ACT_NONE && !l.osk);    /* Cross closes only the keyboard */
-    login_finish(&l, 1, "ok");
-    CHECK(l.state == LOGIN_DONE_OK);
-    int act = LOGIN_ACT_NONE, n = 0;
-    while (act == LOGIN_ACT_NONE && n++ < 200) act = login_update(&l, 0, 0);
-    CHECK(act == LOGIN_ACT_CLOSE_OK);
-
-    /* REGISTER: its page, the email required, CREATE asks to register, success back to SIGN IN */
-    login_open(&l, "s", "newuser");
-    l.sel = LOGIN_BTN_REGISTER;
-    login_update(&l, 0, 0);
-    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_NONE && l.page == LOGIN_PAGE_REGISTER);
-    login_update(&l, 0, 0);
-    l.sel = LOGIN_FIELD_PASS; login_type(&l, 'p'); login_type(&l, 'w');
-    l.sel = LOGIN_BTN_OK;
-    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_NONE && l.error);   /* no email yet */
-    login_update(&l, 0, 0);
-    l.sel = LOGIN_FIELD_EXTRA;
-    for (const char *c = "a@b.c"; *c; c++) login_type(&l, *c);
-    CHECK(!strcmp(l.email, "a@b.c"));
-    l.sel = LOGIN_BTN_OK;
-    CHECK(login_update(&l, MI_CONFIRM, 0) == LOGIN_ACT_REGISTER && l.state == LOGIN_WORKING);
-    login_register_finish(&l, 1, "created");
-    CHECK(l.state == LOGIN_EDITING && l.page == LOGIN_PAGE_SIGNIN && !strcmp(l.pass, "pw") && !l.error);
-    login_update(&l, 0, 0);
-    l.sel = LOGIN_BTN_REGISTER;                                          /* Cross on REGISTER: back to SIGN IN */
-    login_update(&l, MI_CONFIRM, 0); login_update(&l, 0, 0);
-    CHECK(l.page == LOGIN_PAGE_REGISTER);
-    CHECK(login_update(&l, MI_BACK, 0) == LOGIN_ACT_NONE && l.page == LOGIN_PAGE_SIGNIN);
-}
-
-/* The password field shows one '*' per typed character (the font had no
- * '*', so typed passwords looked like no input). Field: x 166.., y 98..110. */
-static int pass_field_lit(const login_state *l) {
-    static uint32_t px[480 * 272];
-    for (int i = 0; i < 480 * 272; i++) px[i] = 0xFF000000u;
-    menu_image img = { px, 480, 272 };
-    login_draw(l, &img);
-    int lit = 0;
-    for (int y = 101; y < 108; y++)
-        for (int x = 168; x < 400; x++)
-            if ((px[y * 480 + x] & 0xFFFFFF) == 0xFFFFFF) lit++;
-    return lit;
-}
-
-static void test_password_visible(void) {
-    login_state l;
-    login_open(&l, "s", "user");
-    l.sel = LOGIN_FIELD_USER;                       /* no cursor in the password field */
-    const int empty = pass_field_lit(&l);
-    for (const char *c = "ppsspp123"; *c; c++) { l.sel = LOGIN_FIELD_PASS; login_type(&l, *c); }
-    CHECK(!strcmp(l.pass, "ppsspp123"));
-    l.sel = LOGIN_FIELD_USER;
-    const int typed = pass_field_lit(&l);
-    CHECK(empty == 0);
-    CHECK(typed > 0);                               /* something is shown for the password */
-    /* exactly nine asterisks: the '*' glyph lights 11 pixels */
-    CHECK(typed == 9 * 11);
-    /* and the cursor is visible in the selected field */
-    l.sel = LOGIN_FIELD_PASS;
-    CHECK(pass_field_lit(&l) > typed);
-}
-
-/* The SEGA SERVER editor: Circle types, Start saves, Cross cancels. */
-static void test_textedit(void) {
-    textedit e;
-    textedit_open(&e, "T", "H", "old");
-    CHECK(e.open && !strcmp(e.text, "old"));
-    CHECK(textedit_update(&e, MI_CONFIRM, 0x2000) == TE_NONE && !strcmp(e.text, "old"));  /* held from opening: not a press */
-    textedit_update(&e, 0, 0);
-    textedit_backspace(&e); textedit_backspace(&e); textedit_backspace(&e);
-    textedit_type(&e, 'h'); textedit_type(&e, ':'); textedit_type(&e, ' ');
-    CHECK(!strcmp(e.text, "h:"));                                       /* no spaces */
-    CHECK(textedit_update(&e, MI_CONFIRM, 0x2000) == TE_NONE && !strcmp(e.text, "h:1"));   /* key (0,0) = '1' */
-    textedit_update(&e, 0, 0);
-    CHECK(textedit_update(&e, 0, 0x8000) == TE_NONE && !strcmp(e.text, "h:"));            /* Square deletes */
-    textedit_update(&e, 0, 0);
-    CHECK(textedit_update(&e, 0, 0x0008) == TE_SAVE && !e.open && !strcmp(e.text, "h:")); /* Start saves */
-    textedit_open(&e, "T", "H", "keep");
-    textedit_update(&e, 0, 0);
-    CHECK(textedit_update(&e, MI_BACK, 0x4000) == TE_CANCEL && !e.open);                  /* Cross cancels */
-}
-
-/* ---- FPS meter -------------------------------------------------------------- */
-
 static void test_meter(void) {
     fps_meter fm;
     fps_meter_init(&fm);
@@ -740,8 +589,8 @@ static void test_draw(void) {
 
     m.open = 1;
     menu_draw(&m, &img, 30, "F1");
-    CHECK(changed_inside(96, 5, 384, 266));             /* the centred 288x261 box (16 items) */
-    CHECK(!changed_outside(96, 5, 384, 266));
+    CHECK(changed_inside(96, 27, 384, 244));            /* the centred 288x217 box (12 items) */
+    CHECK(!changed_outside(96, 27, 384, 244));
 
     for (int i = 0; i < 480 * 272; i++) g_img[i] = 0xFF808080u;
     fps_draw(&fm, &img);                                /* top-left corner only */
@@ -955,11 +804,11 @@ static void test_touch_host(void) {
     menu_state m;
     menu_init(&m, 30, 1);
     CHECK((m.hidden & MENU_BIT(MENU_TOUCH_COLOR)) && (m.hidden & MENU_BIT(MENU_TOUCH_ALPHA)));   /* Windows: hidden */
-    m.hidden = MENU_BIT(MENU_GRAPHICS) | MENU_BIT(MENU_ADHOC_SERVER) | MENU_BIT(MENU_FONT);
-    CHECK(menu_update(&m, MI_TOGGLE, 0) == MFX_OPENED && m.sel == MENU_SEGA_SERVER);  /* the first shown item */
+    m.hidden = MENU_BIT(MENU_GRAPHICS) | MENU_BIT(MENU_MUSIC_VOL) | MENU_BIT(MENU_FONT);
+    CHECK(menu_update(&m, MI_TOGGLE, 0) == MFX_OPENED && m.sel == MENU_MASTER_VOL);   /* the first shown item */
     menu_update(&m, 0, 0);
     menu_update(&m, MI_DOWN, 0); menu_update(&m, 0, 0);
-    CHECK(m.sel == MENU_ADHOC_MODE);                            /* ADHOC SERVER skipped */
+    CHECK(m.sel == MENU_SFX_VOL);                               /* MUSIC VOLUME skipped */
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
     menu_update(&m, MI_UP, 0); menu_update(&m, 0, 0);
     CHECK(m.sel == MENU_CLOSE);                                  /* wraps past the hidden first item */
@@ -967,11 +816,11 @@ static void test_touch_host(void) {
     /* the main page's taps: rows in shown order, 11 pixels apart */
     int x, y, bw, bh;
     menu_box(&m, 480, 272, &x, &y, &bw, &bh);
-    CHECK(bh == 261 + 11 * (13 - 16));                           /* 16 main items, 3 hidden */
+    CHECK(bh == 261 + 11 * (9 - 16));                            /* 12 main items, 3 hidden */
     int row0 = y + 8 + 9 + 8;
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 3) == MFX_EDIT_SEGA && m.sel == MENU_SEGA_SERVER);   /* editors open */
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 + 3) == MFX_ADHOC_MODE && m.adhoc_mode == 1);
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 7 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS */
+    CHECK(menu_touch(&m, 480, 272, x + 140, row0 + 11 + 3) == MFX_AUDIO && m.sel == MENU_SFX_VOL && m.vol[VOL_SFX] == VOL_STEPS - 1);   /* left half: down */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 + 3) == MFX_AUDIO && m.vol[VOL_SFX] == VOL_STEPS);                               /* right half: up */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 3 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS */
 
     /* the CONTROLS page with the touch items: RIGHT STICK, SENSITIVITY, STICK DEADZONE, MOUSE CAMERA,
      * KEYBOARD, CIRCLE/CROSS, COLOR, OPACITY, BACK */
@@ -1002,7 +851,7 @@ static void test_touch_host(void) {
     CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 8 + 3) == 0 && m.page == MENU_PAGE_MAIN && m.sel == MENU_CONTROLS);  /* BACK */
     menu_box(&m, 480, 272, &x, &y, &bw, &bh);                    /* the main page's box again */
     row0 = y + 8 + 9 + 8;
-    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 10 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);  /* CONTROLS, nothing hidden */
+    CHECK(menu_touch(&m, 480, 272, x + 200, row0 + 11 * 6 + 3) == 0 && m.page == MENU_PAGE_CONTROLS);   /* CONTROLS, nothing hidden */
     CHECK(menu_touch(&m, 480, 272, 2, 2) == 0 && m.open && m.page == MENU_PAGE_MAIN);   /* outside: back a page */
     CHECK(menu_touch(&m, 480, 272, 2, 2) == MFX_CLOSED && !m.open);                     /* outside again: closes */
 }
@@ -1014,9 +863,6 @@ int main(void) {
     test_filter();
     test_buttons();
     test_rs_speed();
-    test_login();
-    test_password_visible();
-    test_textedit();
     test_camera_axis();
     test_meter();
     test_draw();

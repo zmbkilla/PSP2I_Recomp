@@ -50,7 +50,7 @@
 #include "rateaudit.h"
 #include "framerate.h"
 #include "gamelog.h"
-#include "online.h"
+#include "logfile.h"
 
 #include <psprecomp/hle.h>
 #include <psprecomp/mem.h>

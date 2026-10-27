@@ -29,11 +29,8 @@
  *   psp2i.ini          the settings menu's choices (written when one changes): fps=,
  *                      fps_counter=, right_stick=on/off, rs_speed=, volume_master= / _music= / _sfx= (0-100),
  *                      swap_circle_cross=on (keys X/Z and controllers; the touch buttons
- *                      keep their symbols), touch_color=, touch_opacity= (10-100); ad hoc
- *                      multiplayer: adhoc_mode=modern (default) | ppsspp_direct |
- *                      ppsspp_relay, modern_server=host (default) or the hosting player's
- *                      address (IPv4/IPv6), adhoc_server= (PPSSPP modes); by hand only:
- *                      touch=off, nickname=, iso=
+ *                      keep their symbols), touch_color=, touch_opacity= (10-100); by
+ *                      hand only: touch=off, iso=
  *   logs/psp2i_log.txt the log of the last run
  *
  * The settings menu (menu.c, as on Windows): the Back button, R3 or Guide on
@@ -41,7 +38,7 @@
  * cannot do are left out.
  *
  * Optional PSP2I_LIBAV supplies FFmpeg movie video on desktop builds.
- * Not here yet: online play, movie video without that
+ * Not provided: online and ad hoc play. Not here yet: movie video without that
  * backend (movies play black with sound), and save encryption (saves are written unencrypted, so
  * they do not move to and from a PSP or the Windows build). */
 
@@ -602,12 +599,6 @@ static void find_base(void) {
 }
 
 static char g_iso_path[1024];            /* psp2i.ini iso= (desktop; Android asks) */
-/* ad hoc multiplayer (psp2i.ini) */
-static int  g_adhoc_mode = PSP_ADHOC_MODE_MODERN;
-static char g_modern_server[256] = "host";
-static char g_adhoc_server[256] = "socom.cc";
-static char g_nick[64] = "PSP2i";
-
 static float g_rs_speed = 1.0f;          /* the menu's CONTROLS > SENSITIVITY */
 static int  g_rs_on = 1;                 /* CONTROLS > RIGHT STICK */
 static int  g_vol[VOL_N] = { VOL_STEPS, VOL_STEPS, VOL_STEPS };
@@ -631,12 +622,6 @@ static int read_ini(int *fps) {
         else if (!strncmp(line, "fps_counter=", 12)) g_fps_on = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "swap_circle_cross=", 18)) g_swap_oc = !strncmp(line + 18, "on", 2);
         else if (!strncmp(line, "iso=", 4)) snprintf(g_iso_path, sizeof g_iso_path, "%s", line + 4);
-        else if (!strncmp(line, "adhoc_mode=", 11))
-            g_adhoc_mode = !strcmp(line + 11, "ppsspp_direct") ? PSP_ADHOC_MODE_PPSSPP_DIRECT
-                         : !strcmp(line + 11, "ppsspp_relay") ? PSP_ADHOC_MODE_PPSSPP_RELAY : PSP_ADHOC_MODE_MODERN;
-        else if (!strncmp(line, "modern_server=", 14)) snprintf(g_modern_server, sizeof g_modern_server, "%s", line[14] ? line + 14 : "host");
-        else if (!strncmp(line, "adhoc_server=", 13)) { if (line[13]) snprintf(g_adhoc_server, sizeof g_adhoc_server, "%s", line + 13); }
-        else if (!strncmp(line, "nickname=", 9)) { if (line[9]) snprintf(g_nick, sizeof g_nick, "%s", line + 9); }
         else if (!strncmp(line, "rs_speed=", 9)) g_rs_speed = (float)atof(line + 9);
         else if (!strncmp(line, "right_stick=", 12)) g_rs_on = strncmp(line + 12, "off", 3) != 0;
         else if (!strncmp(line, "volume_master=", 14)) g_vol[VOL_MASTER] = pct_step(line + 14);
@@ -654,7 +639,7 @@ static int read_ini(int *fps) {
 
 static int path_exists(const char *p) { return SDL_GetPathInfo(p, NULL); }
 
-/* ad hoc / server messages, into psp2i_log.txt */
+/* network messages, into psp2i_log.txt */
 static void net_line(const char *line) { fprintf(stderr, "net: %s\n", line); }
 
 #ifdef SDL_PLATFORM_ANDROID
@@ -681,53 +666,6 @@ static int android_open_iso(int choose) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     (*env)->DeleteLocalRef(env, c);
     return fd;
-}
-
-/* The modern multiplayer server, asked in a dialog (no settings menu here). */
-static void android_ask_modern_server(char *out, size_t cap) {
-    JNIEnv *env;
-    jclass c = activity_class(&env);
-    if (!c) return;
-    /* this device's addresses, for the players who join it */
-    char v4[64] = "", v6[128] = "", here[256];
-    psp_adhoc_host_addresses(v4, sizeof v4, v6, sizeof v6);
-    snprintf(here, sizeof here, "%s%s%s", v4, v4[0] && v6[0] ? "  or  " : "", v6);
-    jstring jhere = (*env)->NewStringUTF(env, here);
-    jmethodID m = (*env)->GetStaticMethodID(env, c, "askModernServer", "(Ljava/lang/String;)Ljava/lang/String;");
-    jstring s = m ? (jstring)(*env)->CallStaticObjectMethod(env, c, m, jhere) : NULL;
-    if (jhere) (*env)->DeleteLocalRef(env, jhere);
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-    if (s) {
-        const char *t = (*env)->GetStringUTFChars(env, s, NULL);
-        if (t && t[0]) snprintf(out, cap, "%s", t);
-        if (t) (*env)->ReleaseStringUTFChars(env, s, t);
-        (*env)->DeleteLocalRef(env, s);
-    }
-    (*env)->DeleteLocalRef(env, c);
-}
-
-/* PSP2iActivity.askText: a one-line text dialog (the menu's server items).
- * 1 with the text in out if OK was pressed, 0 if cancelled. */
-static int android_ask_text(const char *title, const char *message, const char *value, char *out, size_t cap) {
-    JNIEnv *env;
-    jclass c = activity_class(&env);
-    if (!c) return 0;
-    jstring jt = (*env)->NewStringUTF(env, title), jm = (*env)->NewStringUTF(env, message), jv = (*env)->NewStringUTF(env, value);
-    jmethodID m = (*env)->GetStaticMethodID(env, c, "askText",
-                                            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
-    jstring s = m ? (jstring)(*env)->CallStaticObjectMethod(env, c, m, jt, jm, jv) : NULL;
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); s = NULL; }
-    if (jt) (*env)->DeleteLocalRef(env, jt);
-    if (jm) (*env)->DeleteLocalRef(env, jm);
-    if (jv) (*env)->DeleteLocalRef(env, jv);
-    int ok = 0;
-    if (s) {
-        const char *t = (*env)->GetStringUTFChars(env, s, NULL);
-        if (t) { snprintf(out, cap, "%s", t); ok = 1; (*env)->ReleaseStringUTFChars(env, s, t); }
-        (*env)->DeleteLocalRef(env, s);
-    }
-    (*env)->DeleteLocalRef(env, c);
-    return ok;
 }
 
 /* Copy the PSP fonts (flash/) from a folder the user picks into the app. */
@@ -768,26 +706,6 @@ static int android_data_folder(char *out, size_t cap) {
 
 /* ---- the settings menu's choices ----------------------------------------------- */
 
-/* The ad hoc settings to the runtime (at start, and when the menu changes them). */
-static void adhoc_apply(void) {
-    char host[256];
-    snprintf(host, sizeof host, "%s", g_adhoc_server);
-    uint16_t port = 0;
-    char *c = strrchr(host, ':');
-    if (c) { port = (uint16_t)atoi(c + 1); *c = '\0'; }
-    psp_adhoc_config ac;
-    memset(&ac, 0, sizeof ac);
-    ac.server = host;
-    ac.server_port = port;
-    ac.mode = g_adhoc_mode;
-    ac.port_offset = 10000;
-    ac.nickname = g_nick;
-    ac.modern_server = g_modern_server;
-    psp_adhoc_configure(&ac);
-    fprintf(stderr, "adhoc: mode %d, modern server %s, ad hoc server %s, nickname %s\n", g_adhoc_mode, g_modern_server,
-            g_adhoc_server, g_nick);
-}
-
 static void audio_apply(void) {
     g_master = (float)g_menu.vol[VOL_MASTER] / VOL_STEPS;
     for (int i = 0; i < AUDIO_CHANNELS; i++) if (g_stream[i]) SDL_SetAudioStreamGain(g_stream[i], g_master);
@@ -796,11 +714,11 @@ static void audio_apply(void) {
 }
 
 /* psp2i.ini with the menu's keys rewritten; every other line (touch=, iso=,
- * nickname=, comments) kept as it was. */
+ * comments) kept as it was -- except the old ad hoc keys, dropped. */
 static void write_ini(void) {
     static const char *const OURS[] = { "fps=", "fps_counter=", "right_stick=", "rs_speed=", "volume_master=", "volume_music=", "volume_sfx=",
                                         "swap_circle_cross=", "touch_color=", "touch_opacity=", "adhoc_mode=",
-                                        "adhoc_server=", "modern_server=" };
+                                        "adhoc_server=", "modern_server=", "nickname=" };
     char path[1100], tmp[1110], line[1100];
     snprintf(path, sizeof path, "%s/psp2i.ini", g_base);
     snprintf(tmp, sizeof tmp, "%s.new", path);
@@ -817,33 +735,21 @@ static void write_ini(void) {
         }
         fclose(in);
     }
-    static const char *const MODES[3] = { "ppsspp_direct", "ppsspp_relay", "modern" };
     fprintf(out, "fps=%d\nfps_counter=%s\nright_stick=%s\nrs_speed=%.2f\n", g_menu.fps, g_menu.show_fps ? "on" : "off",
             g_menu.rs_on ? "on" : "off", (double)menu_rs_speed(&g_menu));
     fprintf(out, "volume_master=%d\nvolume_music=%d\nvolume_sfx=%d\n", g_menu.vol[VOL_MASTER] * 10, g_menu.vol[VOL_MUSIC] * 10,
             g_menu.vol[VOL_SFX] * 10);
     fprintf(out, "swap_circle_cross=%s\ntouch_color=%s\ntouch_opacity=%d\n", g_menu.swap_oc ? "on" : "off",
             menu_touch_color_name(g_menu.touch_color), g_menu.touch_alpha * 10);
-    fprintf(out, "adhoc_mode=%s\nadhoc_server=%s\nmodern_server=%s\n", MODES[g_adhoc_mode % 3], g_adhoc_server, g_modern_server);
     fclose(out);
     remove(path);
     if (rename(tmp, path) != 0) fprintf(stderr, "menu: cannot replace %s\n", path);
-}
-
-/* What the others type to join while this device hosts modern ad hoc. */
-static void menu_share(void) {
-    char v4[64] = "", v6[64] = "";
-    psp_adhoc_host_addresses(v4, sizeof v4, v6, sizeof v6);
-    if (!g_modern_server[0] || !strcmp(g_modern_server, "host"))
-        snprintf(g_menu.share, sizeof g_menu.share, "%s%s%s", v6[0] ? v6 : v4, v6[0] && v4[0] ? " / " : "", v6[0] ? v4 : "");
-    else g_menu.share[0] = '\0';
 }
 
 /* Act on what menu_update / menu_touch changed; changes are saved at once. */
 static void menu_apply(int fx) {
     if (!fx) return;
     int save = 0;
-    if (fx & MFX_OPENED) menu_share();
     if (fx & MFX_FPS_CHANGED) { framerate_set(g_menu.fps); save = 1; }
     if (fx & MFX_SHOW_FPS) { g_fps_on = g_menu.show_fps; save = 1; }
     if (fx & MFX_RS_SPEED) { camera_set_speed(menu_rs_speed(&g_menu)); save = 1; }
@@ -851,25 +757,6 @@ static void menu_apply(int fx) {
     if (fx & MFX_AUDIO) { audio_apply(); save = 1; }
     if (fx & MFX_SWAP_OC) { g_swap_oc = g_menu.swap_oc; save = 1; }
     if (fx & MFX_TOUCH) save = 1;
-    if (fx & MFX_ADHOC_MODE) { g_adhoc_mode = g_menu.adhoc_mode; adhoc_apply(); save = 1; }
-#ifdef SDL_PLATFORM_ANDROID
-    char text[256];
-    if ((fx & MFX_EDIT_ADHOC) && android_ask_text("Ad hoc server", "The PPSSPP ad hoc server: host or host:port (default port 27312).",
-                                                  g_adhoc_server, text, sizeof text)) {
-        if (text[0]) snprintf(g_adhoc_server, sizeof g_adhoc_server, "%s", text);
-        snprintf(g_menu.adhoc, sizeof g_menu.adhoc, "%.63s", g_adhoc_server);
-        adhoc_apply();
-        save = 1;
-    }
-    if ((fx & MFX_EDIT_MODERN) && android_ask_text("Modern server", "host to host on this device, or the address of the player "
-                                                   "hosting (IPv4 or IPv6).", g_modern_server, text, sizeof text)) {
-        snprintf(g_modern_server, sizeof g_modern_server, "%s", text[0] ? text : "host");
-        snprintf(g_menu.modern, sizeof g_menu.modern, "%.63s", g_modern_server);
-        menu_share();
-        adhoc_apply();
-        save = 1;
-    }
-#endif
     if (save) write_ini();
 }
 
@@ -1005,10 +892,7 @@ int main(int argc, char **argv) {
     psp_hle_init();
     psp_io_set_root(root);
     psp_net_set_log(net_line);
-#ifdef SDL_PLATFORM_ANDROID
-    android_ask_modern_server(g_modern_server, sizeof g_modern_server);   /* ad hoc multiplayer: asked at every start */
-#endif
-    adhoc_apply();
+    psp_net_set_forced_off(1);                               /* no online play: the WLAN switch reads off */
     psp_sysmem_set_heap(mi.load_hi, USER_PARTITION_TOP);
     psp_recomp_register();
     psp_audio_set_sink(audio_sink);
@@ -1023,13 +907,12 @@ int main(int argc, char **argv) {
     fps_meter_init(&g_fm);
     /* the settings menu, with psp2i.ini's choices; what this host cannot do is left out */
     menu_init(&g_menu, fps, g_fps_on);
-    g_menu.hidden = MENU_BIT(MENU_SEGA_SERVER) | MENU_BIT(MENU_RESOLUTION) | MENU_BIT(MENU_RENDERER)
+    g_menu.hidden = MENU_BIT(MENU_RESOLUTION) | MENU_BIT(MENU_RENDERER)
                   | MENU_BIT(MENU_ATTENUATION) | MENU_BIT(MENU_FONT) | MENU_BIT(MENU_TESTS) | MENU_BIT(MENU_QUIT) | MENU_BIT(MENU_EXTRACT_MODELS) | MENU_BIT(MENU_LOAD_MODELS) | MENU_BIT(MENU_DEADZONE) | MENU_BIT(MENU_MOUSE_CAM) | MENU_BIT(MENU_KEYS) | MENU_BIT(MENU_DRAW_DIST) | MENU_BIT(MENU_VERTEX_WORK)
                   | MENU_BIT(MENU_SCALING) | MENU_BIT(MENU_FXAA) | MENU_BIT(MENU_SHARPEN) | MENU_BIT(MENU_SCANLINES)
                   | MENU_BIT(MENU_BRIGHTNESS) | MENU_BIT(MENU_SATURATION);   /* post-processing: Windows for now */
 #ifndef SDL_PLATFORM_ANDROID
-    g_menu.hidden |= MENU_BIT(MENU_ADHOC_SERVER) | MENU_BIT(MENU_MODERN_SERVER)          /* no text entry here */
-                   | MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA);
+    g_menu.hidden |= MENU_BIT(MENU_TOUCH_COLOR) | MENU_BIT(MENU_TOUCH_ALPHA);
 #endif
     menu_set_rs_speed(&g_menu, g_rs_speed);
     g_menu.rs_on = g_rs_on;
@@ -1037,9 +920,6 @@ int main(int argc, char **argv) {
     g_menu.swap_oc = g_swap_oc;
     g_menu.touch_color = g_touch_color;
     g_menu.touch_alpha = g_touch_alpha;
-    g_menu.adhoc_mode = g_adhoc_mode;
-    snprintf(g_menu.adhoc, sizeof g_menu.adhoc, "%.63s", g_adhoc_server);
-    snprintf(g_menu.modern, sizeof g_menu.modern, "%.63s", g_modern_server);
     audio_apply();
     camera_init(menu_rs_speed(&g_menu));
     psp_sched_set_vblank_hook(on_vblank);

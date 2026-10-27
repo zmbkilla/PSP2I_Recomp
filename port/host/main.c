@@ -80,17 +80,14 @@
 #include "framerate.h"
 #include "menu.h"
 #include "font_win.h"
-#include "web_overlay.h"
 #include "camera.h"
-#include "login.h"
-#include "online.h"
 #include "savecrypt.h"
 #include "gamelog.h"
+#include "logfile.h"
 #include "functrace.h"
 #include "rateaudit.h"
 #include "postfx.h"
 #include "prod.h"
-#include "textedit.h"
 #include "present.h"
 
 #ifdef _WIN32
@@ -398,17 +395,6 @@ static uint32_t   g_host_held, g_host_latched;  /* MI_* from keys the game never
 static uint32_t   g_keys_latched;          /* PSP bits of keys pressed since the last vblank */
 static char       g_menu_key_name[8] = "F1";
 
-/* The PSN sign-in screen (login.c), opened when the game asks to sign in;
- * while open it takes all input. */
-static login_state g_login;
-static uint32_t    g_login_keys;          /* MI_* from navigation keys while a text screen is open */
-/* The settings menu's SEGA SERVER editor (textedit.c). */
-static textedit    g_sega_edit;
-static int         g_edit_adhoc;            /* the editor is open for: 0 SEGA SERVER, 1 ADHOC SERVER, 2 MODERN SERVER */
-static int         g_edit_enter;          /* Enter pressed in the editor: save */
-
-static int text_ui_open(void) { return g_login.state != LOGIN_CLOSED || g_sega_edit.open; }
-
 static void draw_overlay(void) {
     menu_image img = { g_rgba, SCREEN_W, SCREEN_H };
     if (g_menu.show_fps) fps_draw(&g_fpsm, &img);
@@ -418,18 +404,7 @@ static void draw_overlay(void) {
         if (ra[0]) menu_text(&img, 4, SCREEN_H - 22, ra, 0xFFD040u);
     }
 #endif
-    const char *st = online_status_line();
-    if (st) {
-        char line[96];
-        snprintf(line, sizeof line, "%.78s", st);
-        const int w = menu_text_width(line);
-        for (int y = 2; y < 13; y++) for (int x = SCREEN_W - w - 7; x < SCREEN_W - 2; x++)
-            if (x >= 0) g_rgba[y * SCREEN_W + x] = 0xFF000000u | ((g_rgba[y * SCREEN_W + x] >> 2) & 0x003F3F3Fu);
-        menu_text(&img, SCREEN_W - w - 4, 4, line, 0xFFFFFF);
-    }
-    login_draw(&g_login, &img);
     menu_draw(&g_menu, &img, framerate_game_fps(), g_menu_key_name);
-    textedit_draw(&g_sega_edit, &img);
 }
 
 /* What the window shows: the latest game frame with the overlay on top. */
@@ -577,15 +552,10 @@ static int key_capture(WPARAM vk, int first) {
 }
 
 /* The window's messages, on the game thread (window_pump, from the window
- * thread's queue): keys, text, resizes, closing. */
+ * thread's queue): keys, resizes, closing. */
 static void game_msg(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     (void)h;
     switch (msg) {
-    case WM_CHAR:
-        /* Text for the sign-in screen (letters do not act as PSP buttons then). */
-        if (g_sega_edit.open) { if (wp > 32 && wp < 127) textedit_type(&g_sega_edit, (char)wp); }
-        else if (g_login.state != LOGIN_CLOSED && wp >= 32 && wp < 127) login_type(&g_login, (char)wp);
-        return;
     case WM_KEYDOWN: {
         const int first = !(lp & (1 << 30));                     /* not an auto-repeat */
 #ifndef PSP2I_PROD                                     /* test keys: not in the community build */
@@ -602,21 +572,6 @@ static void game_msg(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
 #endif
         if (key_capture(wp, first)) return;
-        if (text_ui_open() && wp != g_menu_vk) {
-            uint32_t k = 0;
-            switch (wp) {
-            case VK_UP: k = MI_UP; break;
-            case VK_DOWN: case VK_TAB: k = MI_DOWN; break;
-            case VK_LEFT: k = MI_LEFT; break;
-            case VK_RIGHT: k = MI_RIGHT; break;
-            case VK_RETURN: if (g_sega_edit.open) g_edit_enter = 1; else k = MI_CONFIRM; break;
-            case VK_ESCAPE: k = MI_BACK; break;
-            case VK_BACK: if (g_sega_edit.open) textedit_backspace(&g_sega_edit); else login_backspace(&g_login); break;
-            default: break;
-            }
-            g_login_keys |= k;
-            return;
-        }
         const uint32_t hk = host_key(wp);
         if (hk) { g_host_held |= hk; if (first) g_host_latched |= hk; return; }
         if (key_stick(wp)) { g_kstick |= key_stick(wp); ctrl_commit(); return; }
@@ -624,15 +579,6 @@ static void game_msg(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_keys |= key_bit(wp);  ctrl_commit(); return;
     }
     case WM_KEYUP:
-        switch (wp) {
-        case VK_UP: g_login_keys &= ~MI_UP; break;
-        case VK_DOWN: case VK_TAB: g_login_keys &= ~MI_DOWN; break;
-        case VK_LEFT: g_login_keys &= ~MI_LEFT; break;
-        case VK_RIGHT: g_login_keys &= ~MI_RIGHT; break;
-        case VK_RETURN: g_login_keys &= ~MI_CONFIRM; break;
-        case VK_ESCAPE: g_login_keys &= ~MI_BACK; break;
-        default: break;
-        }
         g_host_held &= ~host_key(wp); g_keys &= ~key_bit(wp); g_kstick &= ~key_stick(wp); ctrl_commit(); return;
     case WM_SYSKEYDOWN:
         if (wp == VK_RETURN && (lp & (1 << 29))) {               /* Alt+Enter */
@@ -640,8 +586,8 @@ static void game_msg(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return;
         }
         break;
-    case WM_SIZE: present_resized(); web_overlay_resize(); return;
-    case WM_CLOSE: web_overlay_close(); return;   /* the rest was done on the window thread */
+    case WM_SIZE: present_resized(); return;
+    case WM_CLOSE: return;                        /* done on the window thread */
     }
 }
 
@@ -786,7 +732,6 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE:
         if (g_mouse_held) mouse_hold(h, 1);
         winq_push(msg, wp, lp);
-        web_overlay_post(WEB_POST_RESIZE);     /* the game thread may be in the page's own loop */
         return 0;
     case WM_ERASEBKGND: return 1;                                 /* the game draws it all */
     case WM_PAINT: {                                              /* ... every vblank */
@@ -804,7 +749,6 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             audio_set_master(0.0f);
             psp_request_exit();
             winq_push(msg, wp, lp);
-            web_overlay_post(WEB_POST_CLOSE);   /* a web page open over the game (LoadExec, below) */
             SetTimer(h, STUCK_TIMER, 10000, NULL);
         }
         return 0;
@@ -1172,14 +1116,6 @@ static void ctrl_commit(void) {
     if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
     if (g_rep_on) { bits |= g_rep_bits; ax = g_rep_ax; ay = g_rep_ay; }
     /* The settings menu takes all input while open (menu_filter_game). */
-    if (g_login.state != LOGIN_CLOSED || web_overlay_active()) {
-        /* The sign-in screen (or a web page over the game: the PS Store)
-         * has the input; buttons still held when it closes stay hidden from
-         * the game until released. */
-        g_menu.game_mask |= bits & ~PRESS_MENU;
-        bits = 0;
-        ax = ay = 128;
-    }
     bits = menu_filter_game(&g_menu, bits & ~PRESS_MENU);
     if (g_menu.open) ax = ay = 128;
     if (!g_rep_on) rec_pad(bits, ax, ay);
@@ -1357,58 +1293,7 @@ static void menu_step(void) {
     uint32_t held = menu_inputs(psp, ax, ay) | g_host_held;
     if (input_sdl_host_buttons() & (INPUT_HOST_GUIDE | INPUT_HOST_RSTICK)) held |= MI_TOGGLE;
 
-    snprintf(g_menu.sega, sizeof g_menu.sega, "%s", online_sega_redirect());
-    snprintf(g_menu.adhoc, sizeof g_menu.adhoc, "%s", online_adhoc_server());
-    snprintf(g_menu.modern, sizeof g_menu.modern, "%s", online_modern_server());
-    g_menu.adhoc_mode = online_adhoc_mode();
-    if (g_sega_edit.open) {
-        /* The text editor (SEGA SERVER or ADHOC SERVER) has the input (pad
-         * buttons and navigation keys; typed characters arrive through WM_CHAR). */
-        const uint32_t pad = g_script_bits | g_pad_bits;
-        int r = textedit_update(&g_sega_edit, menu_inputs_from_psp(pad & 0xFFFF, ax, ay) | g_login_keys, pad);
-        if (g_edit_enter) { g_edit_enter = 0; g_sega_edit.open = 0; r = TE_SAVE; }
-        if (r == TE_SAVE && g_edit_adhoc == 2) {
-            online_set_modern_server(g_sega_edit.text);
-            fprintf(stderr, "menu: modern server %s\n", online_modern_server());
-        } else if (r == TE_SAVE && g_edit_adhoc) {
-            online_set_adhoc_server(g_sega_edit.text);
-            fprintf(stderr, "menu: ad hoc server %s\n", online_adhoc_server());
-        } else if (r == TE_SAVE) {
-            online_set_sega_redirect(g_sega_edit.text);
-            fprintf(stderr, "menu: SEGA server redirect %s\n", online_sega_redirect()[0] ? online_sega_redirect() : "off");
-        }
-        menu_update(&g_menu, 0, 0);       /* keep its press detection in step */
-        g_menu.prev = held;               /* no stray press when the editor closes */
-        return;
-    }
-
     const int fx = menu_update(&g_menu, held, latched);
-    if (fx & MFX_EDIT_SEGA) {
-        char hint[96];
-        snprintf(hint, sizeof hint, "%.22s -> HOST[:PORT], EMPTY = OFF", online_sega_host());
-        textedit_open(&g_sega_edit, "SEGA SERVER REDIRECT", hint, online_sega_redirect());
-        g_edit_adhoc = 0;
-    }
-    if (fx & MFX_EDIT_ADHOC) {
-        textedit_open(&g_sega_edit, "ADHOC SERVER", "HOST[:PORT] (DEFAULT PORT 27312)", online_adhoc_server());
-        g_edit_adhoc = 1;
-    }
-    if (fx & MFX_EDIT_MODERN) {
-        textedit_open(&g_sega_edit, "MODERN SERVER", "HOST, OR THE HOSTING PLAYER (IPV4 OR IPV6)", online_modern_server());
-        g_edit_adhoc = 2;
-    }
-    if (fx & MFX_OPENED) {                    /* what the others type to join, if this game hosts modern */
-        char v4[64], v6[64];
-        psp_adhoc_host_addresses(v4, sizeof v4, v6, sizeof v6);
-        const char *ms = online_modern_server();
-        if (!ms[0] || !strcmp(ms, "host"))
-            snprintf(g_menu.share, sizeof g_menu.share, "%s%s%s", v6[0] ? v6 : v4, v6[0] && v4[0] ? " / " : "", v6[0] ? v4 : "");
-        else g_menu.share[0] = '\0';
-    }
-    if (fx & MFX_ADHOC_MODE) {
-        online_set_adhoc_mode(g_menu.adhoc_mode);
-        fprintf(stderr, "menu: ad hoc connection %d (0 PPSSPP direct, 1 PPSSPP relay, 2 modern)\n", g_menu.adhoc_mode);
-    }
     if (fx & MFX_FPS_CHANGED) {
         framerate_set(g_menu.fps);
         rec_fps(g_menu.fps);
@@ -1469,7 +1354,7 @@ static void menu_step(void) {
         if (g_wnd) ShowWindow(g_wnd, SW_HIDE);
 #endif
         fprintf(stderr, "menu: quit game\n");
-        online_log("exit: QUIT GAME from the engine menu");
+        gamelog_note("exit: QUIT GAME from the engine menu");
         psp_request_exit();
     }
     if (fx & MFX_VERTEX) {
@@ -1536,7 +1421,7 @@ static void menu_step(void) {
 static void mouse_camera_step(void) {
     static int asked = -1;
     static uint64_t last_us;
-    const int want = g_menu.mouse_cam && !g_menu.open && g_login.state == LOGIN_CLOSED && !web_overlay_active() && !g_headless;
+    const int want = g_menu.mouse_cam && !g_menu.open && !g_headless;
     if (want != asked && g_wnd) { PostMessageA(g_wnd, WM_APP_MOUSECAP, (WPARAM)want, 0); asked = want; }
     const uint64_t now = psp_sched_now_us();
     const LONG dx = InterlockedExchange(&g_mouse_dx, 0), dy = InterlockedExchange(&g_mouse_dy, 0);
@@ -1582,7 +1467,7 @@ static int      g_fps_n;
 static uint64_t g_fps_last_flips, g_fps_last_us;
 static int      g_fps_log = -1;
 
-/* Once a minute, one "perf:" line in online_log.txt: frame rate, frame busy
+/* Once a minute, one "perf:" line in game_log.txt: frame rate, frame busy
  * times, GE and idle share and the process's memory over that minute -- so
  * slowdowns that only come in long sessions show what grew with them. */
 static void perf_minute(double fps) {
@@ -1623,7 +1508,7 @@ static void perf_minute(double fps) {
         }
         lm = m; ls = sk;
     }
-    online_log("perf: %.1f min, fps avg %.1f min %.1f; frames <8ms %llu, <16.7 %llu, <25 %llu, <33 %llu, <50 %llu, 50+ %llu; "
+    gamelog_note("perf: %.1f min, fps avg %.1f min %.1f; frames <8ms %llu, <16.7 %llu, <25 %llu, <33 %llu, <50 %llu, 50+ %llu; "
                "GE %.1f%%, idle %.1f%%; memory %.0f MB%s",
                now / 60e6, sum / n, mn,
                (unsigned long long)(fb[0] - last_fb[0]), (unsigned long long)(fb[1] - last_fb[1]), (unsigned long long)(fb[2] - last_fb[2]),
@@ -1791,30 +1676,6 @@ static void on_vblank(void) {
     poll_controllers();
     menu_step();
     update_camera_stick(vb);
-    online_poll();
-    if (g_login.state != LOGIN_CLOSED) {
-        static int was_open;
-        if (!was_open) {
-            /* Headless tests only: pre-fill the fields (never logged). */
-            const char *u = getenv("PSP2I_TEST_LOGIN_USER"), *pw = getenv("PSP2I_TEST_LOGIN_PASS");
-            if (u) snprintf(g_login.user, sizeof g_login.user, "%s", u);
-            if (pw) snprintf(g_login.pass, sizeof g_login.pass, "%s", pw);
-            if (u && pw) g_login.sel = LOGIN_BTN_SIGNIN;
-        }
-        was_open = 1;
-        uint32_t psp = g_script_bits | g_pad_bits;
-        uint8_t ax = g_pad_ax, ay = g_pad_ay;
-        if (g_script_stick >= 0) { ax = g_stick[g_script_stick].x; ay = g_stick[g_script_stick].y; }
-        const uint32_t held = menu_inputs_from_psp(psp & 0xFFFF, ax, ay) | g_login_keys;
-        switch (login_update(&g_login, held, psp)) {
-        case LOGIN_ACT_SUBMIT:   online_login_submit(); break;
-        case LOGIN_ACT_REGISTER: online_register_submit(); break;
-        case LOGIN_ACT_CANCEL:   online_login_cancel(); break;
-        case LOGIN_ACT_CLOSE_OK: online_login_closed_ok(); break;
-        default: break;
-        }
-        if (g_login.state == LOGIN_CLOSED) { was_open = 0; ctrl_commit(); }
-    }
     fps_meter_sample(&g_fpsm, psp_sched_now_us(), psp_display_flips());
     sample_fps(vb);
     /* The picture for the window. With D3D11 and the display buffer ahead of
@@ -2185,7 +2046,7 @@ static void prof_report(void) {
 /* The game functions on the host stack, innermost first, as PSP addresses:
  * recompiled functions call each other as C functions, so the host stack is
  * the game's call stack. "08B35014 < 08A88584 < ...". For logs that say
- * where in the game something happens (online.c's HTTP log). */
+ * where in the game something happens. */
 #ifdef _WIN32
 /* Symbols for these logs, without stalling the game: DbgHelp is initialised
  * and the exe's 100 MB PDB loaded on a background thread at start
@@ -2579,51 +2440,21 @@ static void crash_handlers_install(void) {
 /* ---- sceKernelLoadExec: "open website" ------------------------------------------
  * The game replaces itself with another program. PSP2i does it for one thing:
  * disc0:/PSP_GAME/USRDIR/module/browser.prx, which opened its website in the
- * PSP browser and then loaded the game again. Here the one window shows
- * whatever runs: the page (web_overlay.cpp; website_url= in
- * psp2i_online.ini) while it is open, then the game booting again in place
- * (main's reboot loop) -- as the PSP did. The game has already torn itself
- * down when it calls this, so there is nothing to return to. */
+ * PSP browser and then loaded the game again. There is no network here, so
+ * the game boots again at once (main's reboot loop), as the PSP did after a
+ * browser that could not connect. The game has already torn itself down when
+ * it calls this, so there is nothing to return to. */
 static int g_reboot;                  /* the run ended in LoadExec: boot the game again */
 
 static void loadexec_host(const char *path, uint32_t argsize, uint32_t argp) {
     (void)argp;
-    online_log("game: sceKernelLoadExec(%s, %u argument bytes)", path, argsize);
+    gamelog_note("game: sceKernelLoadExec(%s, %u argument bytes)", path, argsize);
 #ifdef _WIN32
     if (g_headless || !g_wnd) return;                   /* nothing to show; the game ends */
-    const size_t n = strlen(path);
-    if (n >= 11 && !_stricmp(path + n - 11, "browser.prx")) {
-        audio_set_master(0.0f);                         /* the game is gone; no stuck sound under the page */
-        web_overlay_show(g_wnd, online_website_url(), NULL);
-        if (psp_exit_requested()) return;               /* the window was closed while the page was up */
-    }
-    /* browser.prx's own last step (and any other program): the game again */
     g_reboot = 1;
-#else
-    (void)path;
 #endif
 }
 
-/* The game's PS Store (psp_np_set_store): on a PSP the firmware's store, drawn
- * over the game while it stays in the PSN lobby. Here: store_url= of
- * psp2i_online.ini ({title} = the NP title ID) over the running game
- * (web_overlay_open), the game's input held back meanwhile (ctrl path). */
-static int store_open(const char *title_id) {
-#ifdef _WIN32
-    const char *url = online_store_url();
-    if (!url[0] || g_headless || !g_wnd) return -1;     /* none configured: the dialog just finishes */
-    char full[1024];
-    const char *t = strstr(url, "{title}");
-    if (t) snprintf(full, sizeof full, "%.*s%s%s", (int)(t - url), url, title_id, t + 7);
-    else snprintf(full, sizeof full, "%s", url);
-    online_log("game: PS Store -> %s (over the game)", full);
-    return web_overlay_open(g_wnd, full);
-#else
-    (void)title_id;
-    return -1;
-#endif
-}
-static int store_showing(void) { return web_overlay_poll(); }
 
 /* ---- main ------------------------------------------------------------------ */
 
@@ -2871,7 +2702,6 @@ int main(int argc, char **argv) {
     psp_mem_set_bad_hook(bad_access_hit);
 #endif
     psp_set_loadexec_hook(loadexec_host);
-    psp_np_set_store(store_open, store_showing);
 #endif
     printf("root:  %s\ndisc:  %s\neboot: %s\n", root, iso[0] ? iso : "extracted (root/disc)",
            eboot[0] ? eboot : "from the disc image");
@@ -2991,7 +2821,7 @@ int main(int argc, char **argv) {
     /* PSP savedata encryption: saves interchangeable with a PSP / PPSSPP */
     static const psp_savedata_crypto SAVE_CRYPTO = { savecrypt_decrypt, savecrypt_encrypt, savecrypt_sfo_hash };
     psp_savedata_set_crypto(&SAVE_CRYPTO);
-    online_init(dir, &g_login);
+    psp_net_set_forced_off(1);            /* no online play: the WLAN switch reads off */
     gamelog_init(dir);
     modelx_init();                        /* model names as packages load (EXTRACT MODELS) */
     {
@@ -3018,16 +2848,15 @@ int main(int argc, char **argv) {
         if (!g_reboot || g_close_at || g_quit_at) break;
         /* LoadExec (the website): the game again, in the same window */
         g_reboot = 0;
-        online_log("game: booting the game again (after the website)");
+        gamelog_note("game: booting the game again (after the website)");
         if (boot_guest(eboot, iso, root, ms_dir, &mi, &argp) != 0) { rc = 1; break; }
-        audio_apply();                          /* the volume muted while the page was up */
     }
 
 #ifdef _WIN32
-    /* Closing: how long each step took (a slow one shows in online_log.txt). */
+    /* Closing: how long each step took (a slow one shows in game_log.txt). */
     const ULONGLONG t_stop = GetTickCount64();
-    if (g_close_at) online_log("exit: window closed; the game stopped after %llu ms", t_stop - g_close_at);
-    else if (g_quit_at) online_log("exit: QUIT GAME; the game stopped after %llu ms",
+    if (g_close_at) gamelog_note("exit: window closed; the game stopped after %llu ms", t_stop - g_close_at);
+    else if (g_quit_at) gamelog_note("exit: QUIT GAME; the game stopped after %llu ms",
                                    (unsigned long long)((psp_sched_now_us() - g_quit_at) / 1000));
 #endif
     report();
@@ -3047,7 +2876,7 @@ int main(int argc, char **argv) {
     psp_mem_free();
 #ifdef _WIN32
     if (g_close_at || g_quit_at)
-        online_log("exit: report %llu ms, controllers and sound %llu ms, memory %llu ms",
+        gamelog_note("exit: report %llu ms, controllers and sound %llu ms, memory %llu ms",
                    t_report - t_stop, t_devices - t_report, GetTickCount64() - t_devices);
     /* What is left (Windows unloading the libraries, their threads) only
      * delays the process ending; the logs are written, so end it here. */

@@ -26,7 +26,7 @@ enum {
 /* Menu items, top to bottom: the main page, then the CONTROLS, TESTS and
  * GRAPHICS pages (opened from their items; BACK, or Cross, returns to the
  * main page), then KEYBOARD (opened from CONTROLS, and back to it). */
-enum { MENU_GRAPHICS, MENU_SEGA_SERVER, MENU_ADHOC_SERVER, MENU_ADHOC_MODE, MENU_MODERN_SERVER,
+enum { MENU_GRAPHICS,
        MENU_MASTER_VOL, MENU_MUSIC_VOL, MENU_SFX_VOL, MENU_ATTENUATION, MENU_FONT, MENU_CONTROLS, MENU_TESTS, MENU_EXTRACT_MODELS, MENU_LOAD_MODELS, MENU_QUIT, MENU_CLOSE,
        MENU_RS_ON, MENU_RS_SPEED, MENU_DEADZONE, MENU_MOUSE_CAM, MENU_KEYS, MENU_SWAP_OC, MENU_TOUCH_COLOR, MENU_TOUCH_ALPHA, MENU_CONTROLS_BACK,
        MENU_TEST_TICKS, MENU_TEST_LOGIC, MENU_TESTS_BACK,
@@ -86,13 +86,9 @@ enum {
     MFX_FPS_CHANGED = 1 << 2,   /* fps is the new frame-rate choice */
     MFX_SHOW_FPS    = 1 << 3,   /* show_fps changed */
     MFX_RS_SPEED    = 1 << 4,   /* rs_step changed: menu_rs_speed() */
-    MFX_EDIT_SEGA   = 1 << 5,   /* Circle on SEGA SERVER: the caller opens its text editor */
     MFX_RES_CHANGED = 1 << 6,   /* res changed: resize the window / go fullscreen */
-    MFX_EDIT_ADHOC  = 1 << 7,   /* Circle on ADHOC SERVER: the caller opens its text editor */
-    MFX_ADHOC_MODE  = 1 << 8,   /* adhoc_mode changed */
     MFX_RENDERER    = 1 << 9,   /* renderer changed: save it (used from the next start) */
     MFX_AUDIO       = 1 << 10,  /* a volume or the attenuation changed: apply and save */
-    MFX_EDIT_MODERN = 1 << 11,  /* Circle on MODERN SERVER: the caller opens its text editor */
     MFX_FONT        = 1 << 12,  /* font changed: the caller applies it and sets font_name */
     MFX_SWAP_OC     = 1 << 13,  /* swap_oc changed: Circle and Cross exchanged (keys and controllers) */
     MFX_TOUCH       = 1 << 14,  /* touch_color or touch_alpha changed */
@@ -129,11 +125,6 @@ typedef struct {
     int      test_ticks;   /* TESTS > TICK PACING: the game's 1/60 s ticks paced as at 30 at 60 too (always above 60) */
     int      test_logic;   /* TESTS > 30 HZ LOGIC: frame-counted functions on 30 Hz frames only */
     int      res;          /* RES_*: output resolution */
-    char     sega[64];     /* the SEGA server redirect, shown ("" = off); set by the caller */
-    char     adhoc[64];    /* the ad hoc server host[:port], shown; set by the caller */
-    int      adhoc_mode;   /* PSP_ADHOC_MODE_*: 0 PPSSPP direct, 1 PPSSPP relay, 2 modern; set by the caller */
-    char     modern[64];   /* the modern server: "host" or an address; set by the caller */
-    char     share[96];    /* while hosting modern: the addresses others type; set by the caller */
     int      renderer;     /* REN_D3D11 / REN_GL: the saved choice */
     int      renderer_now; /* REN_*: the renderer running now (set by the caller) */
     int      vol[VOL_N];   /* 0..VOL_STEPS, tenths */

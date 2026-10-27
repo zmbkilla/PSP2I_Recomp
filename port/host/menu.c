@@ -123,10 +123,6 @@ static int change(menu_state *m, int dir) {
         return MFX_FPS_CHANGED;
     case MENU_FPS_COUNTER: m->show_fps = !m->show_fps;      return MFX_SHOW_FPS;
     case MENU_LOAD_MODELS: m->load_models = !m->load_models; return MFX_LOAD_MODELS;
-    case MENU_SEGA_SERVER: return dir == 0 ? MFX_EDIT_SEGA : 0;
-    case MENU_ADHOC_SERVER: return dir == 0 ? MFX_EDIT_ADHOC : 0;
-    case MENU_MODERN_SERVER: return dir == 0 ? MFX_EDIT_MODERN : 0;
-    case MENU_ADHOC_MODE:  m->adhoc_mode = (m->adhoc_mode + (dir < 0 ? 2 : 1)) % 3; return MFX_ADHOC_MODE;
     case MENU_RENDERER:    m->renderer = (m->renderer + 1) % REN_MENU_CHOICES; return MFX_RENDERER;
     case MENU_MASTER_VOL: case MENU_MUSIC_VOL: case MENU_SFX_VOL: {
         int *v = &m->vol[m->sel - MENU_MASTER_VOL];
@@ -447,8 +443,7 @@ void menu_box(const menu_state *m, int w, int h, int *x, int *y, int *bw, int *b
 
 /* Items a tap activates (no step down / up). */
 static int is_editor(int item) {
-    return item == MENU_SEGA_SERVER || item == MENU_ADHOC_SERVER || item == MENU_MODERN_SERVER
-        || item == MENU_KEYS_RESET || is_binding(item);
+    return item == MENU_KEYS_RESET || is_binding(item);
 }
 
 int menu_touch(menu_state *m, int w, int h, int x, int y) {
@@ -495,8 +490,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     y += CELL_H + 8;
 
     static const char *const NAMES[MENU_ITEMS] = {
-        [MENU_GRAPHICS] = "GRAPHICS", [MENU_SEGA_SERVER] = "SEGA SERVER", [MENU_ADHOC_SERVER] = "ADHOC SERVER",
-        [MENU_ADHOC_MODE] = "ADHOC MODE", [MENU_MODERN_SERVER] = "MODERN SERVER", [MENU_MASTER_VOL] = "MASTER VOLUME",
+        [MENU_GRAPHICS] = "GRAPHICS", [MENU_MASTER_VOL] = "MASTER VOLUME",
         [MENU_MUSIC_VOL] = "MUSIC VOLUME", [MENU_SFX_VOL] = "SFX VOLUME", [MENU_ATTENUATION] = "ATTENUATION",
         [MENU_FONT] = "FONT", [MENU_CONTROLS] = "CONTROLS", [MENU_TESTS] = "TESTS", [MENU_EXTRACT_MODELS] = "EXTRACT MODELS", [MENU_LOAD_MODELS] = "LOAD MODELS", [MENU_QUIT] = "QUIT GAME", [MENU_CLOSE] = "CLOSE",
         [MENU_RS_ON] = "RIGHT STICK", [MENU_RS_SPEED] = "SENSITIVITY", [MENU_DEADZONE] = "STICK DEADZONE",
@@ -515,12 +509,6 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
         [MENU_KEY_FIRST + KB_STICK_UP] = "STICK UP", [MENU_KEY_FIRST + KB_STICK_DOWN] = "STICK DOWN",
         [MENU_KEY_FIRST + KB_STICK_LEFT] = "STICK LEFT", [MENU_KEY_FIRST + KB_STICK_RIGHT] = "STICK RIGHT",
         [MENU_KEYS_RESET] = "DEFAULT KEYS", [MENU_KEYS_BACK] = "BACK" };
-    static const char *const ADHOC_MODES[3] = { "< PPSSPP DIRECT >", "< PPSSPP RELAY >", "< MODERN >" };
-    char adhoc[32];
-    snprintf(adhoc, sizeof adhoc, "%.25s", m->adhoc[0] ? m->adhoc : "NOT SET");
-    char modern[32];
-    if (!m->modern[0] || !strcmp(m->modern, "host")) snprintf(modern, sizeof modern, "HOST (THIS GAME)");
-    else snprintf(modern, sizeof modern, "%.25s", m->modern);
     char vol[VOL_N][16], att[24];
     for (int k = 0; k < VOL_N; k++) snprintf(vol[k], sizeof vol[k], "< %d%% >", m->vol[k] * 10);
     if (m->att == ATT_OFF) snprintf(att, sizeof att, "< OFF >");
@@ -529,9 +517,6 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     snprintf(ren, sizeof ren, "< %s >%s", m->renderer == REN_GL ? "OPENGL" : "D3D11", m->renderer != m->renderer_now ? " RESTART" : "");
     char res[24];
     snprintf(res, sizeof res, "< %s >", menu_res_name(m->res));
-    char sega[32];
-    if (m->sega[0]) snprintf(sega, sizeof sega, "%.25s", m->sega);
-    else snprintf(sega, sizeof sega, "OFF");
     char rs[24];
     snprintf(rs, sizeof rs, "< %.2fX >", (double)menu_rs_speed(m));
     char font[32];
@@ -569,9 +554,7 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
                       : i == MENU_RS_ON ? (m->rs_on ? "< ON >" : "< OFF >") : i == MENU_CONTROLS || i == MENU_TESTS || i == MENU_KEYS ? ">"
                       : i == m->key_wait ? "PRESS A KEY..."
                       : is_binding(i) ? (m->key_name[i - MENU_KEY_FIRST][0] ? m->key_name[i - MENU_KEY_FIRST] : "NONE")
-                      : i == MENU_RS_SPEED ? rs : i == MENU_SEGA_SERVER ? sega : i == MENU_ADHOC_SERVER ? adhoc
-                      : i == MENU_ADHOC_MODE ? ADHOC_MODES[m->adhoc_mode % 3]
-                      : i == MENU_MODERN_SERVER ? modern
+                      : i == MENU_RS_SPEED ? rs
                       : i == MENU_RESOLUTION ? res : i == MENU_RENDERER ? ren
                       : i >= MENU_MASTER_VOL && i <= MENU_SFX_VOL ? vol[i - MENU_MASTER_VOL]
                       : i == MENU_ATTENUATION ? att : i == MENU_FONT ? font
@@ -606,13 +589,8 @@ void menu_draw(const menu_state *m, menu_image *img, int game_fps, const char *h
     snprintf(line, sizeof line, "CIRCLE (KEY %.8s): ACCEPT  CROSS (KEY %.8s): BACK", ck, xk);
     menu_text(img, x0 + 10, y, line, GREY);
     y += CELL_H + 2;
-    if (m->sel == MENU_MODERN_SERVER && m->share[0]) {
-        snprintf(line, sizeof line, "JOIN AT %.38s", m->share);   /* what the others type */
-        menu_text(img, x0 + 10, y, line, YELLOW);
-    } else {
-        snprintf(line, sizeof line, "%s / R3: CLOSE   D-PAD / ARROWS: MOVE", hotkey ? hotkey : "F1");
-        menu_text(img, x0 + 10, y, line, GREY);
-    }
+    snprintf(line, sizeof line, "%s / R3: CLOSE   D-PAD / ARROWS: MOVE", hotkey ? hotkey : "F1");
+    menu_text(img, x0 + 10, y, line, GREY);
 }
 
 void fps_draw(const fps_meter *fm, menu_image *img) {

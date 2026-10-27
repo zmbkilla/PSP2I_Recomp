@@ -42,22 +42,16 @@ add_executable(psp2i
     host/menu.c
     host/postfx.c
     host/camera.c
-    host/tls.c
-    host/rpcn.c
-    host/online.c
     host/fbuf.c
-    host/rpcn_rooms.c
     host/savecrypt.c
     host/gamelog.c
+    host/logfile.c
     host/modelx.c
     host/glbread.c
     host/functrace.c
     host/rateaudit.c
     host/prod.c
-    host/login.c
-    host/textedit.c
     host/font_win.c
-    host/web_overlay.cpp
     ${PSPRECOMP_DIR}/tools/allegrexrecomp/decode.c
     gen/recomp_funcs.c
     gen/recomp_imports.c
@@ -89,22 +83,7 @@ if(TARGET psp2i_atrac)
     add_dependencies(psp2i psp2i_atrac)
 endif()
 
-# "Open website": the page over the game window through webview (WebView2 on
-# Windows); fetched at configure time, see cmake/FetchWebView.cmake.
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchWebView.cmake)
-psp2i_fetch_webview(PSP2I_WEBVIEW_INC)
-set_source_files_properties(host/web_overlay.cpp PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/std:c++17>")
-if(PSP2I_WEBVIEW_INC)
-    target_include_directories(psp2i PRIVATE ${PSP2I_WEBVIEW_INC})
-    target_compile_definitions(psp2i PRIVATE PSP2I_WEBVIEW)
-    if(WIN32)
-        target_link_libraries(psp2i PRIVATE advapi32 ole32 shell32 shlwapi user32 version)
-    endif()
-    add_custom_command(TARGET psp2i POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:psp2i>/licenses
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/_deps/webview/LICENSE $<TARGET_FILE_DIR:psp2i>/licenses/webview-LICENSE.txt
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/_deps/webview/WebView2-LICENSE.txt $<TARGET_FILE_DIR:psp2i>/licenses/WebView2-LICENSE.txt)
-elseif(WIN32)
+if(WIN32)
     target_link_libraries(psp2i PRIVATE shell32)
 endif()
 
@@ -154,19 +133,10 @@ endif()
 # Unit tests for the settings menu, the FPS counter and run-time frame-rate
 # switching (no game data needed): ctest -C Release, or run test_menu.
 enable_testing()
-add_executable(test_menu tests/test_menu.c host/menu.c host/postfx.c host/framerate.c host/camera.c host/login.c host/textedit.c)
+add_executable(test_menu tests/test_menu.c host/menu.c host/postfx.c host/framerate.c host/camera.c)
 target_include_directories(test_menu PRIVATE host)
 target_link_libraries(test_menu PRIVATE psprecomp)
 add_test(NAME test_menu COMMAND test_menu)
-
-# rpcn_probe: check an RPCN server (TLS, protocol version, refusal of a bad login).
-# (port/tools/ is local-only, not in the repository: these are skipped without it.)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/rpcn_probe.c)
-    add_executable(rpcn_probe tools/rpcn_probe.c host/rpcn.c host/tls.c)
-    if(WIN32)
-        target_link_libraries(rpcn_probe PRIVATE secur32 crypt32 ws2_32)
-    endif()
-endif()
 
 if(PSP2I_TRACE)
     target_compile_definitions(psp2i PRIVATE PSPRECOMP_TRACE)
