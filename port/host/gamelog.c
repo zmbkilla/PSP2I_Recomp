@@ -542,8 +542,8 @@ static void hook_setdata_cb(void (*original)(void)) {
  * (0x08B2E834 -> ... -> 0x08ABB3A4), ~16 frames after the session server sends
  * the items. On a PSP the host's client reaches its own server through the
  * firmware's P2P stream sockets (tunnelled through NP signaling), slow enough
- * that the items arrive after the scene exists; here (as on PPSSPP and the
- * Vita) they arrive at once and are lost -- the host's inventory is empty.
+ * that the items arrive after the scene exists; here they arrive at once
+ * and are lost -- the host's inventory is empty.
  * So: a 0x0A08 that finds no owner is kept, and handed to the game's own
  * handler as soon as the owner is created. */
 #define ITEM_OWNER  0x08ED8CECu

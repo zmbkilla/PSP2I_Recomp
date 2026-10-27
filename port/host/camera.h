@@ -1,5 +1,5 @@
-/* Right-stick camera, reconstructed from the PPSSPP cheat "Right Analog Camera
- * Support" (rightstick.txt at the project root). See camera.c. */
+/* Right-stick camera, reconstructed from the community cheat code "Right Analog
+ * Camera Support" for PSP2i (rightstick.txt at the project root). See camera.c. */
 #ifndef PSP2I_CAMERA_H
 #define PSP2I_CAMERA_H
 

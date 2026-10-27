@@ -1,11 +1,12 @@
-/* Right-stick camera control, reconstructed natively from the PPSSPP cheat in
- * rightstick.txt (not applied as a memory patch).
+/* Right-stick camera control, reconstructed natively from the community cheat
+ * code for PSP2i in rightstick.txt (not applied as a memory patch).
  *
  * What the cheat does (addresses are 0x08800000 + the cheat offset):
  *
  *   - 0x08D64074 (the pad update 0x08D64068) calls a routine in a code cave
  *     (0x08803940) that reads the right stick from the two spare bytes of
- *     SceCtrlData (sp+0x1A/0x1B, which PPSSPP fills), and for each axis:
+ *     SceCtrlData (sp+0x1A/0x1B, which the emulator it was written for
+ *     fills), and for each axis:
  *     v = byte - 128; v = 0 if -8 <= v <= 7; camX/camY = v / 128 * speed
  *     (speed = the floats at 0x08803908/0C: 1.0, 1.25 or 1.5), stored at
  *     0x08803900/04.

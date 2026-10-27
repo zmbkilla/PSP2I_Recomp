@@ -9,7 +9,7 @@
 # (timing state +0x18 = 30 / fps, set in 0x08B81830). At 30 fps both are 1.0,
 # so the original behaviour is unchanged; at 60 fps the original runs the
 # phase at 4x speed (2x per frame, 2x the frames), and at the game's own
-# 20 fps mode at 0.44x. The PPSSPP 60 FPS cheat swaps the operands the same way.
+# 20 fps mode at 0.44x. The community 60 FPS cheat code swaps the operands the same way.
 0x08A937B4 0x46010043   # div.s $f1, $f0, $f1   (30 / fps)
 
 # 0x08A5C27C: NPC walk-to-point arrival check (0x08A5BBF0 walks an NPC to a

@@ -4,7 +4,7 @@
 # sets it; see port/host/main.c). A branch's alternative may only be 0 (nop:
 # never taken while on); other alternatives must not transfer control.
 #
-# ---- 0: DRAW DISTANCE (engine menu; the PPSSPP "Improved Draw Distance" cheat) ----
+# ---- 0: DRAW DISTANCE (engine menu; the community "Improved Draw Distance" cheat code) ----
 # The game's far distances are short (-600..-2000 by area type, -200 in one
 # scene): these make them -18048 / -3200 / -4000, widen a search radius from 20
 # to 320, take out two "too far: skip" tests and give each object a distance

@@ -85,4 +85,4 @@ touch=off     hide the touch controls for good (a controller is used)
 - **Online play:** RPCN and the SEGA server are on the Windows build only.
 - **The settings menu:** use `psp2i.ini` for now.
 - **Movie video:** movies play their sound over a black picture.
-- **Save encryption:** saves are written unencrypted. They work on the device, but they don't move to or from a PSP, PPSSPP or the Windows build.
+- **Save encryption:** saves are written unencrypted, as on Windows. They move between this and the Windows build, but not to or from a PSP.

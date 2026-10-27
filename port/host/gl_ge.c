@@ -1338,7 +1338,7 @@ static int gl_draw(const psp_gpu_state *st, const psp_gpu_vertex *v, int nverts)
  * rings, the GE state as uniforms, culling by GL. Where the triangles land
  * is not known here, so the whole scissor counts as written.
  *
- * Draws are merged, as PPSSPP's draw engine does: a draw whose state,
+ * Draws are merged (batched): a draw whose state,
  * matrices, lights and culling equal the previous draw's is appended to it
  * -- its vertex bytes after the previous ones (placed a whole number of
  * vertices on, so one base address serves both), its indices moved by that

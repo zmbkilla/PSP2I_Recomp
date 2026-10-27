@@ -72,8 +72,8 @@ The decoder approach was informed by
 frame-comparison harness. This implementation uses psprecomp's existing codec
 interface and demultiplexer.
 
-This SDL host still lacks the Windows settings menu, infrastructure online
-support, and encrypted save compatibility with PSP/PPSSPP/Windows saves.
+This SDL host still lacks the Windows settings menu. Online and ad hoc play are
+not provided, and saves are written unencrypted (as on Windows).
 
 Full-range cutscenes (YUVJ420P, including the Continue path) are normalized to
 studio-range YUV420P before the runtime's BT.601 color conversion. The decoder

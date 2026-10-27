@@ -43,7 +43,6 @@ add_executable(psp2i
     host/postfx.c
     host/camera.c
     host/fbuf.c
-    host/savecrypt.c
     host/gamelog.c
     host/logfile.c
     host/modelx.c

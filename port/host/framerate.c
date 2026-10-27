@@ -11,7 +11,7 @@
  *
  * At a 60 fps target the hook turns requests for 30 and 20 into 60 before the
  * original runs, so all the derived timing is consistent with 60 -- the
- * same places the PPSSPP 60 FPS cheat rewrites one constant at a time
+ * same places the community 60 FPS cheat code rewrites one constant at a time
  * (0x0896E914, 0x08B24A50, 0x08B34B04/08/78, 0x08B82284, the table bytes).
  * The 20 fps fallback exists for the PSP's CPU budget, which a native port
  * does not have. 15 (the table's slow modes) is left as the game asks.

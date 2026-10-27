@@ -81,7 +81,6 @@
 #include "menu.h"
 #include "font_win.h"
 #include "camera.h"
-#include "savecrypt.h"
 #include "gamelog.h"
 #include "logfile.h"
 #include "functrace.h"
@@ -441,7 +440,7 @@ static int g_gpu_vertex = 1;                /* menu VERTEX WORK (vertex_work=gpu
 static postfx g_post = { PF_NEAREST, 0, PF_OFF, PF_OFF, 10, 10 };   /* menu GRAPHICS post-processing (postfx.h) */
 
 /* Once per vblank: the DRAW DISTANCE switch (port/switches.txt, switch 0). The
- * PPSSPP cheat it comes from is reported to corrupt the UI while saving, so
+ * cheat code it comes from is reported to corrupt the UI while saving, so
  * it stays off while the savedata utility runs and for 3 s after. */
 static void draw_dist_apply(void) {
     static uint64_t quiet_until;
@@ -2818,9 +2817,8 @@ int main(int argc, char **argv) {
 #endif
     framerate_set_tests(g_test_ticks, g_test_logic);
     camera_init(menu_rs_speed(&g_menu));
-    /* PSP savedata encryption: saves interchangeable with a PSP / PPSSPP */
-    static const psp_savedata_crypto SAVE_CRYPTO = { savecrypt_decrypt, savecrypt_encrypt, savecrypt_sfo_hash };
-    psp_savedata_set_crypto(&SAVE_CRYPTO);
+    /* Saves are written plain: no savedata encryption here (an encrypted save is
+     * backed up before the game writes over it; see psprecomp utility.c). */
     psp_net_set_forced_off(1);            /* no online play: the WLAN switch reads off */
     gamelog_init(dir);
     modelx_init();                        /* model names as packages load (EXTRACT MODELS) */

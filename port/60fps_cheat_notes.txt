@@ -1,4 +1,4 @@
-Phantasy Star Portable 2 Infinity (NPJH50332) -- notes on the PPSSPP "60 FPS Patch" cheat
+Phantasy Star Portable 2 Infinity (NPJH50332) -- notes on the community "60 FPS Patch" cheat code
 ==========================================================================================
 
 Source: reverse-engineering done while statically recompiling the game (psprecomp port).
@@ -125,7 +125,7 @@ similar), please report what and where. That would tell us what byte +12 at
 ----------
 
   - This analysis is static, plus testing in the recompiled port; it has not been
-    play-tested in PPSSPP. Movement speed, animation rate and timers at 60 fps still
+    play-tested in an emulator. Movement speed, animation rate and timers at 60 fps still
     need confirming in a scene that actually sustains 60.
   - The game assumes it reaches its target frame rate. Per-frame steps are fixed from the
     target, not measured, so if the emulator cannot sustain 60 the whole game runs slower
